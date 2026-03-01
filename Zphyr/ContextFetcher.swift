@@ -29,30 +29,10 @@ struct ContextFetcher {
         )
         guard focusResult == .success, let element = axElement(from: focusedElement) else { return [] }
 
-        // Try selected text first (most relevant)
+        // Only use selected text (privacy-first): avoid collecting full field/window content.
         if let selected = stringAttribute(element, attribute: kAXSelectedTextAttribute) {
             let tokens = extractTokens(from: selected)
             if !tokens.isEmpty { return tokens }
-        }
-
-        // Fall back to full value of the focused field
-        if let value = stringAttribute(element, attribute: kAXValueAttribute) {
-            return extractTokens(from: value)
-        }
-
-        // Try the focused window's document text as last resort
-        var frontApp: AnyObject?
-        AXUIElementCopyAttributeValue(systemElement, kAXFocusedApplicationAttribute as CFString, &frontApp)
-        if let app = axElement(from: frontApp) {
-            var focusedWindow: AnyObject?
-            AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &focusedWindow)
-            if let window = axElement(from: focusedWindow) {
-                var document: AnyObject?
-                AXUIElementCopyAttributeValue(window, kAXDocumentAttribute as CFString, &document)
-                if let doc = document as? String {
-                    return extractTokens(from: doc)
-                }
-            }
         }
 
         return []

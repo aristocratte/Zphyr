@@ -295,7 +295,7 @@ private struct DotBar: View {
         RoundedRectangle(cornerRadius: 2)
             .fill(Color.white.opacity(0.7 + Double(display) * 0.3))
             .frame(width: 3.5, height: max(4, display * 22))
-            .animation(.spring(response: 0.14, dampingFraction: 0.58), value: display)
+            .animation(.linear(duration: 0.08), value: display)
             .onAppear { display = level }
             .onChange(of: level) { _, v in display = v }
     }

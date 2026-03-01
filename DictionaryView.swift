@@ -55,7 +55,7 @@ final class DictionaryStore {
                 existing.spokenAs = cleanedSpoken
                 entries[idx] = existing
                 save()
-                Self.logger.notice("[DictionaryStore] merged spokenAs for word=\(cleanedWord, privacy: .public), spokenAs=\(cleanedSpoken, privacy: .public)")
+                Self.logger.notice("[DictionaryStore] merged spokenAs for word=\(cleanedWord, privacy: .private(mask: .hash)), spokenAs=\(cleanedSpoken, privacy: .private(mask: .hash))")
             }
             return
         }
@@ -63,7 +63,7 @@ final class DictionaryStore {
         let entry = DictionaryEntry(word: cleanedWord, spokenAs: cleanedSpoken)
         entries.append(entry)
         save()
-        Self.logger.notice("[DictionaryStore] added word=\(cleanedWord, privacy: .public), spokenAs=\(cleanedSpoken, privacy: .public)")
+        Self.logger.notice("[DictionaryStore] added word=\(cleanedWord, privacy: .private(mask: .hash)), spokenAs=\(cleanedSpoken, privacy: .private(mask: .hash))")
     }
 
     func remove(at offsets: IndexSet) {

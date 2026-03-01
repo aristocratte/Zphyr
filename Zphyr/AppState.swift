@@ -272,8 +272,13 @@ final class AppState {
         }
     }
 
+    private var lastAudioLevelRefresh: Date = .distantPast
+
     // MARK: - Audio levels helper (called from audio thread)
     func updateAudioLevels(_ levels: [Float]) {
+        let now = Date()
+        guard now.timeIntervalSince(lastAudioLevelRefresh) >= 0.08 else { return }
+        lastAudioLevelRefresh = now
         let mapped = levels.prefix(28).map { CGFloat($0) }
         let padded = mapped + Array(repeating: 0.15, count: max(0, 28 - mapped.count))
         audioLevels = padded
@@ -286,7 +291,7 @@ final class AppState {
         guard !mistaken.isEmpty, !corrected.isEmpty else { return }
         guard mistaken.caseInsensitiveCompare(corrected) != .orderedSame else { return }
         guard !DictionaryStore.shared.containsMapping(mistakenWord: mistaken, correctedWord: corrected) else {
-            Self.dictionaryLogger.notice("[DictionarySuggestion] ignored (already in dictionary): \(mistaken, privacy: .public) -> \(corrected, privacy: .public)")
+            Self.dictionaryLogger.notice("[DictionarySuggestion] ignored (already in dictionary): \(mistaken, privacy: .private(mask: .hash)) -> \(corrected, privacy: .private(mask: .hash))")
             return
         }
 
@@ -301,7 +306,7 @@ final class AppState {
         }
 
         pendingDictionarySuggestion = suggestion
-        Self.dictionaryLogger.notice("[DictionarySuggestion] presenting: \(mistaken, privacy: .public) -> \(corrected, privacy: .public)")
+        Self.dictionaryLogger.notice("[DictionarySuggestion] presenting: \(mistaken, privacy: .private(mask: .hash)) -> \(corrected, privacy: .private(mask: .hash))")
         DictionarySuggestionOverlayController.shared.present(suggestion)
     }
 

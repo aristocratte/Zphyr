@@ -71,6 +71,7 @@ final class DictationEngine {
     private var targetApp: NSRunningApplication?
     private var correctionMonitorTask: Task<Void, Never>?
     private var modelLoadTask: Task<Void, Never>?
+    private var lastAudioLevelUpdateAt: Date = .distantPast
 
     private init() {}
 
@@ -343,7 +344,9 @@ final class DictationEngine {
             guard status != .error, let channelData = outBuffer.floatChannelData?[0] else { return }
             let frameCount = Int(outBuffer.frameLength)
             let samples = Array(UnsafeBufferPointer(start: channelData, count: frameCount))
-            self.audioBuffer.append(contentsOf: samples)
+            Task { @MainActor in
+                self.audioBuffer.append(contentsOf: samples)
+            }
 
             // RMS spectrum for HUD (computed on the original hwBuffer for responsiveness)
             guard let hwChannel = hwBuffer.floatChannelData?[0] else { return }
@@ -356,10 +359,17 @@ final class DictationEngine {
                 let end   = min(start + bandSize, hwFrames)
                 guard start < end else { levels.append(0.1); continue }
                 let slice = UnsafeBufferPointer(start: hwChannel + start, count: end - start)
-                let rms   = sqrt(slice.map { $0 * $0 }.reduce(0, +) / Float(slice.count))
-                levels.append(min(1.0, rms * 14))
+                var peak: Float = 0
+                for sample in slice {
+                    peak = max(peak, abs(sample))
+                }
+                levels.append(min(1.0, peak * 8))
             }
-            Task { @MainActor in AppState.shared.updateAudioLevels(levels) }
+            let now = Date()
+            if now.timeIntervalSince(self.lastAudioLevelUpdateAt) >= 0.08 {
+                self.lastAudioLevelUpdateAt = now
+                Task { @MainActor in AppState.shared.updateAudioLevels(levels) }
+            }
         }
 
         engine.prepare()
@@ -382,55 +392,60 @@ final class DictationEngine {
 
     private func runWhisperTranscription() async -> String {
         guard let wk = whisperKit, !audioBuffer.isEmpty else { return "" }
-
-        // Fetch code context from the frontmost app
-        let tokens = ContextFetcher.fetchCodeTokens()
         let lang = AppState.shared.selectedLanguage.id
-        Self.pipelineLogger.notice("[Dictation] decoding language=\(lang, privacy: .public)")
-        let prompt = ContextFetcher.buildWhisperPrompt(language: lang, tokens: tokens)
+        let audioSnapshot = audioBuffer
 
-        let options = DecodingOptions(
-            task: .transcribe,
-            language: lang,
-            temperature: 0.0,
-            temperatureFallbackCount: 3,
-            sampleLength: 224,
-            usePrefillPrompt: !prompt.isEmpty,
-            usePrefillCache: true,
-            skipSpecialTokens: true,
-            withoutTimestamps: true,
-            compressionRatioThreshold: 2.4,
-            logProbThreshold: -1.0,
-            firstTokenLogProbThreshold: -1.5,
-            noSpeechThreshold: 0.6
-        )
-
-        do {
-            // Pass initial_prompt for code context
-            let results: [TranscriptionResult]
-            if !prompt.isEmpty {
-                results = try await wk.transcribe(
-                    audioArray: audioBuffer,
-                    decodeOptions: options,
-                    callback: nil
-                )
-            } else {
-                results = try await wk.transcribe(audioArray: audioBuffer, decodeOptions: options)
+        return await Task.detached(priority: .userInitiated) {
+            Self.pipelineLogger.notice("[Dictation] decoding language=\(lang, privacy: .public)")
+            let tokens = ContextFetcher.fetchCodeTokens()
+            let prompt = await MainActor.run {
+                ContextFetcher.buildWhisperPrompt(language: lang, tokens: tokens)
             }
-            return results.compactMap { $0.text }.joined(separator: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch {
-            AppState.shared.error = L10n.ui(
-                for: AppState.shared.selectedLanguage.id,
-                fr: "Transcription échouée : \(error.localizedDescription)",
-                en: "Transcription failed: \(error.localizedDescription)",
-                es: "La transcripción falló: \(error.localizedDescription)",
-                zh: "转写失败：\(error.localizedDescription)",
-                ja: "文字起こしに失敗しました: \(error.localizedDescription)",
-                ru: "Ошибка транскрибации: \(error.localizedDescription)"
+
+            let options = DecodingOptions(
+                task: .transcribe,
+                language: lang,
+                temperature: 0.0,
+                temperatureFallbackCount: 3,
+                sampleLength: 224,
+                usePrefillPrompt: !prompt.isEmpty,
+                usePrefillCache: true,
+                skipSpecialTokens: true,
+                withoutTimestamps: true,
+                compressionRatioThreshold: 2.4,
+                logProbThreshold: -1.0,
+                firstTokenLogProbThreshold: -1.5,
+                noSpeechThreshold: 0.6
             )
-            return ""
-        }
+
+            do {
+                let results: [TranscriptionResult]
+                if !prompt.isEmpty {
+                    results = try await wk.transcribe(
+                        audioArray: audioSnapshot,
+                        decodeOptions: options,
+                        callback: nil
+                    )
+                } else {
+                    results = try await wk.transcribe(audioArray: audioSnapshot, decodeOptions: options)
+                }
+                return results.compactMap { $0.text }.joined(separator: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            } catch {
+                await MainActor.run {
+                    AppState.shared.error = L10n.ui(
+                        for: AppState.shared.selectedLanguage.id,
+                        fr: "Transcription échouée : \(error.localizedDescription)",
+                        en: "Transcription failed: \(error.localizedDescription)",
+                        es: "La transcripción falló: \(error.localizedDescription)",
+                        zh: "转写失败：\(error.localizedDescription)",
+                        ja: "文字起こしに失敗しました: \(error.localizedDescription)",
+                        ru: "Ошибка транскрибации: \(error.localizedDescription)"
+                    )
+                }
+                return ""
+            }
+        }.value
     }
 
     // MARK: - Post-processing
@@ -1071,22 +1086,14 @@ final class DictationEngine {
 
     // MARK: - Text Injection
 
-    /// Activates the target app, waits for it to become frontmost, then pastes via Cmd+V.
+    /// Activates the target app, waits for it to become frontmost, then inserts text via synthesized key events.
     private func insertIntoTargetApp(_ text: String) async {
-        let pb = NSPasteboard.general
-        let previous = pb.string(forType: .string)
-        Self.pipelineLogger.notice("[Insert] preparing paste; textLength=\(text.count) target=\(self.targetApp?.bundleIdentifier ?? "nil", privacy: .public)")
+        Self.pipelineLogger.notice("[Insert] preparing secure text injection; textLength=\(text.count) target=\(self.targetApp?.bundleIdentifier ?? "nil", privacy: .public)")
 
-        // Write to clipboard
-        pb.clearContents()
-        pb.setString(text, forType: .string)
-
-        // Re-activate the app that was focused when recording started
         if let app = targetApp, !app.isTerminated {
             let activated = app.activate(options: [.activateIgnoringOtherApps])
             Self.pipelineLogger.notice("[Insert] activate target app result=\(activated ? "success" : "failed", privacy: .public)")
 
-            // Wait briefly until the app is actually frontmost before firing Cmd+V.
             var didBecomeFrontmost = false
             for _ in 0..<12 {
                 if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
@@ -1096,34 +1103,18 @@ final class DictationEngine {
                 try? await Task.sleep(for: .milliseconds(35))
             }
             Self.pipelineLogger.notice("[Insert] target frontmost=\(didBecomeFrontmost ? "yes" : "no", privacy: .public)")
-            try? await Task.sleep(for: .milliseconds(220))
+            try? await Task.sleep(for: .milliseconds(140))
         }
 
-        // Simulate Cmd+V
-        Self.pipelineLogger.notice("[Insert] posting Cmd+V")
-        simulatePaste()
+        Self.pipelineLogger.notice("[Insert] posting secure typing events")
+        simulateTyping(text)
         startCorrectionLearningMonitor(originalInsertedText: text)
-
-        // Restore clipboard after a short delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            pb.clearContents()
-            if let prev = previous { pb.setString(prev, forType: .string) }
-            Self.pipelineLogger.notice("[Insert] clipboard restored")
-        }
     }
 
-    /// Fires a Cmd+V key event at the HID system level.
+    /// Inserts text at cursor without using the global clipboard.
     func insertTextAtCursor(_ text: String) {
-        let pb = NSPasteboard.general
-        let previous = pb.string(forType: .string)
-        pb.clearContents()
-        pb.setString(text, forType: .string)
-        simulatePaste()
+        simulateTyping(text)
         startCorrectionLearningMonitor(originalInsertedText: text)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            pb.clearContents()
-            if let prev = previous { pb.setString(prev, forType: .string) }
-        }
     }
 
     /// Monitors focused text changes shortly after insertion and proposes dictionary learning
@@ -1168,15 +1159,15 @@ final class DictationEngine {
             let monitorStartedAt = Date()
             var lastTextChangeAt = Date()
             var lastAnalyzedValue: String?
-            let stabilizationDelay: TimeInterval = 1.2
-            let inactivityTimeout: TimeInterval = 30
-            let maxMonitorDuration: TimeInterval = 120
+            let stabilizationDelay: TimeInterval = 1.0
+            let inactivityTimeout: TimeInterval = 12
+            let maxMonitorDuration: TimeInterval = 25
             let monitoredPID = await MainActor.run {
                 NSWorkspace.shared.frontmostApplication?.processIdentifier
             }
 
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(350))
+                try? await Task.sleep(for: .milliseconds(700))
 
                 let now = Date()
                 if now.timeIntervalSince(monitorStartedAt) >= maxMonitorDuration {
@@ -1226,7 +1217,7 @@ final class DictationEngine {
 
                 if let suggestion = Self.detectWordReplacement(from: baseline, to: currentValue) {
                     if Self.containsLearningToken(suggestion.mistakenWord, in: originalInsertedText) {
-                        Self.learningLogger.notice("[DictionaryLearning] suggestion detected: \(suggestion.mistakenWord, privacy: .public) -> \(suggestion.correctedWord, privacy: .public)")
+                        Self.learningLogger.notice("[DictionaryLearning] suggestion detected: \(suggestion.mistakenWord, privacy: .private(mask: .hash)) -> \(suggestion.correctedWord, privacy: .private(mask: .hash))")
                         await MainActor.run {
                             AppState.shared.proposeDictionarySuggestion(
                                 mistakenWord: suggestion.mistakenWord,
@@ -1407,7 +1398,7 @@ final class DictationEngine {
             return nil
         }
 
-        var range = CFRange(location: 0, length: min(charCount, 120_000))
+        var range = CFRange(location: 0, length: min(charCount, 12_000))
         guard let rangeValue = AXValueCreate(.cfRange, &range) else { return nil }
 
         var outValue: AnyObject?
@@ -1549,14 +1540,17 @@ final class DictationEngine {
         return regex.firstMatch(in: text, range: range) != nil
     }
 
-    private func simulatePaste() {
-        let src = CGEventSource(stateID: .hidSystemState)
-        let vKeyCode: CGKeyCode = 0x09  // V
-        let down = CGEvent(keyboardEventSource: src, virtualKey: vKeyCode, keyDown: true)
-        let up   = CGEvent(keyboardEventSource: src, virtualKey: vKeyCode, keyDown: false)
-        down?.flags = .maskCommand
-        up?.flags   = .maskCommand
-        down?.post(tap: .cghidEventTap)
-        up?.post(tap: .cghidEventTap)
+    private func simulateTyping(_ text: String) {
+        guard let src = CGEventSource(stateID: .hidSystemState) else { return }
+        for scalar in text.unicodeScalars {
+            let codeUnit = UniChar(scalar.value)
+            guard let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true),
+                  let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false) else { continue }
+            var mutable = codeUnit
+            keyDown.keyboardSetUnicodeString(stringLength: 1, unicodeString: &mutable)
+            keyUp.keyboardSetUnicodeString(stringLength: 1, unicodeString: &mutable)
+            keyDown.post(tap: .cghidEventTap)
+            keyUp.post(tap: .cghidEventTap)
+        }
     }
 }

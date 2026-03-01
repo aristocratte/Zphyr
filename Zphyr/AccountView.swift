@@ -2,11 +2,12 @@
 //  AccountView.swift
 //  Zphyr
 //
-//  Dev-mode login: credentials stored in UserDefaults (no real backend).
-//  Toggle DEV_MODE to swap in a real auth layer later.
+//  Local account auth: email + hashed password stored on-device.
+//  No remote backend integration in this screen.
 //
 
 import SwiftUI
+import CryptoKit
 
 // MARK: - Auth state
 
@@ -25,23 +26,30 @@ final class AuthState {
         return parts.compactMap { $0.first.map(String.init) }.prefix(2).joined().uppercased()
     }
 
-    // Dev-mode credentials (accepted as valid)
-    private let devEmail    = "dev@zphyr.app"
-    private let devPassword = "zphyr2026"
+    private let emailKey = "zphyr.auth.registered.email"
+    private let passwordHashKey = "zphyr.auth.registered.passwordHash"
 
     func login(email: String, password: String) -> Bool {
-        let ok = (email.lowercased() == devEmail && password == devPassword)
-            || (!email.isEmpty && password.count >= 4)   // any creds work in dev
+        let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let ok = verifyCredentials(email: normalizedEmail, password: password)
         if ok {
-            self.email = email
-            self.displayName = email.components(separatedBy: "@").first?
+            self.email = normalizedEmail
+            self.displayName = normalizedEmail.components(separatedBy: "@").first?
                 .replacingOccurrences(of: ".", with: " ")
-                .capitalized ?? email
-            self.plan = email == devEmail ? "Dev" : "Beta"
+                .capitalized ?? normalizedEmail
+            self.plan = "Beta"
             self.isLoggedIn = true
             save()
         }
         return ok
+    }
+
+    func register(email: String, password: String) -> Bool {
+        let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedEmail.isEmpty, password.count >= 8 else { return false }
+        UserDefaults.standard.set(normalizedEmail, forKey: emailKey)
+        UserDefaults.standard.set(Self.hash(password), forKey: passwordHashKey)
+        return login(email: normalizedEmail, password: password)
     }
 
     func logout() {
@@ -66,6 +74,19 @@ final class AuthState {
             plan = UserDefaults.standard.string(forKey: "zphyr.auth.plan") ?? "Beta"
             isLoggedIn = true
         }
+    }
+
+    private func verifyCredentials(email: String, password: String) -> Bool {
+        guard let storedEmail = UserDefaults.standard.string(forKey: emailKey),
+              let storedPasswordHash = UserDefaults.standard.string(forKey: passwordHashKey) else {
+            return false
+        }
+        return email == storedEmail && Self.hash(password) == storedPasswordHash
+    }
+
+    private static func hash(_ value: String) -> String {
+        let digest = SHA256.hash(data: Data(value.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -123,7 +144,7 @@ private struct LoginView: View {
                         Text(t("Connexion à Zphyr", "Sign in to Zphyr", "Iniciar sesión en Zphyr", "登录 Zphyr", "Zphyr にサインイン", "Вход в Zphyr"))
                             .font(.system(size: 22, weight: .bold))
                             .foregroundColor(Color(hex: "#1A1A1A"))
-                        Text(t("Mode développeur actif", "Developer mode enabled", "Modo desarrollador activo", "开发者模式已启用", "開発者モード有効", "Режим разработчика включен"))
+                        Text(t("Connexion locale sécurisée", "Secure local sign in", "Inicio de sesión local seguro", "安全的本地登录", "安全なローカルサインイン", "Безопасный локальный вход"))
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(Color(hex: "#888880"))
                             .padding(.horizontal, 10)
@@ -145,7 +166,7 @@ private struct LoginView: View {
                             Image(systemName: "envelope")
                                 .font(.system(size: 13))
                                 .foregroundColor(Color(hex: "#AAAAAA"))
-                            TextField("dev@zphyr.app", text: $email)
+                            TextField("you@example.com", text: $email)
                                 .textFieldStyle(.plain)
                                 .font(.system(size: 13))
                                 .focused($focused, equals: .email)
@@ -227,23 +248,33 @@ private struct LoginView: View {
                     .disabled(email.isEmpty || password.isEmpty || isLoading)
                 }
 
-                // Dev hint
+                // Local account setup
                 VStack(spacing: 4) {
-                    Text(t("Identifiants dev disponibles", "Available dev credentials", "Credenciales dev disponibles", "可用开发者凭据", "開発用認証情報", "Доступные dev-учетные данные"))
+                    Text(t("Pas encore de compte ?", "No account yet?", "¿Aún no tienes cuenta?", "还没有账户？", "まだアカウントがありませんか？", "Ещё нет аккаунта?"))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(Color(hex: "#AAAAAA"))
-                    Text("dev@zphyr.app · zphyr2026")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(Color(hex: "#BBBBBB"))
-                    Text(t("(ou n'importe quel email + mot de passe ≥ 4 caractères)",
-                           "(or any email + password with at least 4 characters)",
-                           "(o cualquier email + contraseña de al menos 4 caracteres)",
-                           "（或任意邮箱 + 至少 4 位密码）",
-                           "（または任意のメール + 4文字以上のパスワード）",
-                           "(или любой email + пароль от 4 символов)"))
+                    Text(t("Créez un compte local avec cet email et un mot de passe (8 caractères minimum).",
+                           "Create a local account with this email and a password (8 characters minimum).",
+                           "Crea una cuenta local con este email y una contraseña (mínimo 8 caracteres).",
+                           "使用此邮箱和密码创建本地账户（至少 8 个字符）。",
+                           "このメールアドレスとパスワード（8文字以上）でローカルアカウントを作成します。",
+                           "Создайте локальную учетную запись с этим email и паролем (минимум 8 символов)."))
                         .font(.system(size: 10))
                         .foregroundColor(Color(hex: "#CCCCCC"))
                         .multilineTextAlignment(.center)
+                    Button {
+                        guard AuthState.shared.register(email: email, password: password) else {
+                            error = t("Échec de création du compte (mot de passe ≥ 8).", "Failed to create account (password must be at least 8 chars).", "No se pudo crear la cuenta (contraseña de al menos 8 caracteres).", "创建账户失败（密码至少 8 位）。", "アカウント作成に失敗しました（パスワードは8文字以上）。", "Не удалось создать аккаунт (пароль не менее 8 символов).")
+                            return
+                        }
+                        error = ""
+                    } label: {
+                        Text(t("Créer un compte local", "Create local account", "Crear cuenta local", "创建本地账户", "ローカルアカウントを作成", "Создать локальный аккаунт"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(Color(hex: "#1A1A1A"))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(email.isEmpty || password.count < 8 || isLoading)
                 }
                 .padding(12)
                 .background(Color(hex: "#FF9500").opacity(0.06))

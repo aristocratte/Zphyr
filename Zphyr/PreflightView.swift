@@ -91,6 +91,10 @@ struct PreflightView: View {
     @State private var dictShowCorrected: Bool = false
     @State private var styleIndex: Int = 0
 
+    @State private var permissionPollTask: Task<Void, Never>? = nil
+    @State private var demoToggleTask: Task<Void, Never>? = nil
+    @State private var styleCycleTask: Task<Void, Never>? = nil
+
     private var modelStatus: ModelStatus    { AppState.shared.modelStatus }
     private var downloadStats: DownloadStats { AppState.shared.downloadStats }
     private var lang: String                 { AppState.shared.selectedLanguage.id }
@@ -134,9 +138,13 @@ struct PreflightView: View {
         }
         .colorScheme(.light)
         .onChange(of: currentSlide) { _, newSlide in
+            permissionPollTask?.cancel()
+            demoToggleTask?.cancel()
+            styleCycleTask?.cancel()
+
             if newSlide == .permissions {
-                Task {
-                    while currentSlide == .permissions {
+                permissionPollTask = Task {
+                    while !Task.isCancelled, currentSlide == .permissions {
                         AppState.shared.refreshMicPermission()
                         AppState.shared.refreshAccessibility()
                         try? await Task.sleep(for: .seconds(1))
@@ -164,6 +172,11 @@ struct PreflightView: View {
             if newSlide == .demos {
                 startDemoAnimations()
             }
+        }
+        .onDisappear {
+            permissionPollTask?.cancel()
+            demoToggleTask?.cancel()
+            styleCycleTask?.cancel()
         }
     }
 
@@ -523,8 +536,8 @@ struct PreflightView: View {
         }
 
         // Dictionary auto-toggle
-        Task { @MainActor in
-            while currentSlide == .demos {
+        demoToggleTask = Task { @MainActor in
+            while !Task.isCancelled, currentSlide == .demos {
                 try? await Task.sleep(for: .seconds(2))
                 guard currentSlide == .demos else { return }
                 withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
@@ -534,8 +547,8 @@ struct PreflightView: View {
         }
 
         // Style auto-cycle
-        Task { @MainActor in
-            while currentSlide == .demos {
+        styleCycleTask = Task { @MainActor in
+            while !Task.isCancelled, currentSlide == .demos {
                 try? await Task.sleep(for: .seconds(2))
                 guard currentSlide == .demos else { return }
                 withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
