@@ -94,6 +94,7 @@ struct PreflightView: View {
     @State private var permissionPollTask: Task<Void, Never>? = nil
     @State private var demoToggleTask: Task<Void, Never>? = nil
     @State private var styleCycleTask: Task<Void, Never>? = nil
+    @State private var showModelTest = false
 
     private var modelStatus: ModelStatus    { AppState.shared.modelStatus }
     private var downloadStats: DownloadStats { AppState.shared.downloadStats }
@@ -177,6 +178,11 @@ struct PreflightView: View {
             permissionPollTask?.cancel()
             demoToggleTask?.cancel()
             styleCycleTask?.cancel()
+        }
+        .sheet(isPresented: $showModelTest) {
+            ModelTestView()
+                .frame(width: 760, height: 520)
+                .background(Color.zBg)
         }
     }
 
@@ -1476,6 +1482,28 @@ struct PreflightView: View {
                     icon: "arrow.clockwise",
                     text: t("1 seul téléchargement", "One-time", "Una vez", "仅一次", "一度だけ", "Один раз")
                 )
+            }
+
+            if modelStatus.isReady {
+                Button {
+                    showModelTest = true
+                } label: {
+                    Label(
+                        t("Tester le micro", "Test microphone", "Probar micrófono", "测试麦克风", "マイクをテスト", "Проверить микрофон"),
+                        systemImage: "mic.badge.checkmark"
+                    )
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Color.zText)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 9)
+                    .background(Color.white)
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule().stroke(Color.zBorder, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 12)
             }
 
             // Retry on failure

@@ -13,9 +13,7 @@ import SwiftUI
 
 struct ContentView: View {
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
-    // Becomes true only when the user taps "Ouvrir Zphyr" on the preflight's last slide.
-    // Stored in-memory only — preflight runs once per app session until explicitly dismissed.
-    @State private var hasCompletedPreflight = false
+    @AppStorage("hasCompletedPreflight") private var hasCompletedPreflight = false
 
     var body: some View {
         Group {

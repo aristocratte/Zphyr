@@ -9,6 +9,7 @@
 
 import SwiftUI
 import os
+import UniformTypeIdentifiers
 
 // MARK: - Dictionary Entry model
 
@@ -32,7 +33,7 @@ final class DictionaryStore {
     static let shared = DictionaryStore()
     private nonisolated static let logger = Logger(subsystem: "com.zphyr.app", category: "DictionaryStore")
 
-    private let key = "zphyr.dictionary.entries"
+    static let storageKey = "zphyr.dictionary.entries"
     var entries: [DictionaryEntry] = []
 
     private init() {
@@ -78,6 +79,15 @@ final class DictionaryStore {
         }
     }
 
+    func clearAll() {
+        entries = []
+        SecureLocalDataStore.removeValue(forKey: Self.storageKey)
+    }
+
+    func reloadFromDisk() {
+        load()
+    }
+
     /// Returns all words/phrases for injection into the Whisper prompt.
     var wordsForPrompt: [String] {
         var seen = Set<String>()
@@ -118,13 +128,16 @@ final class DictionaryStore {
 
     private func save() {
         if let data = try? JSONEncoder().encode(entries) {
-            UserDefaults.standard.set(data, forKey: key)
+            _ = SecureLocalDataStore.save(data, forKey: Self.storageKey)
         }
     }
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: key),
-              let decoded = try? JSONDecoder().decode([DictionaryEntry].self, from: data) else { return }
+        guard let data = SecureLocalDataStore.load(forKey: Self.storageKey),
+              let decoded = try? JSONDecoder().decode([DictionaryEntry].self, from: data) else {
+            entries = []
+            return
+        }
         entries = decoded
     }
 }
@@ -137,6 +150,16 @@ struct DictionaryView: View {
 
     @State private var showAddSheet = false
     @State private var editingEntry: DictionaryEntry?
+    @State private var searchText = ""
+
+    private var filteredEntries: [DictionaryEntry] {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return store.entries }
+        return store.entries.filter {
+            $0.word.localizedCaseInsensitiveContains(q) ||
+            $0.spokenAs.localizedCaseInsensitiveContains(q)
+        }
+    }
 
     var body: some View {
         let _ = appState.selectedLanguage.id
@@ -160,33 +183,96 @@ struct DictionaryView: View {
                         .lineSpacing(2)
                 }
                 Spacer()
-                Button {
-                    showAddSheet = true
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(t("Ajouter", "Add", "Añadir", "添加", "追加", "Добавить"))
-                            .font(.system(size: 13, weight: .semibold))
+                HStack(spacing: 8) {
+                    if !store.entries.isEmpty {
+                        Button {
+                            exportDictionary()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "square.and.arrow.up")
+                                    .font(.system(size: 11, weight: .medium))
+                                Text(t("Exporter", "Export", "Exportar", "导出", "エクスポート", "Экспорт"))
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .foregroundColor(Color(hex: "#888880"))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Color(hex: "#1A1A1A"))
-                    .clipShape(Capsule())
+
+                    Button {
+                        showAddSheet = true
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(t("Ajouter", "Add", "Añadir", "添加", "追加", "Добавить"))
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Color(hex: "#1A1A1A"))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
             .padding(.horizontal, 28)
             .padding(.top, 28)
-            .padding(.bottom, 16)
+            .padding(.bottom, 12)
+
+            // Search bar (only when there are entries)
+            if !store.entries.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(hex: "#AAAAAA"))
+                    TextField(
+                        t("Rechercher…", "Search…", "Buscar…", "搜索…", "検索…", "Поиск…"),
+                        text: $searchText
+                    )
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    if !searchText.isEmpty {
+                        Button { searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundColor(Color(hex: "#CCCCCC"))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.white)
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(hex: "#E5E5E0"), lineWidth: 1))
+                .padding(.horizontal, 28)
+                .padding(.bottom, 12)
+            }
 
             if store.entries.isEmpty {
                 emptyState
+            } else if filteredEntries.isEmpty {
+                // No results state
+                VStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 28, weight: .light))
+                        .foregroundColor(Color(hex: "#CCCCCC"))
+                    Text(t("Aucun résultat pour « \(searchText) »",
+                           "No results for \"\(searchText)\"",
+                           "Sin resultados para \"\(searchText)\"",
+                           "没有找到\"\(searchText)\"",
+                           "「\(searchText)」の結果なし",
+                           "Нет результатов для «\(searchText)»"))
+                        .font(.system(size: 13))
+                        .foregroundColor(Color(hex: "#AAAAAA"))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     VStack(spacing: 8) {
-                        ForEach(store.entries) { entry in
+                        ForEach(filteredEntries) { entry in
                             DictionaryEntryRow(entry: entry) {
                                 editingEntry = entry
                             } onDelete: {
@@ -211,6 +297,21 @@ struct DictionaryView: View {
             DictionaryEntrySheet(entry: entry) { updated in
                 store.update(updated)
             }
+        }
+    }
+
+    private func exportDictionary() {
+        let lines = store.entries.map { entry in
+            entry.spokenAs.isEmpty ? entry.word : "\(entry.word)\t\(entry.spokenAs)"
+        }
+        let header = "# Zphyr Dictionary Export\n# Format: word[TAB]spoken_as\n\n"
+        let content = header + lines.joined(separator: "\n")
+        let panel = NSSavePanel()
+        panel.title = t("Exporter le dictionnaire", "Export dictionary", "Exportar diccionario", "导出词典", "辞書をエクスポート", "Экспорт словаря")
+        panel.nameFieldStringValue = "zphyr-dictionary.txt"
+        panel.allowedContentTypes = [.plainText]
+        if panel.runModal() == .OK, let url = panel.url {
+            try? content.write(to: url, atomically: true, encoding: .utf8)
         }
     }
 

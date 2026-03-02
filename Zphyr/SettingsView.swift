@@ -280,7 +280,7 @@ struct SystemSettingsContent: View {
             SettingsCard {
                 SettingsRow(icon: "cpu", iconColor: Color(hex: "#007AFF"),
                             title: t("Modèle Whisper", "Whisper model", "Modelo Whisper", "Whisper 模型", "Whisper モデル", "Модель Whisper"),
-                            subtitle: "openai/whisper-large-v3-turbo · 809M",
+                            subtitle: "openai/whisper-large-v3-turbo · 632 MB",
                             showDivider: false) {
                     modelStatusBadge
                 }
@@ -426,6 +426,8 @@ struct ShortcutSettingsContent: View {
 
 struct PrivacySettingsContent: View {
     private var lang: String { AppState.shared.uiDisplayLanguage.rawValue }
+    @State private var showDeleteConfirm = false
+    @State private var encryptLocalData = SecureLocalDataStore.isEncryptionEnabled()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -473,7 +475,28 @@ struct PrivacySettingsContent: View {
                 }
             }
 
-            Button(action: {}) {
+            SettingsCard {
+                SettingsRow(
+                    icon: "lock.square.stack.fill",
+                    iconColor: Color(hex: "#007AFF"),
+                    title: t("Chiffrement des données locales", "Encrypt local data", "Cifrar datos locales", "加密本地数据", "ローカルデータを暗号化", "Шифровать локальные данные"),
+                    subtitle: t("Historique et dictionnaire stockés chiffrés sur ce Mac.",
+                                "History and dictionary are stored encrypted on this Mac.",
+                                "El historial y el diccionario se guardan cifrados en este Mac.",
+                                "在此 Mac 上加密存储历史与词典。",
+                                "履歴と辞書をこの Mac 上で暗号化保存します。",
+                                "История и словарь хранятся в зашифрованном виде на этом Mac."),
+                    showDivider: false
+                ) {
+                    Toggle("", isOn: encryptionBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+            }
+
+            Button {
+                showDeleteConfirm = true
+            } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "trash")
                         .font(.system(size: 12, weight: .medium))
@@ -487,7 +510,40 @@ struct PrivacySettingsContent: View {
                 .cornerRadius(10)
             }
             .buttonStyle(.plain)
+            .confirmationDialog(
+                t("Supprimer toutes les données ?", "Delete all local data?", "¿Eliminar todos los datos?", "删除所有数据？", "すべてのデータを削除しますか？", "Удалить все данные?"),
+                isPresented: $showDeleteConfirm,
+                titleVisibility: .visible
+            ) {
+                Button(t("Supprimer", "Delete", "Eliminar", "删除", "削除", "Удалить"), role: .destructive) {
+                    TranscriptionStore.shared.clearAll()
+                    DictionaryStore.shared.clearAll()
+                }
+                Button(t("Annuler", "Cancel", "Cancelar", "取消", "キャンセル", "Отмена"), role: .cancel) {}
+            } message: {
+                Text(t("L'historique des dictées et le dictionnaire seront supprimés définitivement.",
+                       "Dictation history and dictionary will be permanently deleted.",
+                       "El historial de dictados y el diccionario se eliminarán permanentemente.",
+                       "听写历史和词典将被永久删除。",
+                       "音声入力履歴と辞書は完全に削除されます。",
+                       "История диктовок и словарь будут удалены безвозвратно."))
+            }
         }
+        .onAppear {
+            encryptLocalData = SecureLocalDataStore.isEncryptionEnabled()
+        }
+    }
+
+    private var encryptionBinding: Binding<Bool> {
+        Binding(
+            get: { encryptLocalData },
+            set: { newValue in
+                encryptLocalData = newValue
+                SecureLocalDataStore.setEncryptionEnabled(newValue)
+                TranscriptionStore.shared.reloadFromDisk()
+                DictionaryStore.shared.reloadFromDisk()
+            }
+        )
     }
 }
 

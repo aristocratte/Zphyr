@@ -29,7 +29,7 @@ The project is SwiftUI-first and currently built as a native macOS app (`.xcodep
 
 ## Requirements
 
-- macOS (project currently set to deployment target `26.2` in Xcode build settings)
+- macOS (project currently set to deployment target `15.0` in Xcode build settings)
 - Xcode with Swift Package Manager support
 - Microphone permission
 - Accessibility permission (required for auto-insert into other apps)

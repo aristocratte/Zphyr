@@ -11,6 +11,7 @@ import AVFoundation
 import AppKit
 import Observation
 import os
+import ServiceManagement
 
 // MARK: - Model Download/Load status
 enum ModelStatus: Equatable {
@@ -137,6 +138,10 @@ struct DictionarySuggestion: Equatable {
 final class AppState {
     static let shared = AppState()
     private nonisolated static let dictionaryLogger = Logger(subsystem: "com.zphyr.app", category: "DictionarySuggestion")
+    private static let stylePersonalKey = "zphyr.style.personal"
+    private static let styleWorkKey = "zphyr.style.work"
+    private static let styleEmailKey = "zphyr.style.email"
+    private static let styleOtherKey = "zphyr.style.other"
 
     // Snippets defaults keys
     static let snippetLinkedInURLKey = "zphyr.snippet.linkedin.url"
@@ -200,9 +205,23 @@ final class AppState {
         didSet { UserDefaults.standard.set(autoInsert, forKey: "zphyr.autoInsert") }
     }
 
-    // Settings — launch at login (persisted)
-    var launchAtLogin: Bool = UserDefaults.standard.bool(forKey: "zphyr.launchAtLogin") {
-        didSet { UserDefaults.standard.set(launchAtLogin, forKey: "zphyr.launchAtLogin") }
+    // Settings — launch at login (backed by SMAppService)
+    private var isSyncingLaunchAtLogin = false
+    var launchAtLogin: Bool = (SMAppService.mainApp.status == .enabled) {
+        didSet {
+            guard !isSyncingLaunchAtLogin else { return }
+            guard launchAtLogin != oldValue else { return }
+            do {
+                if launchAtLogin {
+                    try SMAppService.mainApp.register()
+                } else {
+                    try SMAppService.mainApp.unregister()
+                }
+            } catch {
+                // Silently revert to the actual service state if registration fails.
+                syncLaunchAtLoginFromSystem()
+            }
+        }
     }
 
     // Settings — sound effects (persisted)
@@ -228,10 +247,18 @@ final class AppState {
     }
 
     // Writing style per context
-    var stylePersonal: WritingTone = .casual
-    var styleWork: WritingTone = .formal
-    var styleEmail: WritingTone = .formal
-    var styleOther: WritingTone = .casual
+    var stylePersonal: WritingTone = AppState.loadWritingTone(forKey: AppState.stylePersonalKey, fallback: .casual) {
+        didSet { UserDefaults.standard.set(stylePersonal.rawValue, forKey: AppState.stylePersonalKey) }
+    }
+    var styleWork: WritingTone = AppState.loadWritingTone(forKey: AppState.styleWorkKey, fallback: .formal) {
+        didSet { UserDefaults.standard.set(styleWork.rawValue, forKey: AppState.styleWorkKey) }
+    }
+    var styleEmail: WritingTone = AppState.loadWritingTone(forKey: AppState.styleEmailKey, fallback: .formal) {
+        didSet { UserDefaults.standard.set(styleEmail.rawValue, forKey: AppState.styleEmailKey) }
+    }
+    var styleOther: WritingTone = AppState.loadWritingTone(forKey: AppState.styleOtherKey, fallback: .casual) {
+        didSet { UserDefaults.standard.set(styleOther.rawValue, forKey: AppState.styleOtherKey) }
+    }
 
     // Transient error to surface in UI
     var error: String?
@@ -239,6 +266,22 @@ final class AppState {
     private init() {
         refreshMicPermission()
         refreshAccessibility()
+    }
+
+    private func syncLaunchAtLoginFromSystem() {
+        let actual = (SMAppService.mainApp.status == .enabled)
+        guard launchAtLogin != actual else { return }
+        isSyncingLaunchAtLogin = true
+        launchAtLogin = actual
+        isSyncingLaunchAtLogin = false
+    }
+
+    private static func loadWritingTone(forKey key: String, fallback: WritingTone) -> WritingTone {
+        guard let raw = UserDefaults.standard.string(forKey: key),
+              let tone = WritingTone(rawValue: raw) else {
+            return fallback
+        }
+        return tone
     }
 
     // MARK: - Permission checks

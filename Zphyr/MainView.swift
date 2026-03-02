@@ -4,6 +4,8 @@
 //
 
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 private enum MainAlert: Identifiable {
     case error(String)
@@ -49,14 +51,14 @@ struct MainView: View {
                     HomeView()
                 case .dictionary:
                     DictionaryView()
+                case .audioTranscription:
+                    AudioTranscriptionView()
                 case .snippets:
                     SnippetsView()
                 case .style:
                     StyleView()
                 case .settings:
                     EmptyView()
-                case .account:
-                    AccountView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -65,6 +67,9 @@ struct MainView: View {
         .task {
             // Pre-load Whisper model in background on launch
             await engine.loadModel()
+            if AppState.shared.modelStatus.isReady {
+                ShortcutManager.shared.startListening()
+            }
         }
         // Settings modal overlay (tap backdrop to dismiss)
         .overlay {
@@ -603,6 +608,309 @@ struct SnippetsView: View {
         return Set(codes.map {
             L10n.defaultSnippetTriggers(for: kind, languageCode: $0).trimmingCharacters(in: .whitespacesAndNewlines)
         })
+    }
+}
+
+// MARK: - Audio Transcription View
+
+struct AudioTranscriptionView: View {
+    @Bindable private var appState = AppState.shared
+    @State private var selectedLanguage: WhisperLanguage = AppState.shared.selectedLanguage
+    @State private var selectedAudioURL: URL?
+    @State private var isImportingFile = false
+    @State private var isTranscribing = false
+    @State private var transcriptionText = ""
+    @State private var copied = false
+
+    private var engine: DictationEngine { DictationEngine.shared }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                header
+                languageCard
+                fileCard
+                actionCard
+                if !transcriptionText.isEmpty {
+                    resultCard
+                }
+            }
+            .padding(.horizontal, 32)
+            .padding(.top, 28)
+            .padding(.bottom, 26)
+        }
+        .background(Color(hex: "#F7F7F5"))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .fileImporter(
+            isPresented: $isImportingFile,
+            allowedContentTypes: [.audio],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                selectedAudioURL = urls.first
+            case .failure(let error):
+                appState.error = L10n.ui(
+                    for: appState.selectedLanguage.id,
+                    fr: "Import audio échoué : \(error.localizedDescription)",
+                    en: "Audio import failed: \(error.localizedDescription)",
+                    es: "La importación de audio falló: \(error.localizedDescription)",
+                    zh: "音频导入失败：\(error.localizedDescription)",
+                    ja: "音声の読み込みに失敗しました: \(error.localizedDescription)",
+                    ru: "Ошибка импорта аудио: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(t("Retranscription audio", "Audio transcription", "Transcripción de audio", "音频转写", "音声文字起こし", "Транскрибация аудио"))
+                .font(.system(size: 22, weight: .bold))
+                .foregroundColor(Color(hex: "#1A1A1A"))
+            Text(
+                t("Importez un fichier audio, choisissez la langue, puis lancez la retranscription locale avec Whisper.",
+                  "Import an audio file, choose a language, then run local transcription with Whisper.",
+                  "Importa un archivo de audio, elige el idioma y lanza la transcripción local con Whisper.",
+                  "导入音频文件，选择语言，然后用 Whisper 本地转写。",
+                  "音声ファイルを読み込み、言語を選んで Whisper でローカル文字起こしを実行します。",
+                  "Импортируйте аудиофайл, выберите язык и запустите локальную транскрибацию через Whisper.")
+            )
+                .font(.system(size: 13))
+                .foregroundColor(Color(hex: "#888880"))
+        }
+    }
+
+    private var languageCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(t("Langue", "Language", "Idioma", "语言", "言語", "Язык"))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color(hex: "#1A1A1A"))
+
+            Menu {
+                ForEach(WhisperLanguage.all) { language in
+                    Button {
+                        selectedLanguage = language
+                    } label: {
+                        HStack {
+                            Text("\(language.flag)  \(language.name)")
+                            if language == selectedLanguage {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Text("\(selectedLanguage.flag)  \(selectedLanguage.name)")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(Color(hex: "#1A1A1A"))
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(Color(hex: "#888880"))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color.white)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color(hex: "#DADAD5"), lineWidth: 1.2)
+                )
+                .cornerRadius(10)
+            }
+            .menuStyle(.borderlessButton)
+            .buttonStyle(.plain)
+            .frame(width: 260, alignment: .leading)
+        }
+        .padding(16)
+        .background(Color.white)
+        .cornerRadius(14)
+        .shadow(color: .black.opacity(0.04), radius: 8, x: 0, y: 2)
+    }
+
+    private var fileCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(t("Fichier audio", "Audio file", "Archivo de audio", "音频文件", "音声ファイル", "Аудиофайл"))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Color(hex: "#1A1A1A"))
+                Spacer()
+                Button {
+                    isImportingFile = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "square.and.arrow.down")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(t("Importer", "Import", "Importar", "导入", "読み込む", "Импорт"))
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "#1A1A1A"))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text(selectedAudioURL?.lastPathComponent
+                 ?? t("Aucun fichier sélectionné", "No file selected", "Ningún archivo seleccionado", "未选择文件", "ファイル未選択", "Файл не выбран"))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(selectedAudioURL == nil ? Color(hex: "#AAAAAA") : Color(hex: "#1A1A1A"))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(hex: "#F5F5F3"))
+                .cornerRadius(10)
+        }
+        .padding(16)
+        .background(Color.white)
+        .cornerRadius(14)
+        .shadow(color: .black.opacity(0.04), radius: 8, x: 0, y: 2)
+    }
+
+    private var actionCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Button {
+                    Task { await runTranscription() }
+                } label: {
+                    HStack(spacing: 6) {
+                        if isTranscribing {
+                            ProgressView()
+                                .scaleEffect(0.75)
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "waveform")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        Text(
+                            isTranscribing
+                            ? t("Retranscription…", "Transcribing…", "Transcribiendo…", "转写中…", "文字起こし中…", "Транскрибация…")
+                            : t("Lancer la retranscription", "Start transcription", "Iniciar transcripción", "开始转写", "文字起こしを開始", "Начать транскрибацию")
+                        )
+                        .font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(canTranscribe ? Color(hex: "#1A1A1A") : Color(hex: "#BBBBBB"))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(!canTranscribe)
+
+                if !appState.modelStatus.isReady {
+                    Text(t("Le modèle sera chargé automatiquement si nécessaire.",
+                           "The model will be loaded automatically if needed.",
+                           "El modelo se cargará automáticamente si es necesario.",
+                           "如有需要将自动加载模型。",
+                           "必要に応じてモデルを自動読み込みします。",
+                           "Модель загрузится автоматически при необходимости."))
+                        .font(.system(size: 11))
+                        .foregroundColor(Color(hex: "#888880"))
+                }
+            }
+        }
+        .padding(16)
+        .background(Color.white)
+        .cornerRadius(14)
+        .shadow(color: .black.opacity(0.04), radius: 8, x: 0, y: 2)
+    }
+
+    private var resultCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(t("Résultat", "Result", "Resultado", "结果", "結果", "Результат"))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Color(hex: "#1A1A1A"))
+                Spacer()
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(transcriptionText, forType: .string)
+                    copied = true
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.2))
+                        copied = false
+                    }
+                } label: {
+                    Label(
+                        copied
+                        ? t("Copié", "Copied", "Copiado", "已复制", "コピー済み", "Скопировано")
+                        : t("Copier", "Copy", "Copiar", "复制", "コピー", "Копировать"),
+                        systemImage: copied ? "checkmark" : "doc.on.doc"
+                    )
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Color(hex: copied ? "#34C759" : "#666663"))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    exportTranscription()
+                } label: {
+                    Label(
+                        t("Exporter", "Export", "Exportar", "导出", "書き出し", "Экспорт"),
+                        systemImage: "square.and.arrow.up"
+                    )
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Color(hex: "#666663"))
+                }
+                .buttonStyle(.plain)
+            }
+
+            TextEditor(text: $transcriptionText)
+                .font(.system(size: 13))
+                .foregroundColor(Color(hex: "#1A1A1A"))
+                .padding(8)
+                .frame(minHeight: 220)
+                .scrollContentBackground(.hidden)
+                .background(Color(hex: "#F5F5F3"))
+                .cornerRadius(10)
+                .textSelection(.enabled)
+        }
+        .padding(16)
+        .background(Color.white)
+        .cornerRadius(14)
+        .shadow(color: .black.opacity(0.04), radius: 8, x: 0, y: 2)
+    }
+
+    private var canTranscribe: Bool {
+        selectedAudioURL != nil && !isTranscribing
+    }
+
+    private func runTranscription() async {
+        guard let selectedAudioURL else { return }
+
+        isTranscribing = true
+        defer { isTranscribing = false }
+
+        if !appState.modelStatus.isReady {
+            await engine.loadModel()
+        }
+
+        let hasSecurityAccess = selectedAudioURL.startAccessingSecurityScopedResource()
+        defer {
+            if hasSecurityAccess {
+                selectedAudioURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let text = await engine.transcribeAudioFile(at: selectedAudioURL, language: selectedLanguage)
+        if !text.isEmpty {
+            transcriptionText = text
+        }
+    }
+
+    private func exportTranscription() {
+        let panel = NSSavePanel()
+        panel.title = t("Exporter la retranscription", "Export transcription", "Exportar transcripción", "导出转写", "文字起こしをエクスポート", "Экспорт транскрибации")
+        panel.nameFieldStringValue = "zphyr-audio-transcription.txt"
+        panel.allowedContentTypes = [.plainText]
+        if panel.runModal() == .OK, let url = panel.url {
+            try? transcriptionText.write(to: url, atomically: true, encoding: .utf8)
+        }
     }
 }
 

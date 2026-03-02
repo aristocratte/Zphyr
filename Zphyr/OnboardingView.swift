@@ -127,6 +127,9 @@ struct OnboardingView: View {
                 .padding(.bottom, 40)
             }
         }
+        .onAppear {
+            selectedLangCode = AppState.shared.selectedLanguage.id
+        }
     }
 
     // MARK: - Step 0: Welcome

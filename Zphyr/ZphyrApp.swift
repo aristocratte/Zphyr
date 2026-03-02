@@ -63,7 +63,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Start shortcut listener only when everything is already ready
         let hasCompleted = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
-        if hasCompleted && AppState.shared.modelStatus.isReady {
+        let hasCompletedPreflight = UserDefaults.standard.bool(forKey: "hasCompletedPreflight")
+        if hasCompleted && hasCompletedPreflight && AppState.shared.modelStatus.isReady {
             ShortcutManager.shared.startListening()
         }
     }
@@ -102,9 +103,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureWindowSize() {
         guard let window = NSApp.windows.first else { return }
         let hasCompleted = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
+        let hasCompletedPreflight = UserDefaults.standard.bool(forKey: "hasCompletedPreflight")
         if !hasCompleted {
             // First launch: show onboarding
             resizeToOnboarding(window: window)
+        } else if hasCompletedPreflight {
+            // User already completed preflight previously.
+            resizeToMainApp(window: window)
         } else {
             // Onboarding done → always start at preflight size.
             // ContentView controls the actual transition to MainView
@@ -115,7 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func resizeToOnboarding(window: NSWindow? = nil) {
         guard let window = window ?? NSApp.windows.first else { return }
-        let size = NSSize(width: 600, height: 460)
+        let size = NSSize(width: 780, height: 580)
         window.minSize = size
         window.maxSize = size
         window.setContentSize(size)
@@ -124,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func resizeToPreflight(window: NSWindow? = nil) {
         guard let window = window ?? NSApp.windows.first else { return }
-        let size = NSSize(width: 860, height: 600)
+        let size = NSSize(width: 1060, height: 720)
         window.minSize = size
         window.maxSize = size
         window.setContentSize(size)
@@ -134,9 +139,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func resizeToMainApp(window: NSWindow? = nil) {
         guard let window = window ?? NSApp.windows.first else { return }
         // Unlock size constraints before expanding
-        window.minSize = NSSize(width: 900, height: 600)
+        window.minSize = NSSize(width: 1100, height: 720)
         window.maxSize = NSSize(width: 99999, height: 99999)
-        let newSize = NSSize(width: 1100, height: 720)
+        let newSize = NSSize(width: 1400, height: 880)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.45
             ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)

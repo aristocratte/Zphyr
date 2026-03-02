@@ -8,10 +8,10 @@ import SwiftUI
 enum SidebarItem: String, CaseIterable, Identifiable {
     case home = "Home"
     case dictionary = "Dictionary"
+    case audioTranscription = "AudioTranscription"
     case snippets = "Snippets"
     case style = "Style"
     case settings = "Settings"
-    case account = "Account"
 
     var id: String { rawValue }
 
@@ -19,10 +19,10 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         switch self {
         case .home: return "house.fill"
         case .dictionary: return "text.book.closed.fill"
+        case .audioTranscription: return "waveform"
         case .snippets: return "doc.text.fill"
         case .style: return "textformat.size"
         case .settings: return "gearshape.fill"
-        case .account: return "person.crop.circle.fill"
         }
     }
 
@@ -32,14 +32,14 @@ enum SidebarItem: String, CaseIterable, Identifiable {
             return L10n.ui(for: languageCode, fr: "Accueil", en: "Home", es: "Inicio", zh: "首页", ja: "ホーム", ru: "Главная")
         case .dictionary:
             return L10n.ui(for: languageCode, fr: "Dictionnaire", en: "Dictionary", es: "Diccionario", zh: "词典", ja: "辞書", ru: "Словарь")
+        case .audioTranscription:
+            return L10n.ui(for: languageCode, fr: "Audio", en: "Audio", es: "Audio", zh: "音频", ja: "オーディオ", ru: "Аудио")
         case .snippets:
             return L10n.ui(for: languageCode, fr: "Snippets", en: "Snippets", es: "Snippets", zh: "片段", ja: "スニペット", ru: "Сниппеты")
         case .style:
             return L10n.ui(for: languageCode, fr: "Style", en: "Style", es: "Estilo", zh: "风格", ja: "スタイル", ru: "Стиль")
         case .settings:
             return L10n.ui(for: languageCode, fr: "Paramètres", en: "Settings", es: "Ajustes", zh: "设置", ja: "設定", ru: "Настройки")
-        case .account:
-            return L10n.ui(for: languageCode, fr: "Compte", en: "Account", es: "Cuenta", zh: "账户", ja: "アカウント", ru: "Аккаунт")
         }
     }
 }
@@ -50,8 +50,7 @@ struct SidebarView: View {
     var onSettingsTapped: () -> Void = {}
     @Namespace private var pillNamespace
 
-    private let mainItems: [SidebarItem] = [.home, .dictionary, .snippets, .style]
-    private let bottomItems: [SidebarItem] = [.account]
+    private let mainItems: [SidebarItem] = [.home, .dictionary, .audioTranscription, .snippets, .style]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -120,18 +119,6 @@ struct SidebarView: View {
                     namespace: pillNamespace
                 ) {
                     onSettingsTapped()
-                }
-
-                ForEach(bottomItems) { item in
-                    MagneticSidebarRow(
-                        item: item,
-                        isSelected: selection == item,
-                        namespace: pillNamespace
-                    ) {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.72, blendDuration: 0)) {
-                            selection = item
-                        }
-                    }
                 }
             }
             .padding(.horizontal, 10)

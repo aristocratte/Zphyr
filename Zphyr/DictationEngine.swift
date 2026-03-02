@@ -59,6 +59,12 @@ final class DictationEngine {
     private nonisolated static let modelLogger = Logger(subsystem: "com.zphyr.app", category: "ModelLoad")
     private nonisolated static let pipelineLogger = Logger(subsystem: "com.zphyr.app", category: "DictationPipeline")
 
+    private enum AudioFileLoadError: Error {
+        case invalidBuffer
+        case conversionFailed(String)
+        case emptyAudio
+    }
+
     private var whisperKit: WhisperKit?
     private var audioEngine: AVAudioEngine?
     private var inputNode: AVAudioInputNode?
@@ -242,13 +248,11 @@ final class DictationEngine {
         state.dictationState = .done(text: finalText)
 
         if !finalText.isEmpty {
-            // Insert into the target app that was focused when recording started.
-            // If autoInsert is on OR a target app was captured, inject the text.
-            let shouldInsert = state.autoInsert || targetApp != nil
-            if shouldInsert {
+            if state.autoInsert {
                 await insertIntoTargetApp(finalText)
             } else {
-                Self.pipelineLogger.notice("[Dictation] skipped insertion (autoInsert=off and targetApp=nil)")
+                copyTextToClipboard(finalText)
+                Self.pipelineLogger.notice("[Dictation] autoInsert=off; copied transcription to clipboard")
             }
         } else {
             Self.pipelineLogger.notice("[Dictation] no transcription text to insert")
@@ -391,13 +395,71 @@ final class DictationEngine {
     // MARK: - Transcription
 
     private func runWhisperTranscription() async -> String {
-        guard let wk = whisperKit, !audioBuffer.isEmpty else { return "" }
-        let lang = AppState.shared.selectedLanguage.id
         let audioSnapshot = audioBuffer
+        let lang = AppState.shared.selectedLanguage.id
+        return await transcribeAudioSamples(audioSnapshot, language: lang, includeContextTokens: true)
+    }
 
+    func transcribeAudioFile(at url: URL, language: WhisperLanguage) async -> String {
+        let state = AppState.shared
+        guard state.modelStatus.isReady, whisperKit != nil else {
+            state.error = L10n.ui(
+                for: state.selectedLanguage.id,
+                fr: "Le modèle Whisper n'est pas encore chargé.",
+                en: "Whisper model is not loaded yet.",
+                es: "El modelo Whisper aún no está cargado.",
+                zh: "Whisper 模型尚未加载。",
+                ja: "Whisper モデルはまだ読み込まれていません。",
+                ru: "Модель Whisper еще не загружена."
+            )
+            return ""
+        }
+
+        let samples: [Float]
+        do {
+            let sampleRate = whisperSampleRate
+            samples = try await Task.detached(priority: .userInitiated) {
+                try Self.loadAudioSamples(from: url, targetSampleRate: sampleRate)
+            }.value
+        } catch {
+            state.error = L10n.ui(
+                for: state.selectedLanguage.id,
+                fr: "Impossible de lire ce fichier audio : \(error.localizedDescription)",
+                en: "Unable to read this audio file: \(error.localizedDescription)",
+                es: "No se pudo leer este archivo de audio: \(error.localizedDescription)",
+                zh: "无法读取该音频文件：\(error.localizedDescription)",
+                ja: "この音声ファイルを読み込めませんでした: \(error.localizedDescription)",
+                ru: "Не удалось прочитать аудиофайл: \(error.localizedDescription)"
+            )
+            return ""
+        }
+
+        let rawText = await transcribeAudioSamples(samples, language: language.id, includeContextTokens: false)
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        state.lastTranscription = trimmed
+        if trimmed.isEmpty {
+            state.error = L10n.ui(
+                for: state.selectedLanguage.id,
+                fr: "Aucun texte détecté dans ce fichier audio.",
+                en: "No text detected in this audio file.",
+                es: "No se detectó texto en este archivo de audio.",
+                zh: "在该音频文件中未检测到文本。",
+                ja: "この音声ファイルからテキストが検出されませんでした。",
+                ru: "В этом аудиофайле текст не распознан."
+            )
+        }
+        return trimmed
+    }
+
+    private func transcribeAudioSamples(
+        _ audioSnapshot: [Float],
+        language lang: String,
+        includeContextTokens: Bool
+    ) async -> String {
+        guard let wk = whisperKit, !audioSnapshot.isEmpty else { return "" }
         return await Task.detached(priority: .userInitiated) {
             Self.pipelineLogger.notice("[Dictation] decoding language=\(lang, privacy: .public)")
-            let tokens = ContextFetcher.fetchCodeTokens()
+            let tokens = includeContextTokens ? ContextFetcher.fetchCodeTokens() : []
             let prompt = await MainActor.run {
                 ContextFetcher.buildWhisperPrompt(language: lang, tokens: tokens)
             }
@@ -446,6 +508,75 @@ final class DictationEngine {
                 return ""
             }
         }.value
+    }
+
+    private nonisolated static func loadAudioSamples(from url: URL, targetSampleRate: Double) throws -> [Float] {
+        let file = try AVAudioFile(forReading: url)
+        let inputFormat = file.processingFormat
+
+        guard file.length > 0 else {
+            throw AudioFileLoadError.emptyAudio
+        }
+
+        guard let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: targetSampleRate,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw AudioFileLoadError.invalidBuffer
+        }
+
+        let inputFrameCount = AVAudioFrameCount(file.length)
+        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: inputFrameCount) else {
+            throw AudioFileLoadError.invalidBuffer
+        }
+        try file.read(into: inputBuffer)
+
+        if inputFormat.sampleRate == targetSampleRate,
+           inputFormat.channelCount == 1,
+           inputFormat.commonFormat == .pcmFormatFloat32,
+           let channelData = inputBuffer.floatChannelData?[0] {
+            let frameCount = Int(inputBuffer.frameLength)
+            guard frameCount > 0 else {
+                throw AudioFileLoadError.emptyAudio
+            }
+            return Array(UnsafeBufferPointer(start: channelData, count: frameCount))
+        }
+
+        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            throw AudioFileLoadError.conversionFailed("converter unavailable")
+        }
+
+        let ratio = targetSampleRate / inputFormat.sampleRate
+        let outputCapacity = AVAudioFrameCount(Double(inputBuffer.frameLength) * ratio + 1024)
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputCapacity) else {
+            throw AudioFileLoadError.invalidBuffer
+        }
+
+        var conversionError: NSError?
+        var didConsumeInput = false
+        let status = converter.convert(to: outputBuffer, error: &conversionError) { _, outStatus in
+            if didConsumeInput {
+                outStatus.pointee = .endOfStream
+                return nil
+            }
+            didConsumeInput = true
+            outStatus.pointee = .haveData
+            return inputBuffer
+        }
+
+        guard status != .error else {
+            throw AudioFileLoadError.conversionFailed(conversionError?.localizedDescription ?? "conversion error")
+        }
+        guard let outputData = outputBuffer.floatChannelData?[0] else {
+            throw AudioFileLoadError.invalidBuffer
+        }
+        let outputFrameCount = Int(outputBuffer.frameLength)
+        guard outputFrameCount > 0 else {
+            throw AudioFileLoadError.emptyAudio
+        }
+        return Array(UnsafeBufferPointer(start: outputData, count: outputFrameCount))
     }
 
     // MARK: - Post-processing
@@ -1088,6 +1219,21 @@ final class DictationEngine {
 
     /// Activates the target app, waits for it to become frontmost, then inserts text via synthesized key events.
     private func insertIntoTargetApp(_ text: String) async {
+        guard AXIsProcessTrusted() else {
+            copyTextToClipboard(text)
+            AppState.shared.error = L10n.ui(
+                for: AppState.shared.selectedLanguage.id,
+                fr: "Accès Accessibilité manquant. Le texte a été copié dans le presse-papiers.",
+                en: "Accessibility access is missing. Text was copied to the clipboard.",
+                es: "Falta acceso de Accesibilidad. El texto se copió al portapapeles.",
+                zh: "缺少辅助功能权限。文本已复制到剪贴板。",
+                ja: "アクセシビリティ権限がありません。テキストをクリップボードにコピーしました。",
+                ru: "Нет доступа к Спецвозможностям. Текст скопирован в буфер обмена."
+            )
+            Self.pipelineLogger.error("[Insert] accessibility not trusted; used clipboard fallback")
+            return
+        }
+
         Self.pipelineLogger.notice("[Insert] preparing secure text injection; textLength=\(text.count) target=\(self.targetApp?.bundleIdentifier ?? "nil", privacy: .public)")
 
         if let app = targetApp, !app.isTerminated {
@@ -1115,6 +1261,12 @@ final class DictationEngine {
     func insertTextAtCursor(_ text: String) {
         simulateTyping(text)
         startCorrectionLearningMonitor(originalInsertedText: text)
+    }
+
+    private func copyTextToClipboard(_ text: String) {
+        guard !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     /// Monitors focused text changes shortly after insertion and proposes dictionary learning

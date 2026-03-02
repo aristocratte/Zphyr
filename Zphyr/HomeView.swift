@@ -6,11 +6,12 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Transcription Entry model (used in HomeView + HistoryView)
 
-struct TranscriptionEntry: Identifiable {
-    let id = UUID()
+struct TranscriptionEntry: Identifiable, Codable {
+    var id: UUID = UUID()
     let title: String
     let preview: String
     let date: String
@@ -19,13 +20,15 @@ struct TranscriptionEntry: Identifiable {
     let language: String
 }
 
-// MARK: - Shared session store (simple in-memory, survives app navigation)
+// MARK: - Shared session store (persisted to UserDefaults)
 
 @Observable
 @MainActor
 final class TranscriptionStore {
     static let shared = TranscriptionStore()
-    private init() {}
+    static let storageKey = "zphyr.transcriptions"
+
+    private init() { load() }
 
     var entries: [TranscriptionEntry] = []
 
@@ -41,7 +44,22 @@ final class TranscriptionStore {
             language: language.uppercased()
         )
         entries.insert(entry, at: 0)
-        if entries.count > 50 { entries = Array(entries.prefix(50)) }
+        if entries.count > 200 { entries = Array(entries.prefix(200)) }
+        save()
+    }
+
+    func remove(id: UUID) {
+        entries.removeAll { $0.id == id }
+        save()
+    }
+
+    func clearAll() {
+        entries = []
+        SecureLocalDataStore.removeValue(forKey: Self.storageKey)
+    }
+
+    func reloadFromDisk() {
+        load()
     }
 
     private static func formattedNow() -> String {
@@ -49,6 +67,22 @@ final class TranscriptionStore {
         f.locale = AppState.shared.uiLocale
         f.setLocalizedDateFormatFromTemplate("d MMM HH:mm")
         return f.string(from: Date())
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(entries) {
+            _ = SecureLocalDataStore.save(data, forKey: Self.storageKey)
+        }
+    }
+
+    private func load() {
+        guard let data = SecureLocalDataStore.load(forKey: Self.storageKey),
+              let decoded = try? JSONDecoder().decode([TranscriptionEntry].self, from: data)
+        else {
+            entries = []
+            return
+        }
+        entries = decoded
     }
 
     // Cumulative stats
@@ -63,6 +97,7 @@ final class TranscriptionStore {
 struct HomeView: View {
     private var store: TranscriptionStore { TranscriptionStore.shared }
     @Bindable private var appState = AppState.shared
+    @AppStorage("zphyr.shortcut.triggerKey") private var triggerKeyRaw = TriggerKey.rightOption.rawValue
 
     var body: some View {
         ScrollView {
@@ -75,12 +110,12 @@ struct HomeView: View {
                             .font(.system(size: 26, weight: .bold))
                             .foregroundColor(Color(hex: "#1A1A1A"))
                         Text(appState.modelStatus.isReady
-                             ? t("Le modèle Whisper est actif. Appuyez sur ⌥ Option droite pour dicter.",
-                                 "Whisper is ready. Hold right Option (⌥) to dictate.",
-                                 "Whisper está listo. Mantén pulsada la tecla Opción derecha (⌥) para dictar.",
-                                 "Whisper 已就绪。按住右侧 Option (⌥) 键开始听写。",
-                                 "Whisper の準備ができました。右 Option (⌥) キーを押し続けて音声入力します。",
-                                 "Whisper готов. Удерживайте правую Option (⌥), чтобы диктовать.")
+                             ? t("Le modèle Whisper est actif. Maintenez \(triggerDisplayName) pour dicter.",
+                                 "Whisper is ready. Hold \(triggerDisplayName) to dictate.",
+                                 "Whisper está listo. Mantén \(triggerDisplayName) para dictar.",
+                                 "Whisper 已就绪。按住 \(triggerDisplayName) 开始听写。",
+                                 "Whisper の準備ができました。\(triggerDisplayName) を押し続けて音声入力します。",
+                                 "Whisper готов. Удерживайте \(triggerDisplayName), чтобы диктовать.")
                              : t("Le modèle Whisper n'est pas encore chargé.",
                                  "Whisper is not loaded yet.",
                                  "Whisper aún no está cargado.",
@@ -143,6 +178,19 @@ struct HomeView: View {
                                    "Пока нет диктовок"))
                                 .font(.system(size: 12))
                                 .foregroundColor(Color(hex: "#CCCCCC"))
+                        } else {
+                            Button {
+                                exportHistory()
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "square.and.arrow.up")
+                                        .font(.system(size: 11, weight: .medium))
+                                    Text(t("Exporter", "Export", "Exportar", "导出", "エクスポート", "Экспорт"))
+                                        .font(.system(size: 12, weight: .medium))
+                                }
+                                .foregroundColor(Color(hex: "#888880"))
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
 
@@ -169,6 +217,22 @@ struct HomeView: View {
         }
     }
 
+    // MARK: - Export
+
+    private func exportHistory() {
+        let lines = store.entries.map { entry in
+            "[\(entry.date)] [\(entry.language)] \(entry.wordCount) mots\n\(entry.preview)"
+        }
+        let content = lines.joined(separator: "\n\n---\n\n")
+        let panel = NSSavePanel()
+        panel.title = t("Exporter l'historique", "Export history", "Exportar historial", "导出历史", "履歴をエクスポート", "Экспорт истории")
+        panel.nameFieldStringValue = "zphyr-history.txt"
+        panel.allowedContentTypes = [.plainText]
+        if panel.runModal() == .OK, let url = panel.url {
+            try? content.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
     // MARK: - Helpers
 
     private var greeting: String {
@@ -191,6 +255,11 @@ struct HomeView: View {
         let hours = Int(m / 60)
         let minutes = Int(m.truncatingRemainder(dividingBy: 60))
         return "\(hours)h \(minutes)m"
+    }
+
+    private var triggerDisplayName: String {
+        let key = TriggerKey(rawValue: triggerKeyRaw) ?? .rightOption
+        return key.displayName(for: appState.uiDisplayLanguage.rawValue)
     }
 }
 
@@ -243,6 +312,8 @@ private struct LiveDictationBanner: View {
 // MARK: - Empty state
 
 private struct EmptyStateView: View {
+    @AppStorage("zphyr.shortcut.triggerKey") private var triggerKeyRaw = TriggerKey.rightOption.rawValue
+
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "waveform.badge.plus")
@@ -256,12 +327,12 @@ private struct EmptyStateView: View {
                    "Ваши диктовки появятся здесь"))
                 .font(.system(size: 14, weight: .medium))
                 .foregroundColor(Color(hex: "#CCCCCC"))
-            Text(t("Maintenez ⌥ Option droite pour commencer à dicter.",
-                   "Hold right Option (⌥) to start dictating.",
-                   "Mantén pulsada la tecla Opción derecha (⌥) para empezar a dictar.",
-                   "按住右侧 Option (⌥) 键开始听写。",
-                   "右 Option (⌥) キーを押し続けると音声入力を開始します。",
-                   "Удерживайте правую Option (⌥), чтобы начать диктовку."))
+            Text(t("Maintenez la touche \(triggerDisplayName) pour commencer à dicter.",
+                   "Hold \(triggerDisplayName) to start dictating.",
+                   "Mantén \(triggerDisplayName) para empezar a dictar.",
+                   "按住 \(triggerDisplayName) 开始听写。",
+                   "\(triggerDisplayName) を押し続けると音声入力を開始します。",
+                   "Удерживайте \(triggerDisplayName), чтобы начать диктовку."))
                 .font(.system(size: 12))
                 .foregroundColor(Color(hex: "#DDDDDA"))
         }
@@ -270,6 +341,11 @@ private struct EmptyStateView: View {
         .background(Color.white)
         .cornerRadius(14)
         .shadow(color: .black.opacity(0.03), radius: 6, x: 0, y: 1)
+    }
+
+    private var triggerDisplayName: String {
+        let key = TriggerKey(rawValue: triggerKeyRaw) ?? .rightOption
+        return key.displayName(for: AppState.shared.uiDisplayLanguage.rawValue)
     }
 }
 
@@ -375,21 +451,46 @@ struct TranscriptionCard: View {
 
             Spacer()
 
-            // Copy button
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(entry.preview, forType: .string)
-                copied = true
-                Task {
-                    try? await Task.sleep(for: .seconds(1.5))
-                    copied = false
+            // Action buttons (visible on hover)
+            if isHovered {
+                HStack(spacing: 6) {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(entry.preview, forType: .string)
+                        copied = true
+                        Task {
+                            try? await Task.sleep(for: .seconds(1.5))
+                            copied = false
+                        }
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.clipboard")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(copied ? Color(hex: "#34C759") : Color(hex: "#888880"))
+                            .frame(width: 26, height: 26)
+                            .background(Color(hex: "#E5E5E0"))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        TranscriptionStore.shared.remove(id: entry.id)
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Color(hex: "#FF3B30"))
+                            .frame(width: 26, height: 26)
+                            .background(Color(hex: "#FF3B30").opacity(0.1))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
                 }
-            } label: {
+                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            } else {
+                // Always show copy icon when not hovered (subtle)
                 Image(systemName: copied ? "checkmark" : "doc.on.clipboard")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(copied ? Color(hex: "#34C759") : Color(hex: "#CCCCCC"))
+                    .foregroundColor(copied ? Color(hex: "#34C759") : Color(hex: "#DDDDDA"))
             }
-            .buttonStyle(.plain)
         }
         .padding(14)
         .background(
