@@ -112,6 +112,33 @@ struct SidebarView: View {
 
             // Bottom items
             VStack(spacing: 1) {
+                // Check for updates
+                Button {
+                    if let url = URL(string: "https://zphyr.app/changelog") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    HStack(spacing: 9) {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(Color(hex: "#999994"))
+                            .frame(width: 18)
+                        Text(L10n.ui(for: AppState.shared.uiDisplayLanguage.rawValue,
+                                    fr: "Mises à jour",
+                                    en: "Updates",
+                                    es: "Actualizaciones",
+                                    zh: "检查更新",
+                                    ja: "アップデート",
+                                    ru: "Обновления"))
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundColor(Color(hex: "#6A6A65"))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+
                 // Settings button → opens modal overlay
                 MagneticSidebarRow(
                     item: .settings,

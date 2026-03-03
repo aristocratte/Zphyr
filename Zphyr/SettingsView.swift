@@ -259,6 +259,7 @@ struct GeneralSettingsContent: View {
                     Toggle("", isOn: $state.autoInsert).labelsHidden().toggleStyle(.switch)
                 }
             }
+
         }
     }
 }
@@ -275,6 +276,49 @@ struct SystemSettingsContent: View {
             Text(t("Système", "System", "Sistema", "系统", "システム", "Система"))
                 .font(.system(size: 20, weight: .bold))
                 .foregroundColor(Color(hex: "#1A1A1A"))
+
+            // Code formatting mode
+            SettingsCard {
+                SettingsRow(
+                    icon: "textformat.alt",
+                    iconColor: Color(hex: "#AF52DE"),
+                    title: t("Mode de formatage", "Formatting mode", "Modo de formateo", "格式化模式", "フォーマットモード", "Режим форматирования"),
+                    subtitle: state.formattingMode.subtitle(for: lang),
+                    showDivider: state.formattingMode == .advanced
+                ) {
+                    Picker("", selection: $state.formattingMode) {
+                        ForEach(FormattingMode.allCases) { mode in
+                            Text(mode.displayName(for: lang)).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 175)
+                }
+
+                // Style picker only in advanced mode (trigger uses explicit keywords in speech)
+                if state.formattingMode == .advanced {
+                    SettingsRow(
+                        icon: "chevron.left.forwardslash.chevron.right",
+                        iconColor: Color(hex: "#007AFF"),
+                        title: t("Style par défaut", "Default style", "Estilo predeterminado", "默认样式", "デフォルトスタイル", "Стиль по умолчанию"),
+                        subtitle: t("Appliqué quand le langage n'est pas détecté", "Applied when language is not detected", "Aplicado cuando el idioma no se detecta", "当语言未被检测时应用", "言語が検出されない場合に適用", "Применяется когда язык не определён"),
+                        showDivider: false
+                    ) {
+                        Picker("", selection: $state.defaultCodeStyle) {
+                            ForEach(CodeStyle.allCases) { style in
+                                Text(style.displayName(for: lang)).tag(style)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 150)
+                    }
+                }
+            }
+
+            // Qwen model install card — only visible in advanced mode
+            if state.formattingMode == .advanced {
+                QwenModelCard()
+            }
 
             // Model status card
             SettingsCard {
@@ -312,22 +356,166 @@ struct SystemSettingsContent: View {
                 }
             }
 
-            // Dictation language
+            // Dictation languages (multi-select)
             SettingsCard {
-                SettingsRow(icon: "mic.fill", iconColor: Color(hex: "#34C759"),
-                            title: t("Langue de dictée", "Dictation language", "Idioma de dictado", "听写语言", "音声入力言語", "Язык диктовки"),
-                            subtitle: t("Langue principale reconnue par Whisper", "Primary language recognized by Whisper", "Idioma principal reconocido por Whisper", "Whisper 识别的主语言", "Whisper が認識する主要言語", "Основной язык, распознаваемый Whisper"),
-                            showDivider: false) {
-                    Picker("", selection: $state.selectedLanguage) {
-                        ForEach(WhisperLanguage.all) { lang in
-                            Text("\(lang.flag)  \(lang.name)").tag(lang)
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 7)
+                                .fill(Color(hex: "#34C759").opacity(0.1))
+                                .frame(width: 30, height: 30)
+                            Image(systemName: "mic.fill")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(Color(hex: "#34C759"))
+                        }
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(t("Langues de dictée", "Dictation languages", "Idiomas de dictado", "听写语言", "音声入力言語", "Языки диктовки"))
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(Color(hex: "#1A1A1A"))
+                            Text(t("Sélectionnez vos langues parlées — Whisper les reconnaîtra toutes.", "Select your spoken languages — Whisper will recognize all of them.", "Selecciona tus idiomas hablados — Whisper los reconocerá todos.", "选择你会说的语言，Whisper 将全部识别。", "話す言語をすべて選択 — Whisper がすべて認識します。", "Выберите языки — Whisper распознает все."))
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(hex: "#AAAAAA"))
+                        }
+                        Spacer()
+                        if state.selectedLanguages.count > 1 {
+                            Text(t("\(state.selectedLanguages.count) langues", "\(state.selectedLanguages.count) languages", "\(state.selectedLanguages.count) idiomas", "\(state.selectedLanguages.count) 种语言", "\(state.selectedLanguages.count) 言語", "\(state.selectedLanguages.count) языка"))
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(Color(hex: "#22D3B8"))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Color(hex: "#22D3B8").opacity(0.1))
+                                .cornerRadius(6)
                         }
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 165)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 14)
+                    .padding(.bottom, 12)
+
+                    LazyVGrid(columns: [
+                        GridItem(.flexible(), spacing: 6),
+                        GridItem(.flexible(), spacing: 6),
+                        GridItem(.flexible(), spacing: 6)
+                    ], spacing: 6) {
+                        ForEach(WhisperLanguage.all, id: \.id) { language in
+                            SLanguageCell(
+                                language: language,
+                                isSelected: state.selectedLanguages.contains(where: { $0.id == language.id })
+                            ) {
+                                withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
+                                    if state.selectedLanguages.contains(where: { $0.id == language.id }) {
+                                        if state.selectedLanguages.count > 1 {
+                                            state.selectedLanguages.removeAll { $0.id == language.id }
+                                        }
+                                    } else {
+                                        state.selectedLanguages.append(language)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 14)
+                }
+            }
+
+            // Model management (path + uninstall + reinstall)
+            if state.modelStatus.isReady || state.modelInstallPath != nil {
+                SettingsCard {
+                    SettingsRow(icon: "folder.fill", iconColor: Color(hex: "#FF9500"),
+                                title: t("Emplacement du modèle", "Model location", "Ubicación del modelo", "模型位置", "モデルの場所", "Расположение модели"),
+                                subtitle: state.modelInstallPath.flatMap {
+                                    URL(fileURLWithPath: $0).deletingLastPathComponent().path
+                                } ?? "—") {
+                        Button {
+                            if let path = state.modelInstallPath {
+                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                            }
+                        } label: {
+                            Label(t("Ouvrir", "Open", "Abrir", "打开", "開く", "Открыть"),
+                                  systemImage: "folder.badge.gearshape")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(Color(hex: "#FF9500"))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(state.modelInstallPath == nil)
+                    }
+                    SettingsRow(icon: "trash", iconColor: Color(hex: "#FF3B30"),
+                                title: t("Désinstaller le modèle", "Uninstall model", "Desinstalar modelo", "卸载模型", "モデルを削除", "Удалить модель"),
+                                subtitle: t("Supprime les fichiers du modèle du disque", "Removes model files from disk", "Elimina los archivos del modelo del disco", "从磁盘删除模型文件", "モデルファイルをディスクから削除", "Удаляет файлы модели с диска")) {
+                        Button(t("Désinstaller", "Uninstall", "Desinstalar", "卸载", "削除", "Удалить")) {
+                            DictationEngine.shared.uninstallModel()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color(hex: "#FF3B30"))
+                    }
+                    SettingsRow(icon: "arrow.counterclockwise", iconColor: Color(hex: "#007AFF"),
+                                title: t("Réinstaller le modèle", "Reinstall model", "Reinstalar modelo", "重新安装模型", "モデルを再インストール", "Переустановить модель"),
+                                subtitle: t("Supprime et retélécharge le modèle", "Deletes and redownloads the model", "Elimina y vuelve a descargar el modelo", "删除并重新下载模型", "モデルを削除して再ダウンロード", "Удаляет и повторно скачивает модель"),
+                                showDivider: false) {
+                        Button(t("Réinstaller", "Reinstall", "Reinstalar", "重装", "再インストール", "Переустановить")) {
+                            Task { await DictationEngine.shared.reinstallModel() }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color(hex: "#007AFF"))
+                    }
+                }
+            }
+
+            // Retry button when model failed
+            if case .failed = state.modelStatus {
+                Button {
+                    Task { await DictationEngine.shared.loadModel() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 12, weight: .medium))
+                        Text(t("Réessayer le téléchargement", "Retry download", "Reintentar descarga", "重试下载", "ダウンロードを再試行", "Повторить загрузку"))
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    .foregroundColor(Color(hex: "#007AFF"))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color(hex: "#007AFF").opacity(0.08))
+                    .cornerRadius(10)
+                }
+                .buttonStyle(.plain)
+            }
+
+            // Local data size
+            SettingsCard {
+                SettingsRow(icon: "internaldrive.fill", iconColor: Color(hex: "#888880"),
+                            title: t("Données locales", "Local data", "Datos locales", "本地数据", "ローカルデータ", "Локальные данные"),
+                            subtitle: t("Historique de transcriptions et dictionnaire", "Transcription history and dictionary", "Historial de transcripciones y diccionario", "转写历史与词典", "文字起こし履歴と辞書", "История транскрипций и словарь"),
+                            showDivider: false) {
+                    Text(localDataSize)
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        .foregroundColor(Color(hex: "#888880"))
+                }
+            }
+
+            // Return to onboarding
+            SettingsCard {
+                SettingsRow(icon: "arrow.uturn.backward.circle.fill", iconColor: Color(hex: "#FF9500"),
+                            title: t("Retourner dans l'onboarding", "Return to onboarding", "Volver al onboarding", "返回引导流程", "オンボーディングに戻る", "Вернуться к онбордингу"),
+                            subtitle: t("Relance le guide de configuration initial", "Relaunches the initial setup guide", "Reinicia la guía de configuración inicial", "重新启动初始设置向导", "初期セットアップガイドを再起動します", "Перезапускает начальное руководство по настройке"),
+                            showDivider: false) {
+                    Button(t("Retourner", "Return", "Volver", "返回", "戻る", "Вернуться")) {
+                        NotificationCenter.default.post(name: .returnToOnboarding, object: nil)
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Color(hex: "#FF9500"))
                 }
             }
         }
+    }
+
+    private var localDataSize: String {
+        let keys = [TranscriptionStore.storageKey, "zphyr.dictionary.entries"]
+        let totalBytes = keys.compactMap { UserDefaults.standard.data(forKey: $0)?.count }.reduce(0, +)
+        return ByteCountFormatter.string(fromByteCount: Int64(totalBytes), countStyle: .file)
     }
 
     @ViewBuilder
@@ -375,11 +563,13 @@ struct ShortcutSettingsContent: View {
                 .foregroundColor(Color(hex: "#888880"))
                 .lineSpacing(3)
 
-            // Trigger key picker
+            // Preset trigger key picker
             SettingsCard {
                 SettingsRow(icon: "keyboard.chevron.compact.down", iconColor: Color(hex: "#FF6B35"),
-                            title: t("Touche de déclenchement", "Trigger key", "Tecla de activación", "触发键", "起動キー", "Клавиша запуска"),
-                            subtitle: ShortcutManager.shared.selectedTriggerKey.displayName(for: lang),
+                            title: t("Touche prédéfinie", "Preset key", "Tecla predefinida", "预设键", "プリセットキー", "Предустановленная клавиша"),
+                            subtitle: ShortcutManager.shared.recordedShortcut == nil
+                                ? ShortcutManager.shared.selectedTriggerKey.displayName(for: lang)
+                                : t("Désactivé (raccourci personnalisé actif)", "Disabled (custom shortcut active)", "Desactivado (atajo personalizado activo)", "已禁用（自定义快捷键生效）", "無効（カスタムショートカット有効）", "Отключено (используется пользовательский)"),
                             showDivider: false) {
                     Picker("", selection: Binding(
                         get: { ShortcutManager.shared.selectedTriggerKey },
@@ -391,6 +581,36 @@ struct ShortcutSettingsContent: View {
                     }
                     .pickerStyle(.menu)
                     .frame(width: 195)
+                    .opacity(ShortcutManager.shared.recordedShortcut == nil ? 1 : 0.4)
+                    .disabled(ShortcutManager.shared.recordedShortcut != nil)
+                }
+            }
+
+            // Custom shortcut recorder
+            SettingsCard {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 7)
+                                .fill(Color(hex: "#22D3B8").opacity(0.1))
+                                .frame(width: 30, height: 30)
+                            Image(systemName: "keyboard.badge.ellipsis")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(Color(hex: "#22D3B8"))
+                        }
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(t("Raccourci personnalisé", "Custom shortcut", "Atajo personalizado", "自定义快捷键", "カスタムショートカット", "Пользовательский ярлык"))
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(Color(hex: "#1A1A1A"))
+                            Text(t("Enregistrez n'importe quelle combinaison. Remplace la touche prédéfinie.", "Record any key combination. Overrides the preset key.", "Graba cualquier combinación. Reemplaza la tecla predefinida.", "录制任意组合键，覆盖预设键。", "任意のキーを記録。プリセットキーを上書きします。", "Запишите любую комбинацию. Заменяет предустановленную клавишу."))
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(hex: "#AAAAAA"))
+                        }
+                        Spacer()
+                        SCustomShortcutRecorder()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
                 }
             }
 
@@ -544,6 +764,233 @@ struct PrivacySettingsContent: View {
                 DictionaryStore.shared.reloadFromDisk()
             }
         )
+    }
+}
+
+// MARK: - Language Cell (multi-select)
+
+struct SLanguageCell: View {
+    let language: WhisperLanguage
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Text(language.flag)
+                    .font(.system(size: 15))
+                Text(language.name)
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                    .foregroundColor(isSelected ? Color(hex: "#1A1A1A") : Color(hex: "#555550"))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(Color(hex: "#22D3B8"))
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(
+                        isSelected
+                            ? Color(hex: "#22D3B8").opacity(0.10)
+                            : (isHovered ? Color(hex: "#1A1A1A").opacity(0.04) : Color(hex: "#F8F8F6"))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9)
+                            .stroke(
+                                isSelected ? Color(hex: "#22D3B8").opacity(0.45) : Color(hex: "#E5E5E0"),
+                                lineWidth: 1
+                            )
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .animation(.spring(response: 0.22, dampingFraction: 0.8), value: isSelected)
+    }
+}
+
+// MARK: - Custom Shortcut Recorder
+
+struct SCustomShortcutRecorder: View {
+    @State private var isRecording: Bool = false
+    @State private var pulse: Bool = false
+    private var manager: ShortcutManager { ShortcutManager.shared }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let custom = manager.recordedShortcut {
+                // Show current custom shortcut pill
+                HStack(spacing: 6) {
+                    Image(systemName: "keyboard")
+                        .font(.system(size: 11))
+                        .foregroundColor(Color(hex: "#22D3B8"))
+                    Text(custom.displayText)
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundColor(Color(hex: "#1A1A1A"))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(hex: "#22D3B8").opacity(0.08))
+                .cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(hex: "#22D3B8").opacity(0.35), lineWidth: 1))
+
+                Button {
+                    manager.clearCustomShortcut()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundColor(Color(hex: "#CCCCCC"))
+                }
+                .buttonStyle(.plain)
+                .help(t("Supprimer le raccourci personnalisé", "Remove custom shortcut", "Eliminar atajo personalizado", "删除自定义快捷键", "カスタムショートカットを削除", "Удалить пользовательский ярлык"))
+
+            } else if isRecording {
+                // Recording state
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(Color(hex: "#FF3B30"))
+                        .frame(width: 7, height: 7)
+                        .scaleEffect(pulse ? 1.3 : 0.9)
+                        .animation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true), value: pulse)
+                        .onAppear { pulse = true }
+                        .onDisappear { pulse = false }
+                    Text(t("Appuyez sur une touche…", "Press a key…", "Pulsa una tecla…", "按下一个键…", "キーを押してください…", "Нажмите клавишу…"))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(hex: "#1A1A1A"))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Color(hex: "#FF3B30").opacity(0.06))
+                .cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(hex: "#FF3B30").opacity(0.3), lineWidth: 1))
+
+                Button(t("Annuler", "Cancel", "Cancelar", "取消", "キャンセル", "Отмена")) {
+                    manager.stopRecording()
+                    isRecording = false
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundColor(Color(hex: "#888880"))
+
+            } else {
+                // Record button
+                Button {
+                    isRecording = true
+                    manager.startRecording { recorded in
+                        manager.recordedShortcut = recorded
+                        isRecording = false
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "record.circle")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(t("Enregistrer", "Record", "Grabar", "录制", "記録", "Записать"))
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundColor(Color(hex: "#1A1A1A"))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Color(hex: "#F0F0EE"))
+                    .cornerRadius(8)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(hex: "#E5E5E0"), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isRecording)
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: manager.recordedShortcut)
+    }
+}
+
+// MARK: - Qwen Model Card
+
+private struct QwenModelCard: View {
+    @State private var formatter = AdvancedLLMFormatter.shared
+    private var lang: String { AppState.shared.uiDisplayLanguage.rawValue }
+
+    var body: some View {
+        SettingsCard {
+            if formatter.isInstalling {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 7)
+                                .fill(Color(hex: "#22D3B8").opacity(0.1))
+                                .frame(width: 30, height: 30)
+                            Image(systemName: "arrow.down.circle")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(Color(hex: "#22D3B8"))
+                        }
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Qwen2.5-1.5B-Instruct-4bit")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(Color(hex: "#1A1A1A"))
+                            Text(L10n.ui(for: lang, fr: "Téléchargement en cours…", en: "Downloading…", es: "Descargando…", zh: "正在下载…", ja: "ダウンロード中…", ru: "Загрузка…"))
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(hex: "#AAAAAA"))
+                        }
+                        Spacer()
+                        Text("\(Int(formatter.downloadProgress * 100))%")
+                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                            .foregroundColor(Color(hex: "#22D3B8"))
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 14)
+
+                    ProgressView(value: formatter.downloadProgress)
+                        .progressViewStyle(.linear)
+                        .tint(Color(hex: "#22D3B8"))
+                        .animation(.easeInOut(duration: 0.3), value: formatter.downloadProgress)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 14)
+                }
+            } else if AppState.shared.advancedModeInstalled {
+                SettingsRow(
+                    icon: "brain.head.profile",
+                    iconColor: Color(hex: "#22D3B8"),
+                    title: "Qwen2.5-1.5B-Instruct-4bit",
+                    subtitle: L10n.ui(for: lang, fr: "Installé · IA locale prête", en: "Installed · local AI ready", es: "Instalado · IA local lista", zh: "已安装 · 本地 AI 就绪", ja: "インストール済み · ローカル AI 準備完了", ru: "Установлен · локальный ИИ готов"),
+                    showDivider: false
+                ) {
+                    Button(L10n.ui(for: lang, fr: "Supprimer", en: "Remove", es: "Eliminar", zh: "删除", ja: "削除", ru: "Удалить")) {
+                        AdvancedLLMFormatter.shared.unload()
+                        AppState.shared.advancedModeInstalled = false
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Color(hex: "#FF3B30"))
+                }
+            } else {
+                SettingsRow(
+                    icon: "arrow.down.circle.fill",
+                    iconColor: Color(hex: "#AF52DE"),
+                    title: "Qwen2.5-1.5B-Instruct-4bit",
+                    subtitle: L10n.ui(for: lang, fr: "~900 Mo · IA locale sur Apple Silicon", en: "~900 MB · Local AI on Apple Silicon", es: "~900 MB · IA local en Apple Silicon", zh: "~900 MB · Apple Silicon 本地 AI", ja: "~900 MB · Apple Silicon ローカル AI", ru: "~900 МБ · локальный ИИ на Apple Silicon"),
+                    showDivider: false
+                ) {
+                    if let error = formatter.installError {
+                        Text(error)
+                            .font(.system(size: 10))
+                            .foregroundColor(Color(hex: "#FF3B30"))
+                            .lineLimit(2)
+                            .frame(maxWidth: 160, alignment: .trailing)
+                    } else {
+                        Button(L10n.ui(for: lang, fr: "Installer", en: "Install", es: "Instalar", zh: "安装", ja: "インストール", ru: "Установить")) {
+                            Task { await AdvancedLLMFormatter.shared.installModel() }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color(hex: "#AF52DE"))
+                    }
+                }
+            }
+        }
     }
 }
 

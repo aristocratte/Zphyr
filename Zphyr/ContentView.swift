@@ -3,23 +3,18 @@
 //  Zphyr
 //
 //  Routing logic:
-//  1. First launch            → OnboardingView (permissions + language)
-//  2. Onboarding done,
-//     model not ready         → PreflightView (auto-downloads Whisper)
-//  3. Everything ready        → MainView
+//  1. First launch / setup    → PreflightView (immersive slideshow: permissions, language, model download)
+//  2. Everything ready        → MainView
 //
 
 import SwiftUI
 
 struct ContentView: View {
-    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @AppStorage("hasCompletedPreflight") private var hasCompletedPreflight = false
 
     var body: some View {
         Group {
-            if !hasCompletedOnboarding {
-                OnboardingView()
-            } else if !hasCompletedPreflight {
+            if !hasCompletedPreflight {
                 PreflightView {
                     hasCompletedPreflight = true
                 }
@@ -28,8 +23,6 @@ struct ContentView: View {
             }
         }
         .environment(\.locale, AppState.shared.uiLocale)
-        .animation(.spring(response: 0.5, dampingFraction: 0.85), value: hasCompletedOnboarding)
-        .animation(.spring(response: 0.5, dampingFraction: 0.85), value: hasCompletedPreflight)
     }
 }
 

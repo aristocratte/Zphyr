@@ -100,7 +100,7 @@ struct OnboardingView: View {
                         } else {
                             // Save language choice and finish
                             if let lang = WhisperLanguage.all.first(where: { $0.id == selectedLangCode }) {
-                                AppState.shared.selectedLanguage = lang
+                                AppState.shared.selectedLanguages = [lang]
                             }
                             hasCompletedOnboarding = true
                             NotificationCenter.default.post(name: .onboardingCompleted, object: nil)

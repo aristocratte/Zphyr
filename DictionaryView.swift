@@ -485,6 +485,7 @@ struct DictionaryEntrySheet: View {
                                 "напр.: WhisperKit, API_KEY, Иван Иванов…"), text: $word)
                         .textFieldStyle(.plain)
                         .font(.system(size: 14))
+                        .foregroundColor(Color(hex: "#1A1A1A"))
                         .padding(10)
                         .background(Color(hex: "#F5F5F3"))
                         .cornerRadius(8)
@@ -503,6 +504,7 @@ struct DictionaryEntrySheet: View {
                                 "напр.: \"whisper kit\", \"kaypi\"…"), text: $spokenAs)
                         .textFieldStyle(.plain)
                         .font(.system(size: 14))
+                        .foregroundColor(Color(hex: "#1A1A1A"))
                         .padding(10)
                         .background(Color(hex: "#F5F5F3"))
                         .cornerRadius(8)
@@ -555,6 +557,7 @@ struct DictionaryEntrySheet: View {
         }
         .frame(width: 400, height: 340)
         .background(Color.white)
+        .colorScheme(.light)
         .onAppear {
             if let entry {
                 word = entry.word

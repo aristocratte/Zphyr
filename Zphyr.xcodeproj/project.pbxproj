@@ -206,6 +206,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				0BC33DB12F5483ED0063711F /* XCRemoteSwiftPackageReference "WhisperKit" */,
+				0BAFF6E12F56465800F80183 /* XCRemoteSwiftPackageReference "mlx-swift-examples" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0BC33D782F5479BA0063711F /* Products */;
@@ -634,6 +635,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		0BAFF6E12F56465800F80183 /* XCRemoteSwiftPackageReference "mlx-swift-examples" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift-examples";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
 		0BC33DB12F5483ED0063711F /* XCRemoteSwiftPackageReference "WhisperKit" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/argmaxinc/WhisperKit";

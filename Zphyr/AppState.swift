@@ -74,6 +74,32 @@ struct DownloadStats {
     }
 }
 
+// MARK: - Formatting Mode
+enum FormattingMode: String, CaseIterable, Identifiable {
+    case trigger  = "trigger"
+    case advanced = "advanced"
+
+    var id: String { rawValue }
+
+    func displayName(for lang: String) -> String {
+        switch self {
+        case .trigger:
+            return L10n.ui(for: lang, fr: "Normal (Trigger explicite)", en: "Normal (Explicit trigger)", es: "Normal (disparador)", zh: "普通（显式触发）", ja: "通常（明示的トリガー）", ru: "Обычный (триггер)")
+        case .advanced:
+            return L10n.ui(for: lang, fr: "Avancé (IA locale Qwen)", en: "Advanced (local AI Qwen)", es: "Avanzado (IA local Qwen)", zh: "高级（本地 AI Qwen）", ja: "高度（ローカル AI Qwen）", ru: "Расширенный (локальный ИИ Qwen)")
+        }
+    }
+
+    func subtitle(for lang: String) -> String {
+        switch self {
+        case .trigger:
+            return L10n.ui(for: lang, fr: "Dites «camel get user» → getUserProfile", en: "Say «camel get user» → getUserProfile", es: "Di «camel get user» → getUserProfile", zh: "说「camel get user」→ getUserProfile", ja: "「camel get user」→ getUserProfile", ru: "«camel get user» → getUserProfile")
+        case .advanced:
+            return L10n.ui(for: lang, fr: "Qwen2.5-1.5B détecte les identifiants sans mot-clé (~900 Mo, local)", en: "Qwen2.5-1.5B auto-detects identifiers without trigger (~900 MB, local)", es: "Qwen2.5-1.5B detecta identificadores sin disparador (~900 MB, local)", zh: "Qwen2.5-1.5B 自动检测标识符无需触发词（~900 MB，本地）", ja: "Qwen2.5-1.5B がトリガーなしで自動検出（~900 MB、ローカル）", ru: "Qwen2.5-1.5B автоопределяет идентификаторы без триггера (~900 МБ, локально)")
+        }
+    }
+}
+
 // MARK: - Writing Tone
 enum WritingTone: String, CaseIterable, Identifiable {
     case formal      = "Formal"
@@ -170,6 +196,8 @@ final class AppState {
     // Model
     var modelStatus: ModelStatus = .notDownloaded
     var downloadStats: DownloadStats = DownloadStats()
+    var modelInstallPath: String? = nil
+    var isDownloadPaused: Bool = false
 
     // Dictation
     var dictationState: DictationState = .idle
@@ -183,13 +211,28 @@ final class AppState {
     // Pending dictionary learning suggestion
     var pendingDictionarySuggestion: DictionarySuggestion?
 
-    // Settings — Dictation language (persisted)
-    var selectedLanguage: WhisperLanguage = {
-        let saved = UserDefaults.standard.string(forKey: "zphyr.dictation.language") ?? "fr"
-        return WhisperLanguage.all.first(where: { $0.id == saved })
-            ?? WhisperLanguage.all.first(where: { $0.id == "fr" })!
+    // Settings — Dictation languages (persisted, supports multiple)
+    var selectedLanguages: [WhisperLanguage] = {
+        if let saved = UserDefaults.standard.string(forKey: "zphyr.dictation.languages") {
+            let ids = saved.split(separator: ",").map(String.init)
+            let langs = ids.compactMap { id in WhisperLanguage.all.first(where: { $0.id == id }) }
+            if !langs.isEmpty { return langs }
+        }
+        // Fall back to old single-language key
+        let savedSingle = UserDefaults.standard.string(forKey: "zphyr.dictation.language") ?? "fr"
+        return [WhisperLanguage.all.first(where: { $0.id == savedSingle }) ?? WhisperLanguage.all.first(where: { $0.id == "fr" })!]
     }() {
-        didSet { UserDefaults.standard.set(selectedLanguage.id, forKey: "zphyr.dictation.language") }
+        didSet {
+            let ids = selectedLanguages.map(\.id).joined(separator: ",")
+            UserDefaults.standard.set(ids, forKey: "zphyr.dictation.languages")
+            // Also keep old key in sync (first language)
+            UserDefaults.standard.set(selectedLanguages.first?.id ?? "fr", forKey: "zphyr.dictation.language")
+        }
+    }
+
+    // Convenience: primary dictation language
+    var selectedLanguage: WhisperLanguage {
+        selectedLanguages.first ?? WhisperLanguage.all.first(where: { $0.id == "fr" })!
     }
 
     // Settings — UI display language (independent from dictation language)
@@ -200,9 +243,35 @@ final class AppState {
         didSet { UserDefaults.standard.set(uiDisplayLanguage.rawValue, forKey: "zphyr.ui.language") }
     }
 
-    // Settings — auto-insert (persisted)
-    var autoInsert: Bool = UserDefaults.standard.bool(forKey: "zphyr.autoInsert") {
+    // Settings — auto-insert (persisted, default true)
+    var autoInsert: Bool = {
+        let v = UserDefaults.standard.object(forKey: "zphyr.autoInsert")
+        return v == nil ? true : UserDefaults.standard.bool(forKey: "zphyr.autoInsert")
+    }() {
         didSet { UserDefaults.standard.set(autoInsert, forKey: "zphyr.autoInsert") }
+    }
+
+    // Settings — formatting mode (persisted, default .none)
+    var formattingMode: FormattingMode = {
+        let saved = UserDefaults.standard.string(forKey: "zphyr.formattingMode") ?? "trigger"
+        return FormattingMode(rawValue: saved) ?? .trigger
+    }() {
+        didSet { UserDefaults.standard.set(formattingMode.rawValue, forKey: "zphyr.formattingMode") }
+    }
+
+    // Settings — default code style (persisted, default .camel)
+    var defaultCodeStyle: CodeStyle = {
+        let saved = UserDefaults.standard.string(forKey: "zphyr.codeStyle") ?? "camel"
+        return CodeStyle(rawValue: saved) ?? .camel
+    }() {
+        didSet { UserDefaults.standard.set(defaultCodeStyle.rawValue, forKey: "zphyr.codeStyle") }
+    }
+
+    // Settings — advanced LLM mode installation status (persisted)
+    var advancedModeInstalled: Bool = {
+        UserDefaults.standard.bool(forKey: "zphyr.advancedMode.installed")
+    }() {
+        didSet { UserDefaults.standard.set(advancedModeInstalled, forKey: "zphyr.advancedMode.installed") }
     }
 
     // Settings — launch at login (backed by SMAppService)

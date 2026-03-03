@@ -32,7 +32,7 @@ struct ZphyrApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
 
-    // Called once the window is ready — set initial size based on onboarding state
+    // Called once the window is ready — set initial size based on preflight state
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBarItem()
 
@@ -40,14 +40,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self,
             selector: #selector(windowWillClose(_:)),
             name: NSWindow.willCloseNotification,
-            object: nil
-        )
-
-        // Listen for onboarding completion → resize to preflight size
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(onboardingCompleted),
-            name: .onboardingCompleted,
             object: nil
         )
 
@@ -59,12 +51,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
+        // Listen for "return to onboarding" request from Settings
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleReturnToOnboarding),
+            name: .returnToOnboarding,
+            object: nil
+        )
+
         configureWindowSize()
 
         // Start shortcut listener only when everything is already ready
-        let hasCompleted = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
         let hasCompletedPreflight = UserDefaults.standard.bool(forKey: "hasCompletedPreflight")
-        if hasCompleted && hasCompletedPreflight && AppState.shared.modelStatus.isReady {
+        if hasCompletedPreflight && AppState.shared.modelStatus.isReady {
             ShortcutManager.shared.startListening()
         }
     }
@@ -83,17 +82,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async { window.orderOut(nil) }
     }
 
-    @objc func onboardingCompleted() {
-        // After onboarding → go to preflight size (not main app yet)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.resizeToPreflight()
+    @objc func handleReturnToOnboarding() {
+        guard let window = NSApp.windows.first else { return }
+        // Hide the window BEFORE the view swap — this stops AppKit's display
+        // cycle from triggering layout while NavigationSplitView is being
+        // torn down (which causes infinite NSSplitViewItemViewWrapper
+        // constraint recursion).
+        window.orderOut(nil)
+        // Now flip the flag; SwiftUI will swap MainView → PreflightView
+        // while the window is hidden (no layout cycles).
+        UserDefaults.standard.set(false, forKey: "hasCompletedPreflight")
+        // Wait for SwiftUI to fully destroy the NavigationSplitView hierarchy,
+        // then resize and show the fresh preflight window.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            self.resizeToPreflight(window: window)
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 
     @objc func preflightCompleted() {
-        // Whisper is loaded → open main app
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.resizeToMainApp()
+        guard let window = NSApp.windows.first else { return }
+        // Hide window to prevent NSSplitView constraint recursion during
+        // the SwiftUI view swap (PreflightView → MainView with NavigationSplitView).
+        window.orderOut(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            self.resizeToMainApp(window: window)
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
             ShortcutManager.shared.startListening()
         }
     }
@@ -102,38 +118,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureWindowSize() {
         guard let window = NSApp.windows.first else { return }
-        let hasCompleted = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
         let hasCompletedPreflight = UserDefaults.standard.bool(forKey: "hasCompletedPreflight")
-        if !hasCompleted {
-            // First launch: show onboarding
-            resizeToOnboarding(window: window)
-        } else if hasCompletedPreflight {
-            // User already completed preflight previously.
+        if hasCompletedPreflight {
             resizeToMainApp(window: window)
         } else {
-            // Onboarding done → always start at preflight size.
-            // ContentView controls the actual transition to MainView
-            // once the user explicitly dismisses preflight.
             resizeToPreflight(window: window)
         }
-    }
-
-    private func resizeToOnboarding(window: NSWindow? = nil) {
-        guard let window = window ?? NSApp.windows.first else { return }
-        let size = NSSize(width: 780, height: 580)
-        window.minSize = size
-        window.maxSize = size
-        window.setContentSize(size)
-        window.center()
     }
 
     private func resizeToPreflight(window: NSWindow? = nil) {
         guard let window = window ?? NSApp.windows.first else { return }
         let size = NSSize(width: 1060, height: 720)
-        window.minSize = size
-        window.maxSize = size
+        // Unlock first so any competing layout constraints don't fight the resize
+        window.minSize = NSSize(width: 600, height: 400)
+        window.maxSize = NSSize(width: 99999, height: 99999)
         window.setContentSize(size)
         window.center()
+        // Lock to fixed size after the frame has settled
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            window.minSize = size
+            window.maxSize = size
+        }
     }
 
     func resizeToMainApp(window: NSWindow? = nil) {
@@ -183,4 +188,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension Notification.Name {
     static let onboardingCompleted = Notification.Name("ZphyrOnboardingCompleted")
     static let preflightCompleted  = Notification.Name("ZphyrPreflightCompleted")
+    static let returnToOnboarding  = Notification.Name("ZphyrReturnToOnboarding")
 }

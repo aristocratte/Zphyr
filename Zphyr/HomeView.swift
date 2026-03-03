@@ -399,6 +399,7 @@ struct TranscriptionCard: View {
     let entry: TranscriptionEntry
     @State private var isHovered = false
     @State private var copied = false
+    @State private var flashCopy = false
 
     var languageColor: Color {
         switch entry.language.uppercased() {
@@ -499,9 +500,27 @@ struct TranscriptionCard: View {
                 .shadow(color: .black.opacity(isHovered ? 0.06 : 0.03),
                         radius: isHovered ? 10 : 6, x: 0, y: 2)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(hex: "#34C759").opacity(flashCopy ? 0.13 : 0))
+                .animation(.easeOut(duration: 0.5), value: flashCopy)
+        )
         .scaleEffect(isHovered ? 1.003 : 1.0)
         .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isHovered)
         .onHover { isHovered = $0 }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(entry.preview, forType: .string)
+            copied = true
+            flashCopy = true
+            Task {
+                try? await Task.sleep(for: .seconds(0.4))
+                flashCopy = false
+                try? await Task.sleep(for: .seconds(1.1))
+                copied = false
+            }
+        }
     }
 }
 

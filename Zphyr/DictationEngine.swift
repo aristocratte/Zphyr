@@ -81,15 +81,38 @@ final class DictationEngine {
 
     private init() {}
 
+    // MARK: - Sound Effects
+
+    private func playDictationStartSound() {
+        guard AppState.shared.soundEffectsEnabled else { return }
+        if let sound = NSSound(named: NSSound.Name("Tink")) {
+            sound.volume = 0.5
+            sound.play()
+        }
+    }
+
+    private func playDictationEndSound() {
+        guard AppState.shared.soundEffectsEnabled else { return }
+        if let sound = NSSound(named: NSSound.Name("Pop")) {
+            sound.volume = 0.4
+            sound.play()
+        }
+    }
+
     // MARK: - Model Loading
 
     /// Downloads and loads the Whisper large-v3-turbo model.
     /// Progress is reported via AppState.shared.modelStatus.
     func loadModel() async {
         if let inFlight = modelLoadTask {
-            Self.modelLogger.notice("[ModelLoad] load already in progress; awaiting existing task")
-            await inFlight.value
-            return
+            if inFlight.isCancelled {
+                // Old task was cancelled but may still be running; don't await it.
+                modelLoadTask = nil
+            } else {
+                Self.modelLogger.notice("[ModelLoad] load already in progress; awaiting existing task")
+                await inFlight.value
+                return
+            }
         }
 
         let task = Task { [self] in
@@ -100,9 +123,47 @@ final class DictationEngine {
         modelLoadTask = nil
     }
 
+    func cancelModelDownload() {
+        let existing = modelLoadTask
+        existing?.cancel()
+        modelLoadTask = nil
+        whisperKit = nil
+        AppState.shared.modelStatus = .notDownloaded
+        AppState.shared.isDownloadPaused = false
+    }
+
+    func uninstallModel() {
+        cancelModelDownload()
+        whisperKit = nil
+
+        // Delete from the known install path (set during download)
+        if let installPath = AppState.shared.modelInstallPath {
+            try? FileManager.default.removeItem(atPath: installPath)
+        }
+
+        // Also sweep the WhisperKit download directory (~/Documents/huggingface)
+        let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let whisperKitDir = documentsDir.appendingPathComponent("huggingface/models/argmaxinc/whisperkit-coreml")
+        if let contents = try? FileManager.default.contentsOfDirectory(at: whisperKitDir, includingPropertiesForKeys: nil) {
+            for url in contents where url.lastPathComponent.contains("whisper") {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+
+        AppState.shared.modelInstallPath = nil
+        AppState.shared.modelStatus = .notDownloaded
+    }
+
+    func reinstallModel() async {
+        uninstallModel()
+        await loadModel()
+    }
+
     private func performModelLoad() async {
         let state = AppState.shared
         guard !state.modelStatus.isReady else { return }
+        guard !Task.isCancelled else { return }
+        whisperKit = nil
 
         state.modelStatus = .downloading(progress: 0.02)
         state.downloadStats = DownloadStats()
@@ -144,7 +205,16 @@ final class DictationEngine {
                     }
                 }
             )
+
+            // Bail out if cancelled between download and init (prevents ANE contention)
+            guard !Task.isCancelled else {
+                Self.modelLogger.notice("[ModelLoad] cancelled after download; aborting init")
+                state.modelStatus = .notDownloaded
+                return
+            }
+
             Self.modelLogger.notice("[ModelLoad] download completed at \(modelFolder.path, privacy: .public)")
+            state.modelInstallPath = modelFolder.path
 
             // Phase 2: load into memory
             state.modelStatus = .loading
@@ -179,13 +249,27 @@ final class DictationEngine {
                 download: false
             )
             whisperKit = try await WhisperKit(config)
+
+            guard !Task.isCancelled else {
+                Self.modelLogger.notice("[ModelLoad] cancelled after init; releasing")
+                whisperKit = nil
+                state.modelStatus = .notDownloaded
+                return
+            }
+
             state.modelStatus = .ready
             let elapsed = Date().timeIntervalSince(startedAt)
             Self.modelLogger.notice("[ModelLoad] ready in \(elapsed, privacy: .public)s")
+            Task { await AdvancedLLMFormatter.shared.loadIfInstalled() }
 
         } catch {
-            Self.modelLogger.error("[ModelLoad] failed: \(error.localizedDescription, privacy: .public)")
-            state.modelStatus = .failed(error.localizedDescription)
+            if Task.isCancelled {
+                Self.modelLogger.notice("[ModelLoad] cancelled")
+                state.modelStatus = .notDownloaded
+            } else {
+                Self.modelLogger.error("[ModelLoad] failed: \(error.localizedDescription, privacy: .public)")
+                state.modelStatus = .failed(error.localizedDescription)
+            }
         }
     }
 
@@ -231,6 +315,7 @@ final class DictationEngine {
         audioBuffer = []
         state.dictationState = .listening
         overlayController.show()
+        playDictationStartSound()
         startAudioCapture()
     }
 
@@ -241,7 +326,8 @@ final class DictationEngine {
         Self.pipelineLogger.notice("[Dictation] stop; captured samples=\(self.audioBuffer.count)")
 
         let rawText = await runWhisperTranscription()
-        let finalText = postProcess(rawText)
+        var finalText = postProcess(rawText)
+        finalText = await applyCodeFormatting(finalText)
         Self.pipelineLogger.notice("[Dictation] transcription lengths raw=\(rawText.count) final=\(finalText.count)")
 
         state.lastTranscription = finalText
@@ -268,10 +354,28 @@ final class DictationEngine {
         }
 
         targetApp = nil
+        playDictationEndSound()
         overlayController.hide()
 
         try? await Task.sleep(for: .milliseconds(600))
         state.dictationState = .idle
+    }
+
+    // MARK: - Code Formatting Pipeline
+
+    private func applyCodeFormatting(_ text: String) async -> String {
+        guard !text.isEmpty else { return text }
+        let mode = AppState.shared.formattingMode
+        let style = AppState.shared.defaultCodeStyle
+        switch mode {
+        case .trigger:
+            return CodeFormatter().formatTranscribedText(text, defaultStyle: style)
+        case .advanced:
+            if let result = await AdvancedLLMFormatter.shared.format(text, style: style) {
+                return result
+            }
+            return CodeFormatter().formatAdvanced(text, defaultStyle: style)
+        }
     }
 
     // MARK: - Audio Capture
@@ -396,8 +500,9 @@ final class DictationEngine {
 
     private func runWhisperTranscription() async -> String {
         let audioSnapshot = audioBuffer
-        let lang = AppState.shared.selectedLanguage.id
-        return await transcribeAudioSamples(audioSnapshot, language: lang, includeContextTokens: true)
+        let languages = AppState.shared.selectedLanguages
+        let lang: String? = languages.count > 1 ? nil : (languages.first?.id ?? "fr")
+        return await transcribeAudioSamples(audioSnapshot, language: lang)
     }
 
     func transcribeAudioFile(at url: URL, language: WhisperLanguage) async -> String {
@@ -434,7 +539,7 @@ final class DictationEngine {
             return ""
         }
 
-        let rawText = await transcribeAudioSamples(samples, language: language.id, includeContextTokens: false)
+        let rawText = await transcribeAudioSamples(samples, language: language.id)
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         state.lastTranscription = trimmed
         if trimmed.isEmpty {
@@ -453,15 +558,29 @@ final class DictationEngine {
 
     private func transcribeAudioSamples(
         _ audioSnapshot: [Float],
-        language lang: String,
-        includeContextTokens: Bool
+        language lang: String?
     ) async -> String {
         guard let wk = whisperKit, !audioSnapshot.isEmpty else { return "" }
         return await Task.detached(priority: .userInitiated) {
-            Self.pipelineLogger.notice("[Dictation] decoding language=\(lang, privacy: .public)")
-            let tokens = includeContextTokens ? ContextFetcher.fetchCodeTokens() : []
+            Self.pipelineLogger.notice("[Dictation] decoding language=\(lang ?? "auto", privacy: .public)")
+
+            // Build the initial_prompt from the custom dictionary (vocabulary injection).
+            // The prompt is built on MainActor because DictionaryStore is @MainActor.
             let prompt = await MainActor.run {
-                ContextFetcher.buildWhisperPrompt(language: lang, tokens: tokens)
+                ContextFetcher.buildWhisperPrompt(language: lang ?? "en")
+            }
+
+            // Tokenize the prompt text so WhisperKit can inject it as initial_prompt.
+            // This is the critical step that was missing: promptTokens must be [Int], not a String.
+            // Filter out special tokens (they would corrupt the decoder state).
+            var promptTokenIds: [Int]? = nil
+            if !prompt.isEmpty, let tokenizer = wk.tokenizer {
+                promptTokenIds = tokenizer
+                    .encode(text: " " + prompt.trimmingCharacters(in: .whitespaces))
+                    .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+                if let ids = promptTokenIds {
+                    Self.pipelineLogger.notice("[CodeContext] injecting \(ids.count, privacy: .public) prompt tokens")
+                }
             }
 
             let options = DecodingOptions(
@@ -470,10 +589,11 @@ final class DictationEngine {
                 temperature: 0.0,
                 temperatureFallbackCount: 3,
                 sampleLength: 224,
-                usePrefillPrompt: !prompt.isEmpty,
-                usePrefillCache: true,
+                usePrefillPrompt: true,
+                usePrefillCache: promptTokenIds == nil,
                 skipSpecialTokens: true,
                 withoutTimestamps: true,
+                promptTokens: promptTokenIds,
                 compressionRatioThreshold: 2.4,
                 logProbThreshold: -1.0,
                 firstTokenLogProbThreshold: -1.5,

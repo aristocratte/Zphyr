@@ -305,6 +305,7 @@ struct SnippetsView: View {
         }
         .background(Color(hex: "#F7F7F5"))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .colorScheme(.light)
         .onChange(of: languageCode) { _, _ in
             resetKnownDefaultTriggersToCurrentLanguageIfNeeded()
         }
@@ -479,6 +480,7 @@ struct SnippetsView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .colorScheme(.light)
                 .frame(width: 280)
             }
 
@@ -641,6 +643,7 @@ struct AudioTranscriptionView: View {
         }
         .background(Color(hex: "#F7F7F5"))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .colorScheme(.light)
         .fileImporter(
             isPresented: $isImportingFile,
             allowedContentTypes: [.audio],
@@ -713,11 +716,11 @@ struct AudioTranscriptionView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
                 .background(Color.white)
+                .cornerRadius(10)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color(hex: "#DADAD5"), lineWidth: 1.2)
+                        .stroke(Color(hex: "#B8B8B4"), lineWidth: 1.5)
                 )
-                .cornerRadius(10)
             }
             .menuStyle(.borderlessButton)
             .buttonStyle(.plain)
@@ -970,7 +973,7 @@ private struct SnippetFieldRow: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(isEnabled ? Color(hex: "#1A1A1A") : Color(hex: "#8E8E88"))
-                .tint(Color(hex: "#1A1A1A"))
+                .accentColor(Color(hex: "#22D3B8"))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
                 .background(
@@ -1023,7 +1026,7 @@ private struct SnippetTriggersEditor: View {
             TextEditor(text: $text)
                 .font(.system(size: 12))
                 .foregroundColor(isEnabled ? Color(hex: "#1A1A1A") : Color(hex: "#8E8E88"))
-                .tint(Color(hex: "#1A1A1A"))
+                .accentColor(Color(hex: "#22D3B8"))
                 .padding(8)
                 .frame(minHeight: 74, maxHeight: 90)
                 .scrollContentBackground(.hidden)
