@@ -101,94 +101,88 @@ struct HomeView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
+            VStack(alignment: .leading, spacing: 24) {
 
-                // Header
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 5) {
+                // ── Header ────────────────────────────────────────────
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Text(greeting)
-                            .font(.system(size: 26, weight: .bold))
-                            .foregroundColor(Color(hex: "#1A1A1A"))
-                        Text(appState.modelStatus.isReady
-                             ? t("Le modèle Whisper est actif. Maintenez \(triggerDisplayName) pour dicter.",
-                                 "Whisper is ready. Hold \(triggerDisplayName) to dictate.",
-                                 "Whisper está listo. Mantén \(triggerDisplayName) para dictar.",
-                                 "Whisper 已就绪。按住 \(triggerDisplayName) 开始听写。",
-                                 "Whisper の準備ができました。\(triggerDisplayName) を押し続けて音声入力します。",
-                                 "Whisper готов. Удерживайте \(triggerDisplayName), чтобы диктовать.")
-                             : t("Le modèle Whisper n'est pas encore chargé.",
-                                 "Whisper is not loaded yet.",
-                                 "Whisper aún no está cargado.",
-                                 "Whisper 尚未加载。",
-                                 "Whisper はまだ読み込まれていません。",
-                                 "Whisper еще не загружен."))
-                            .font(.system(size: 13))
-                            .foregroundColor(Color(hex: "#888880"))
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundColor(Color(hex: "#111111"))
+
+                        // Status pill
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(appState.modelStatus.isReady ? Color(hex: "#34C759") : Color(hex: "#CCCCC8"))
+                                .frame(width: 6, height: 6)
+                            Text(appState.modelStatus.isReady
+                                 ? t("Whisper actif · Maintenez \(triggerDisplayName)",
+                                     "Whisper ready · Hold \(triggerDisplayName)",
+                                     "Whisper listo · Mantén \(triggerDisplayName)",
+                                     "Whisper 已就绪 · 按住 \(triggerDisplayName)",
+                                     "Whisper 準備完了 · \(triggerDisplayName) を長押し",
+                                     "Whisper готов · Удержите \(triggerDisplayName)")
+                                 : t("Whisper non chargé",
+                                     "Whisper not loaded",
+                                     "Whisper no cargado",
+                                     "Whisper 未加载",
+                                     "Whisper 未読み込み",
+                                     "Whisper не загружен"))
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(Color(hex: "#888880"))
+                        }
                     }
                     Spacer()
                 }
 
-                // Stats row
-                HStack(spacing: 14) {
+                // ── Stats row ─────────────────────────────────────────
+                HStack(spacing: 12) {
                     StatCard(
                         value: "\(store.totalWords)",
                         label: t("Mots dictés", "Words dictated", "Palabras dictadas", "已听写词数", "音声入力した単語数", "Продиктовано слов"),
-                        icon: "character.cursor.ibeam",
-                        trend: store.totalWords > 0 ? nil : nil
+                        icon: "character.cursor.ibeam"
                     )
                     StatCard(
                         value: formatMinutes(store.minutesSaved),
                         label: t("Temps gagné", "Time saved", "Tiempo ahorrado", "节省时间", "節約時間", "Сэкономлено времени"),
-                        icon: "clock.badge.checkmark",
-                        trend: nil
+                        icon: "clock"
                     )
                     StatCard(
                         value: "\(store.totalTranscriptions)",
                         label: t("Transcriptions", "Transcriptions", "Transcripciones", "转写次数", "文字起こし回数", "Транскрипции"),
-                        icon: "doc.text.fill",
-                        trend: nil
+                        icon: "doc.text"
                     )
-                    StatCard(
-                        value: appState.modelStatus.isReady ? "✓" : "–",
-                        label: t("Modèle", "Model", "Modelo", "模型", "モデル", "Модель"),
-                        icon: "cpu",
-                        trend: nil,
-                        valueColor: appState.modelStatus.isReady ? Color(hex: "#34C759") : Color(hex: "#BBBBBB")
-                    )
+                    ModelStatCard()
                 }
 
-                // Live dictation state banner
-                if appState.dictationState == .listening || appState.dictationState == .processing {
+                // ── Live dictation banner ─────────────────────────────
+                if appState.dictationState == .listening || appState.dictationState == .processing || appState.dictationState == .formatting {
                     LiveDictationBanner()
                 }
 
-                // Recent transcriptions
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
+                // ── Recent transcriptions ─────────────────────────────
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .center) {
                         Text(t("Récent", "Recent", "Recientes", "最近", "最近", "Недавние"))
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(Color(hex: "#1A1A1A"))
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(Color(hex: "#111111"))
+                        if !store.entries.isEmpty {
+                            Text("· \(store.entries.count)")
+                                .font(.system(size: 13, weight: .regular))
+                                .foregroundColor(Color(hex: "#BBBBBB"))
+                        }
                         Spacer()
-                        if store.entries.isEmpty {
-                            Text(t("Aucune dictée pour l'instant",
-                                   "No dictation yet",
-                                   "Aún no hay dictados",
-                                   "还没有听写记录",
-                                   "まだ音声入力はありません",
-                                   "Пока нет диктовок"))
-                                .font(.system(size: 12))
-                                .foregroundColor(Color(hex: "#CCCCCC"))
-                        } else {
+                        if !store.entries.isEmpty {
                             Button {
                                 exportHistory()
                             } label: {
                                 HStack(spacing: 4) {
-                                    Image(systemName: "square.and.arrow.up")
+                                    Image(systemName: "arrow.up.circle")
                                         .font(.system(size: 11, weight: .medium))
                                     Text(t("Exporter", "Export", "Exportar", "导出", "エクスポート", "Экспорт"))
                                         .font(.system(size: 12, weight: .medium))
                                 }
-                                .foregroundColor(Color(hex: "#888880"))
+                                .foregroundColor(Color(hex: "#AAAAAA"))
                             }
                             .buttonStyle(.plain)
                         }
@@ -197,7 +191,7 @@ struct HomeView: View {
                     if store.entries.isEmpty {
                         EmptyStateView()
                     } else {
-                        VStack(spacing: 8) {
+                        VStack(spacing: 6) {
                             ForEach(store.entries.prefix(8)) { entry in
                                 TranscriptionCard(entry: entry)
                             }
@@ -205,7 +199,7 @@ struct HomeView: View {
                     }
                 }
             }
-            .padding(28)
+            .padding(24)
         }
         .background(Color(hex: "#F7F7F5"))
         .onChange(of: appState.lastTranscription) { _, newText in
@@ -248,13 +242,11 @@ struct HomeView: View {
     }
 
     private func formatMinutes(_ m: Double) -> String {
-        if m < 1 {
-            return t("< 1m", "< 1m", "< 1m", "< 1分", "< 1分", "< 1м")
-        }
+        if m < 1 { return "0m" }
         if m < 60 { return "\(Int(m))m" }
         let hours = Int(m / 60)
         let minutes = Int(m.truncatingRemainder(dividingBy: 60))
-        return "\(hours)h \(minutes)m"
+        return "\(hours)h\(minutes)m"
     }
 
     private var triggerDisplayName: String {
@@ -285,6 +277,8 @@ private struct LiveDictationBanner: View {
 
             Text(appState.dictationState == .listening
                  ? t("Écoute en cours…", "Listening…", "Escuchando…", "正在监听…", "聞き取り中…", "Слушаю…")
+                 : appState.dictationState == .formatting
+                 ? t("Formatage IA…", "AI formatting…", "Formateando IA…", "AI 格式化…", "AI フォーマット中…", "ИИ форматирует…")
                  : t("Transcription…", "Transcribing…", "Transcribiendo…", "转写中…", "文字起こし中…", "Транскрибация…"))
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(hex: "#FF3B30"))
@@ -315,32 +309,34 @@ private struct EmptyStateView: View {
     @AppStorage("zphyr.shortcut.triggerKey") private var triggerKeyRaw = TriggerKey.rightOption.rawValue
 
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "waveform.badge.plus")
-                .font(.system(size: 36, weight: .light))
-                .foregroundColor(Color(hex: "#22D3B8").opacity(0.45))
+        VStack(spacing: 10) {
+            Image(systemName: "waveform")
+                .font(.system(size: 28, weight: .light))
+                .foregroundColor(Color(hex: "#22D3B8").opacity(0.5))
+
             Text(t("Vos dictées apparaîtront ici",
                    "Your dictations will appear here",
                    "Tus dictados aparecerán aquí",
                    "你的听写记录会显示在这里",
                    "音声入力の履歴がここに表示されます",
                    "Ваши диктовки появятся здесь"))
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(Color(hex: "#CCCCCC"))
-            Text(t("Maintenez la touche \(triggerDisplayName) pour commencer à dicter.",
-                   "Hold \(triggerDisplayName) to start dictating.",
-                   "Mantén \(triggerDisplayName) para empezar a dictar.",
-                   "按住 \(triggerDisplayName) 开始听写。",
-                   "\(triggerDisplayName) を押し続けると音声入力を開始します。",
-                   "Удерживайте \(triggerDisplayName), чтобы начать диктовку."))
-                .font(.system(size: 12))
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(Color(hex: "#CCCCCA"))
+
+            Text(t("Maintenez \(triggerDisplayName) pour commencer",
+                   "Hold \(triggerDisplayName) to start",
+                   "Mantén \(triggerDisplayName) para comenzar",
+                   "按住 \(triggerDisplayName) 开始",
+                   "\(triggerDisplayName) を長押しして開始",
+                   "Удержите \(triggerDisplayName) для начала"))
+                .font(.system(size: 11.5))
                 .foregroundColor(Color(hex: "#DDDDDA"))
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 40)
+        .padding(.vertical, 36)
         .background(Color.white)
-        .cornerRadius(14)
-        .shadow(color: .black.opacity(0.03), radius: 6, x: 0, y: 1)
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.025), radius: 4, x: 0, y: 1)
     }
 
     private var triggerDisplayName: String {
@@ -355,41 +351,64 @@ struct StatCard: View {
     let value: String
     let label: String
     let icon: String
-    let trend: String?
-    var valueColor: Color = Color(hex: "#1A1A1A")
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Image(systemName: icon)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(Color(hex: "#22D3B8"))
-                Spacer()
-                if let trend {
-                    Text(trend)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(Color(hex: "#34C759"))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Color(hex: "#34C759").opacity(0.1))
-                        .cornerRadius(6)
-                }
-            }
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(Color(hex: "#22D3B8"))
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(value)
-                    .font(.system(size: 22, weight: .bold).monospacedDigit())
-                    .foregroundColor(valueColor)
+                    .font(.system(size: 20, weight: .bold).monospacedDigit())
+                    .foregroundColor(Color(hex: "#111111"))
                     .contentTransition(.numericText())
                 Text(label)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundColor(Color(hex: "#AAAAAA"))
+                    .lineLimit(1)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white)
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.04), radius: 6, x: 0, y: 1)
+    }
+}
+
+// MARK: - Model Stat Card
+
+private struct ModelStatCard: View {
+    @Bindable private var appState = AppState.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Image(systemName: "cpu")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(Color(hex: "#22D3B8"))
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(appState.modelStatus.isReady ? Color(hex: "#34C759") : Color(hex: "#DDDDDA"))
+                        .frame(width: 8, height: 8)
+                    Text(appState.modelStatus.isReady
+                         ? t("Actif", "Active", "Activo", "活跃", "アクティブ", "Активен")
+                         : t("Inactif", "Inactive", "Inactivo", "未活跃", "非アクティブ", "Неактивен"))
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundColor(appState.modelStatus.isReady ? Color(hex: "#111111") : Color(hex: "#CCCCCC"))
+                }
+                Text(t("Modèle Whisper", "Whisper model", "Modelo Whisper", "Whisper 模型", "Whisper モデル", "Модель Whisper"))
+                    .font(.system(size: 10.5, weight: .medium))
                     .foregroundColor(Color(hex: "#AAAAAA"))
             }
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.white)
-        .cornerRadius(14)
-        .shadow(color: .black.opacity(0.04), radius: 8, x: 0, y: 2)
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.04), radius: 6, x: 0, y: 1)
     }
 }
 
@@ -401,78 +420,69 @@ struct TranscriptionCard: View {
     @State private var copied = false
     @State private var flashCopy = false
 
-    var languageColor: Color {
+    private var langColor: Color {
         switch entry.language.uppercased() {
-        case "SWIFT":   return Color(hex: "#FF6B35")
-        case "JS", "TS":return Color(hex: "#F0DB4F")
-        case "MD":      return Color(hex: "#4A90D9")
-        case "PY":      return Color(hex: "#3776AB")
         case "FR":      return Color(hex: "#007AFF")
         case "EN":      return Color(hex: "#34C759")
-        default:        return Color(hex: "#888880")
+        case "ES":      return Color(hex: "#FF9500")
+        case "ZH":      return Color(hex: "#FF3B30")
+        case "JA":      return Color(hex: "#AF52DE")
+        case "RU":      return Color(hex: "#5856D6")
+        case "SWIFT":   return Color(hex: "#FF6B35")
+        case "JS", "TS":return Color(hex: "#F0DB4F")
+        case "PY":      return Color(hex: "#3776AB")
+        default:        return Color(hex: "#AAAAAA")
         }
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(languageColor.opacity(0.12))
-                    .frame(width: 40, height: 40)
-                Text(String(entry.language.prefix(2)))
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(languageColor)
-            }
+        HStack(alignment: .center, spacing: 12) {
+            // Left accent bar
+            RoundedRectangle(cornerRadius: 2)
+                .fill(langColor)
+                .frame(width: 3)
+                .frame(maxHeight: .infinity)
 
-            VStack(alignment: .leading, spacing: 6) {
+            // Text content
+            VStack(alignment: .leading, spacing: 4) {
                 Text(entry.title)
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(Color(hex: "#1A1A1A"))
+                    .foregroundColor(Color(hex: "#111111"))
+                    .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
 
-                HStack(spacing: 10) {
-                    Label(entry.date, systemImage: "calendar")
-                    if !entry.duration.isEmpty {
-                        Label(entry.duration, systemImage: "timer")
-                    }
-                    Label(
-                        t("\(entry.wordCount) mots",
-                          "\(entry.wordCount) words",
-                          "\(entry.wordCount) palabras",
-                          "\(entry.wordCount) 个词",
-                          "\(entry.wordCount) 語",
-                          "\(entry.wordCount) слов"),
-                        systemImage: "textformat"
-                    )
+                HStack(spacing: 4) {
+                    Text(entry.date)
+                    Text("·")
+                    Text(t("\(entry.wordCount) mots",
+                           "\(entry.wordCount) words",
+                           "\(entry.wordCount) palabras",
+                           "\(entry.wordCount) 词",
+                           "\(entry.wordCount) 語",
+                           "\(entry.wordCount) слов"))
+                    Text("·")
+                    Text(entry.language.uppercased())
+                        .foregroundColor(langColor)
                 }
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 10.5, weight: .regular))
                 .foregroundColor(Color(hex: "#BBBBBB"))
-                .labelStyle(.titleAndIcon)
             }
 
             Spacer()
 
-            // Action buttons (visible on hover)
-            if isHovered {
-                HStack(spacing: 6) {
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(entry.preview, forType: .string)
-                        copied = true
-                        Task {
-                            try? await Task.sleep(for: .seconds(1.5))
-                            copied = false
-                        }
-                    } label: {
-                        Image(systemName: copied ? "checkmark" : "doc.on.clipboard")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(copied ? Color(hex: "#34C759") : Color(hex: "#888880"))
-                            .frame(width: 26, height: 26)
-                            .background(Color(hex: "#E5E5E0"))
-                            .clipShape(Circle())
-                    }
-                    .buttonStyle(.plain)
+            // Action icons
+            HStack(spacing: 6) {
+                Button { copy() } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.clipboard")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(copied ? Color(hex: "#34C759") : (isHovered ? Color(hex: "#888880") : Color(hex: "#DDDDDA")))
+                        .frame(width: 26, height: 26)
+                        .background(isHovered ? Color(hex: "#F0F0EE") : Color.clear)
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
 
+                if isHovered {
                     Button {
                         TranscriptionStore.shared.remove(id: entry.id)
                     } label: {
@@ -480,46 +490,46 @@ struct TranscriptionCard: View {
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(hex: "#FF3B30"))
                             .frame(width: 26, height: 26)
-                            .background(Color(hex: "#FF3B30").opacity(0.1))
+                            .background(Color(hex: "#FF3B30").opacity(0.08))
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
                 }
-                .transition(.opacity.combined(with: .scale(scale: 0.9)))
-            } else {
-                // Always show copy icon when not hovered (subtle)
-                Image(systemName: copied ? "checkmark" : "doc.on.clipboard")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(copied ? Color(hex: "#34C759") : Color(hex: "#DDDDDA"))
             }
+            .animation(.spring(response: 0.22, dampingFraction: 0.8), value: isHovered)
         }
-        .padding(14)
+        .padding(.vertical, 11)
+        .padding(.leading, 12)
+        .padding(.trailing, 12)
         .background(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 10)
                 .fill(Color.white)
-                .shadow(color: .black.opacity(isHovered ? 0.06 : 0.03),
-                        radius: isHovered ? 10 : 6, x: 0, y: 2)
+                .shadow(color: .black.opacity(isHovered ? 0.055 : 0.028),
+                        radius: isHovered ? 8 : 4, x: 0, y: 1)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(hex: "#34C759").opacity(flashCopy ? 0.13 : 0))
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(hex: "#34C759").opacity(flashCopy ? 0.10 : 0))
                 .animation(.easeOut(duration: 0.5), value: flashCopy)
         )
-        .scaleEffect(isHovered ? 1.003 : 1.0)
-        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isHovered)
+        .scaleEffect(isHovered ? 1.002 : 1.0)
+        .animation(.spring(response: 0.22, dampingFraction: 0.82), value: isHovered)
         .onHover { isHovered = $0 }
         .contentShape(Rectangle())
-        .onTapGesture {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(entry.preview, forType: .string)
-            copied = true
-            flashCopy = true
-            Task {
-                try? await Task.sleep(for: .seconds(0.4))
-                flashCopy = false
-                try? await Task.sleep(for: .seconds(1.1))
-                copied = false
-            }
+        .onTapGesture { copy() }
+    }
+
+    private func copy() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(entry.preview, forType: .string)
+        copied = true
+        flashCopy = true
+        Task {
+            try? await Task.sleep(for: .seconds(0.4))
+            flashCopy = false
+            try? await Task.sleep(for: .seconds(1.1))
+            copied = false
         }
     }
 }

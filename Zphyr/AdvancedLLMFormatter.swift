@@ -3,14 +3,15 @@
 //  Zphyr
 //
 //  On-device LLM code formatting using Apple's MLX Swift framework.
-//  Model: mlx-community/Qwen2.5-1.5B-Instruct-4bit (~900 MB, 4-bit quantized)
+//  Model: mlx-community/Qwen3.5-0.8B-4bit (~625 MB, 4-bit quantized)
 //  Runs on Apple Silicon via Metal — zero network latency after initial download.
 //
 //  ─── ONE-TIME SETUP IN XCODE ────────────────────────────────────────────────
 //  File → Add Package Dependencies
-//  URL    : https://github.com/ml-explore/mlx-swift-examples
-//  Branch : main   (or the latest tagged release)
+//  URL    : https://github.com/ml-explore/mlx-swift-lm
+//  Branch : main
 //  Products to add to the Zphyr target: MLXLLM   MLXLMCommon
+//  (mlx-swift-examples ne contient PAS MLXLLM — utiliser mlx-swift-lm)
 //  ─────────────────────────────────────────────────────────────────────────────
 
 import Foundation
@@ -25,16 +26,24 @@ import MLXLMCommon
 @MainActor
 final class AdvancedLLMFormatter {
 
-    static let shared  = AdvancedLLMFormatter()
-    static let modelId = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+    static let shared     = AdvancedLLMFormatter()
+    static let modelId    = "mlx-community/Qwen3.5-0.8B-4bit"
+    static let modelBytes: Double = 625 * 1_024 * 1_024   // ~625 MB
 
     // MARK: - Observable state (drives onboarding + settings UI)
-    var downloadProgress: Double = 0
-    var isInstalling: Bool       = false
-    var installError: String?    = nil
+    var downloadProgress: Double  = 0
+    var isInstalling: Bool        = false
+    var installError: String?     = nil
+    var downloadSpeed: String     = ""   // e.g. "3.2 MB/s"
+    var downloadedMB: String      = ""   // e.g. "312 / 625 MB"
 
     private var container: ModelContainer?
+    private var installTask: Task<Void, Never>?
     private let log = Logger(subsystem: "com.zphyr.app", category: "AdvancedLLM")
+
+    // Speed tracking
+    private var lastFraction: Double = 0
+    private var lastSpeedUpdate: Date = .distantPast
 
     private init() {}
 
@@ -44,28 +53,71 @@ final class AdvancedLLMFormatter {
     /// Sets `AppState.shared.advancedModeInstalled = true` on success.
     func installModel() async {
         guard !isInstalling else { return }
-        isInstalling     = true
-        installError     = nil
-        downloadProgress = 0
+        isInstalling      = true
+        installError      = nil
+        downloadProgress  = 0
+        downloadSpeed     = ""
+        downloadedMB      = ""
+        lastFraction      = 0
+        lastSpeedUpdate   = Date()
 
-        do {
-            let config = ModelConfiguration(id: Self.modelId)
-            container = try await LLMModelFactory.shared.loadContainer(
-                configuration: config,
-                progressHandler: { [weak self] progress in
-                    Task { @MainActor in
-                        self?.downloadProgress = progress.fractionCompleted
+        let task = Task<Void, Never> {
+            do {
+                let config = ModelConfiguration(id: Self.modelId)
+                let result = try await LLMModelFactory.shared.loadContainer(
+                    configuration: config,
+                    progressHandler: { [weak self] progress in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            let p  = progress.fractionCompleted
+                            let now = Date()
+                            let dt  = now.timeIntervalSince(self.lastSpeedUpdate)
+                            if dt >= 0.6 {
+                                let dp       = p - self.lastFraction
+                                let bps      = (dp * Self.modelBytes) / dt
+                                let received = p * Self.modelBytes
+                                self.downloadSpeed   = bps > 0 ? Self.formatSpeed(bps) : ""
+                                self.downloadedMB    = String(format: "%.0f / 625 MB",
+                                                              received / 1_048_576)
+                                self.lastFraction    = p
+                                self.lastSpeedUpdate = now
+                            }
+                            self.downloadProgress = p
+                        }
                     }
+                )
+                if !Task.isCancelled {
+                    self.container        = result
+                    self.downloadProgress = 1.0
+                    self.downloadSpeed    = ""
+                    self.downloadedMB     = ""
+                    AppState.shared.advancedModeInstalled = true
+                    self.log.notice("[AdvancedLLM] installation complete")
                 }
-            )
-            downloadProgress = 1.0
-            AppState.shared.advancedModeInstalled = true
-            log.notice("[AdvancedLLM] installation complete")
-        } catch {
-            installError = error.localizedDescription
-            log.error("[AdvancedLLM] install error: \(error.localizedDescription)")
+            } catch is CancellationError {
+                self.log.notice("[AdvancedLLM] install cancelled")
+            } catch {
+                if !Task.isCancelled {
+                    self.installError = error.localizedDescription
+                    self.log.error("[AdvancedLLM] install error: \(error.localizedDescription)")
+                }
+            }
+            self.isInstalling  = false
+            self.installTask   = nil
         }
-        isInstalling = false
+        installTask = task
+        await task.value
+    }
+
+    /// Cancels an in-progress installation.
+    func cancelInstall() {
+        installTask?.cancel()
+        installTask      = nil
+        isInstalling     = false
+        downloadProgress = 0
+        downloadSpeed    = ""
+        downloadedMB     = ""
+        log.notice("[AdvancedLLM] install cancelled by user")
     }
 
     /// Silently loads an already-downloaded model from the local cache (no network).
@@ -76,7 +128,6 @@ final class AdvancedLLMFormatter {
         if container != nil {
             log.notice("[AdvancedLLM] loaded from disk cache")
         } else {
-            // Cache missing — reset flag so user can reinstall
             AppState.shared.advancedModeInstalled = false
             log.warning("[AdvancedLLM] cache missing, resetting installed flag")
         }
@@ -95,59 +146,116 @@ final class AdvancedLLMFormatter {
     func format(_ text: String, style: CodeStyle) async -> String? {
         guard let container else { return nil }
 
-        let styleName: String
+        // Default style hint appended at end so the LLM has a fallback when
+        // context doesn't specify a language/convention.
+        let defaultStyleHint: String
         switch style {
-        case .camel:     styleName = "camelCase"
-        case .snake:     styleName = "snake_case"
-        case .pascal:    styleName = "PascalCase"
-        case .screaming: styleName = "SCREAMING_SNAKE_CASE"
-        case .kebab:     styleName = "kebab-case"
+        case .camel:     defaultStyleHint = "camelCase"
+        case .snake:     defaultStyleHint = "snake_case"
+        case .pascal:    defaultStyleHint = "PascalCase"
+        case .screaming: defaultStyleHint = "SCREAMING_SNAKE_CASE"
+        case .kebab:     defaultStyleHint = "kebab-case"
         }
 
-        // Ultra-short system prompt to keep token overhead minimal
-        let system = "Reformat code identifiers to \(styleName). Keep all other words exactly. Return only the rewritten text."
-        let messages: [[String: String]] = [
-            ["role": "system", "content": system],
-            ["role": "user",   "content": text]
-        ]
+        let systemPrompt = """
+            Tu es un assistant de FORMATAGE UNIQUEMENT.
+            Tu ne dois JAMAIS réécrire, changer, remplacer, ajouter ou supprimer un seul mot du texte original.
+
+            RÈGLES ABSOLUES (respecte-les à la lettre) :
+
+            1. Tu peux UNIQUEMENT faire les modifications suivantes :
+               - Ajouter ou corriger la ponctuation (., !, ?, ,, ;, :)
+               - Mettre une majuscule au début des phrases
+               - Créer des paragraphes (sauts de ligne doubles) quand il y a un changement de sujet clair
+               - Transformer les listes parlées en vraies listes avec "- " ou "1. "
+               - Formater les noms techniques (variables, fonctions, classes) selon le contexte
+               - Corriger uniquement la casse des mots existants (ex: background color red → backgroundColorRed ou background_color_red)
+
+            2. INTERDIT ABSOLU :
+               - Ne change AUCUN mot existant (ni orthographe, ni synonyme, ni reformulation)
+               - N'ajoute AUCUN mot nouveau
+               - Ne supprime AUCUN mot existant (sauf les tics isolés comme "euh", "hum")
+               - Ne fais pas de résumé, de commentaire, d'explication
+               - Pas de blocs de code, pas de guillemets, pas de markdown autour du résultat
+
+            3. Tu dois sortir EXACTEMENT le texte d'origine, mais avec uniquement les améliorations de formatage ci-dessus.
+
+            Exemples :
+
+            Entrée : "je crée la variable background color red euh ensuite je fais une fonction fetch user data voilà voilà en python"
+            Sortie : "Je crée la variable background_color_red. Ensuite je fais une fonction fetchUserData en Python."
+
+            Entrée : "premier point je fais le login ensuite je fais le logout enfin je teste"
+            Sortie : "- Je fais le login\\n- Je fais le logout\\n- Je teste"
+
+            Style de casse par défaut si le contexte ne l'indique pas : \(defaultStyleHint).
+
+            Réponds UNIQUEMENT avec le texte formaté. Rien d'autre.
+            """
+
+        let userInput = UserInput(chat: [
+            .system(systemPrompt),
+            .user(text)
+        ])
 
         do {
-            let result = try await container.perform { context in
-                let input = try await context.processor.prepare(
-                    input: .init(messages: messages)
-                )
-                return try MLXLMCommon.generate(
-                    input: input,
-                    parameters: .init(temperature: 0, maxTokens: 150),
-                    context: context
-                ) { _ in .more }
+            let lmInput = try await container.prepare(input: userInput)
+            let stream  = try await container.generate(
+                input: lmInput,
+                parameters: GenerateParameters(maxTokens: 512, temperature: 0)
+            )
+            var output = ""
+            for await generation in stream {
+                if case .chunk(let chunk) = generation { output += chunk }
             }
-            let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            return output.isEmpty ? nil : output
+            let result = output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            guard !result.isEmpty else { return nil }
+
+            // ── Hallucination guard ──────────────────────────────────────────
+            // If the model added significantly more words than the input, it's
+            // likely making things up. Reject and let the regex fallback run.
+            let inputWords  = text.split(whereSeparator: \.isWhitespace).count
+            let outputWords = result.split(whereSeparator: \.isWhitespace).count
+            let tolerance   = max(4, inputWords / 5)   // allow up to +20 % or +4 words
+            if outputWords > inputWords + tolerance {
+                log.warning("[AdvancedLLM] hallucination guard triggered (in=\(inputWords) out=\(outputWords)), using regex fallback")
+                return nil
+            }
+
+            return result
         } catch {
             log.error("[AdvancedLLM] generate failed: \(error.localizedDescription)")
             return nil
         }
     }
+
+    // MARK: - Helpers
+
+    private static func formatSpeed(_ bps: Double) -> String {
+        if bps >= 1_048_576 { return String(format: "%.1f MB/s", bps / 1_048_576) }
+        return String(format: "%.0f KB/s", bps / 1_024)
+    }
 }
 
 #else
 // ─── Compile-time stub ───────────────────────────────────────────────────────
-// This stub is active when the mlx-swift-examples package has not yet been
+// This stub is active when the mlx-swift-lm package has not yet been
 // added to the Xcode project. All formatter calls return nil → CodeFormatter fallback.
-// Remove this #else block after you add the package in Xcode.
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Observable
 @MainActor
 final class AdvancedLLMFormatter {
     static let shared          = AdvancedLLMFormatter()
-    static let modelId         = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+    static let modelId         = "mlx-community/Qwen3.5-0.8B-4bit"
     var downloadProgress: Double = 0
     var isInstalling: Bool       = false
-    var installError: String?    = "⚠️ Ajoutez le package mlx-swift-examples dans Xcode."
+    var installError: String?    = "⚠️ Ajoutez mlx-swift-lm dans Xcode (Branch: main, produits: MLXLLM + MLXLMCommon)."
+    var downloadSpeed: String    = ""
+    var downloadedMB: String     = ""
     private init() {}
-    func installModel()    async { installError = "Package MLX non ajouté dans Xcode." }
+    func installModel()    async {}
+    func cancelInstall()         {}
     func loadIfInstalled() async {}
     func unload()                {}
     func format(_ text: String, style: CodeStyle) async -> String? { nil }

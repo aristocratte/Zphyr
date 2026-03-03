@@ -528,14 +528,7 @@ struct PreflightView: View {
 
         case .advancedMode:
             if AdvancedLLMFormatter.shared.isInstalling {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .scaleEffect(0.7)
-                        .tint(Color.zTextSub)
-                    Text(t("Installation IA…", "Installing AI…", "Instalando IA…", "安装 AI…", "AI インストール中…", "Установка ИИ…"))
-                        .font(.system(size: 13))
-                        .foregroundColor(Color.zTextSub)
-                }
+                EmptyView()
             } else if AppState.shared.advancedModeInstalled {
                 PFPrimaryButton(
                     label: t("Continuer", "Continue", "Continuar", "继续", "続ける", "Продолжить"),
@@ -617,16 +610,46 @@ struct PreflightView: View {
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundColor(Color.zText)
 
-                    Text("Qwen2.5-1.5B-Instruct-4bit · ~900 MB")
+                    Text("Qwen3.5-0.8B-4bit · ~625 MB")
                         .font(.system(size: 13))
                         .foregroundColor(Color.zTextDim)
 
-                    Text(t("Le téléchargement se poursuit en arrière-plan.", "Download continues in the background.", "La descarga continúa en segundo plano.", "下载在后台继续。", "ダウンロードはバックグラウンドで続きます。", "Загрузка продолжается в фоновом режиме."))
-                        .font(.system(size: 11))
-                        .foregroundColor(Color.zTextDim)
-                        .multilineTextAlignment(.center)
-                        .padding(.top, 4)
+                    // Download progress details
+                    if !formatter.downloadedMB.isEmpty || !formatter.downloadSpeed.isEmpty {
+                        HStack(spacing: 6) {
+                            if !formatter.downloadedMB.isEmpty {
+                                Text(formatter.downloadedMB)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(Color.zTextSub)
+                            }
+                            if !formatter.downloadSpeed.isEmpty {
+                                Text("·")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Color.zTextDim)
+                                Text(formatter.downloadSpeed)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(Color.zAccent)
+                            }
+                        }
+                        .transition(.opacity)
+                        .animation(.easeIn(duration: 0.3), value: formatter.downloadedMB)
+                    }
                 }
+
+                // Cancel button
+                Button(t("Annuler le téléchargement", "Cancel download", "Cancelar descarga", "取消下载", "ダウンロードをキャンセル", "Отменить загрузку")) {
+                    AdvancedLLMFormatter.shared.cancelInstall()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Color.zTextSub)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Color.zSurface2)
+                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.zBorder, lineWidth: 1))
+                )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.zBg)
@@ -644,7 +667,7 @@ struct PreflightView: View {
                 Text(t("Mode IA installé !", "AI mode installed!", "¡Modo IA instalado!", "AI 模式已安装！", "AI モードがインストールされました！", "Режим ИИ установлен!"))
                     .font(.system(size: 22, weight: .bold))
                     .foregroundColor(Color.zText)
-                Text("Qwen2.5-1.5B · prêt")
+                Text("Qwen3.5-0.8B-4bit · prêt")
                     .font(.system(size: 13))
                     .foregroundColor(Color.zTextDim)
             }

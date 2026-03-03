@@ -15,14 +15,27 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    // Outline icon (default state)
     var icon: String {
         switch self {
-        case .home: return "house.fill"
-        case .dictionary: return "text.book.closed.fill"
+        case .home:               return "house"
+        case .dictionary:         return "text.book.closed"
         case .audioTranscription: return "waveform"
-        case .snippets: return "doc.text.fill"
-        case .style: return "textformat.size"
-        case .settings: return "gearshape.fill"
+        case .snippets:           return "doc.text"
+        case .style:              return "textformat"
+        case .settings:           return "gearshape"
+        }
+    }
+
+    // Filled icon (selected state)
+    var iconSelected: String {
+        switch self {
+        case .home:               return "house.fill"
+        case .dictionary:         return "text.book.closed.fill"
+        case .audioTranscription: return "waveform"
+        case .snippets:           return "doc.text.fill"
+        case .style:              return "textformat"
+        case .settings:           return "gearshape.fill"
         }
     }
 
@@ -44,7 +57,8 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - Sidebar View with magnetic animated pill
+// MARK: - Sidebar
+
 struct SidebarView: View {
     @Binding var selection: SidebarItem
     var onSettingsTapped: () -> Void = {}
@@ -54,108 +68,102 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // App header
-            HStack(spacing: 11) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.white)
-                        .frame(width: 34, height: 34)
-                        .shadow(color: Color(hex: "#22D3B8").opacity(0.25), radius: 8, x: 0, y: 3)
-                        .shadow(color: .black.opacity(0.06), radius: 3, x: 0, y: 1)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(Color(hex: "#E5E5E0"), lineWidth: 1)
-                        )
-                    Image(systemName: "waveform.and.mic")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(Color(hex: "#22D3B8"))
+
+            // ── App header ────────────────────────────────────────────
+            HStack(spacing: 10) {
+                // Real app icon from asset catalog
+                if let nsIcon = NSImage(named: "AppIcon") {
+                    Image(nsImage: nsIcon)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 32, height: 32)
+                } else {
+                    // Fallback: replicate the icon style
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(hex: "#1A1A1A"))
+                            .frame(width: 32, height: 32)
+                        Image(systemName: "waveform")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.white)
+                    }
                 }
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Zphyr")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(Color(hex: "#1A1A1A"))
-                    Text("v0.1 Beta")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(Color(hex: "#AAAAAA"))
-                }
+                // Name
+                Text("Zphyr")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(Color(hex: "#1A1A1A"))
+
                 Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 22)
-            .padding(.bottom, 18)
 
-            // Main navigation items
-            VStack(spacing: 1) {
+                // Version badge
+                Text("β 0.1")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundColor(Color(hex: "#22D3B8"))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color(hex: "#22D3B8").opacity(0.10))
+                    .clipShape(Capsule())
+                    .overlay(Capsule().strokeBorder(Color(hex: "#22D3B8").opacity(0.18), lineWidth: 0.5))
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 20)
+            .padding(.bottom, 16)
+
+            // ── Main nav items ────────────────────────────────────────
+            VStack(spacing: 2) {
                 ForEach(mainItems) { item in
                     MagneticSidebarRow(
                         item: item,
                         isSelected: selection == item,
                         namespace: pillNamespace
                     ) {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.72, blendDuration: 0)) {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.74)) {
                             selection = item
                         }
                     }
                 }
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 8)
 
             Spacer()
 
-            // Divider
-            Rectangle()
-                .fill(Color(hex: "#E4E4E2"))
-                .frame(height: 1)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
-
-            // Bottom items
-            VStack(spacing: 1) {
-                // Check for updates
-                Button {
+            // ── Bottom items ──────────────────────────────────────────
+            VStack(spacing: 2) {
+                // Updates
+                BottomSidebarRow(
+                    icon: "arrow.down.circle",
+                    label: L10n.ui(
+                        for: AppState.shared.uiDisplayLanguage.rawValue,
+                        fr: "Mises à jour",
+                        en: "Updates",
+                        es: "Actualizaciones",
+                        zh: "检查更新",
+                        ja: "アップデート",
+                        ru: "Обновления"
+                    )
+                ) {
                     if let url = URL(string: "https://zphyr.app/changelog") {
                         NSWorkspace.shared.open(url)
                     }
-                } label: {
-                    HStack(spacing: 9) {
-                        Image(systemName: "arrow.down.circle")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(Color(hex: "#999994"))
-                            .frame(width: 18)
-                        Text(L10n.ui(for: AppState.shared.uiDisplayLanguage.rawValue,
-                                    fr: "Mises à jour",
-                                    en: "Updates",
-                                    es: "Actualizaciones",
-                                    zh: "检查更新",
-                                    ja: "アップデート",
-                                    ru: "Обновления"))
-                            .font(.system(size: 13, weight: .regular))
-                            .foregroundColor(Color(hex: "#6A6A65"))
-                        Spacer()
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
                 }
-                .buttonStyle(.plain)
 
-                // Settings button → opens modal overlay
-                MagneticSidebarRow(
-                    item: .settings,
-                    isSelected: false,
-                    namespace: pillNamespace
-                ) {
-                    onSettingsTapped()
-                }
+                // Settings
+                BottomSidebarRow(
+                    icon: SidebarItem.settings.icon,
+                    label: SidebarItem.settings.label(for: AppState.shared.uiDisplayLanguage.rawValue),
+                    action: onSettingsTapped
+                )
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 16)
+            .padding(.horizontal, 8)
+            .padding(.bottom, 14)
         }
-        .background(Color(hex: "#EFEFED"))
+        .background(Color(hex: "#F0F0EE"))
     }
 }
 
-// MARK: - Magnetic Row
+// MARK: - Magnetic Nav Row
+
 struct MagneticSidebarRow: View {
     @Bindable private var appState = AppState.shared
     let item: SidebarItem
@@ -169,16 +177,16 @@ struct MagneticSidebarRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 9) {
-                Image(systemName: item.icon)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(isSelected ? Color(hex: "#22D3B8") : Color(hex: "#999994"))
+                Image(systemName: isSelected ? item.iconSelected : item.icon)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .foregroundColor(isSelected ? Color(hex: "#22D3B8") : Color(hex: "#9A9A94"))
                     .frame(width: 18)
-                    .scaleEffect(isSelected ? 1.05 : 1.0)
-                    .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isSelected)
+                    .scaleEffect(isSelected ? 1.06 : 1.0)
+                    .animation(.spring(response: 0.28, dampingFraction: 0.65), value: isSelected)
 
                 Text(item.label(for: appState.uiDisplayLanguage.rawValue))
                     .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                    .foregroundColor(isSelected ? Color(hex: "#1A1A1A") : Color(hex: "#6A6A65"))
+                    .foregroundColor(isSelected ? Color(hex: "#111111") : Color(hex: "#6A6A65"))
 
                 Spacer()
             }
@@ -187,20 +195,64 @@ struct MagneticSidebarRow: View {
             .background(
                 ZStack {
                     if isSelected {
-                        RoundedRectangle(cornerRadius: 10)
+                        RoundedRectangle(cornerRadius: 9)
                             .fill(Color.white)
-                            .shadow(color: .black.opacity(0.07), radius: 6, x: 0, y: 2)
+                            .shadow(color: .black.opacity(0.06), radius: 8, x: 0, y: 2)
+                            .shadow(color: .black.opacity(0.03), radius: 2, x: 0, y: 1)
                             .matchedGeometryEffect(id: "pill", in: namespace)
                     } else if isHovered {
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(Color(hex: "#1A1A1A").opacity(0.05))
+                        RoundedRectangle(cornerRadius: 9)
+                            .fill(Color.black.opacity(0.04))
                     }
                 }
             )
         }
         .buttonStyle(.plain)
-        .scaleEffect(isPressed ? 0.97 : 1.0)
-        .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isPressed)
+        .scaleEffect(isPressed ? 0.975 : 1.0)
+        .animation(.spring(response: 0.18, dampingFraction: 0.75), value: isPressed)
+        .onHover { isHovered = $0 }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
+    }
+}
+
+// MARK: - Bottom Row (Updates / Settings)
+
+private struct BottomSidebarRow: View {
+    let icon: String
+    let label: String
+    let action: () -> Void
+
+    @State private var isHovered = false
+    @State private var isPressed = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundColor(Color(hex: "#9A9A94"))
+                    .frame(width: 18)
+
+                Text(label)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundColor(Color(hex: "#6A6A65"))
+
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(isHovered ? Color.black.opacity(0.04) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isPressed ? 0.975 : 1.0)
+        .animation(.spring(response: 0.18, dampingFraction: 0.75), value: isPressed)
         .onHover { isHovered = $0 }
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
@@ -212,5 +264,5 @@ struct MagneticSidebarRow: View {
 
 #Preview {
     SidebarView(selection: .constant(.home))
-        .frame(width: 210, height: 560)
+        .frame(width: 196, height: 560)
 }

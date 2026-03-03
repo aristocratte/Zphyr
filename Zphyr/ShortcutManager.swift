@@ -148,7 +148,7 @@ final class ShortcutManager {
 
     private var globalFlagsMonitor: Any?
     private var localFlagsMonitor: Any?
-    private var isHolding = false
+    private(set) var isHolding = false
 
     private init() {
         // Load persisted trigger key

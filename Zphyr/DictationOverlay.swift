@@ -252,6 +252,19 @@ struct DictationOverlayView: View {
             .padding(.horizontal, 20)
             .transition(.opacity)
 
+        case .formatting:
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Color(hex: "#22D3B8"))
+                    .symbolEffect(.pulse)
+                Text(t("Formatage IA…", "AI formatting…", "Formateando IA…", "AI 格式化…", "AI フォーマット中…", "ИИ форматирует…"))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.85))
+            }
+            .padding(.horizontal, 20)
+            .transition(.opacity)
+
         case .done(let text):
             HStack(spacing: 6) {
                 Image(systemName: "checkmark")

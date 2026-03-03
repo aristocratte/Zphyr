@@ -927,18 +927,42 @@ private struct QwenModelCard: View {
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(Color(hex: "#22D3B8"))
                         }
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("Qwen2.5-1.5B-Instruct-4bit")
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Qwen3.5-0.8B-4bit")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(Color(hex: "#1A1A1A"))
-                            Text(L10n.ui(for: lang, fr: "Téléchargement en cours…", en: "Downloading…", es: "Descargando…", zh: "正在下载…", ja: "ダウンロード中…", ru: "Загрузка…"))
-                                .font(.system(size: 11))
-                                .foregroundColor(Color(hex: "#AAAAAA"))
+                            HStack(spacing: 5) {
+                                if !formatter.downloadedMB.isEmpty {
+                                    Text(formatter.downloadedMB)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundColor(Color(hex: "#666660"))
+                                }
+                                if !formatter.downloadSpeed.isEmpty {
+                                    Text("·")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(Color(hex: "#AAAAAA"))
+                                    Text(formatter.downloadSpeed)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundColor(Color(hex: "#22D3B8"))
+                                } else {
+                                    Text(L10n.ui(for: lang, fr: "Téléchargement…", en: "Downloading…", es: "Descargando…", zh: "正在下载…", ja: "ダウンロード中…", ru: "Загрузка…"))
+                                        .font(.system(size: 10))
+                                        .foregroundColor(Color(hex: "#AAAAAA"))
+                                }
+                            }
                         }
                         Spacer()
-                        Text("\(Int(formatter.downloadProgress * 100))%")
-                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                            .foregroundColor(Color(hex: "#22D3B8"))
+                        HStack(spacing: 10) {
+                            Text("\(Int(formatter.downloadProgress * 100))%")
+                                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                                .foregroundColor(Color(hex: "#22D3B8"))
+                            Button(L10n.ui(for: lang, fr: "Annuler", en: "Cancel", es: "Cancelar", zh: "取消", ja: "キャンセル", ru: "Отмена")) {
+                                AdvancedLLMFormatter.shared.cancelInstall()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Color(hex: "#FF3B30"))
+                        }
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 14)
@@ -954,7 +978,7 @@ private struct QwenModelCard: View {
                 SettingsRow(
                     icon: "brain.head.profile",
                     iconColor: Color(hex: "#22D3B8"),
-                    title: "Qwen2.5-1.5B-Instruct-4bit",
+                    title: "Qwen3.5-0.8B-4bit",
                     subtitle: L10n.ui(for: lang, fr: "Installé · IA locale prête", en: "Installed · local AI ready", es: "Instalado · IA local lista", zh: "已安装 · 本地 AI 就绪", ja: "インストール済み · ローカル AI 準備完了", ru: "Установлен · локальный ИИ готов"),
                     showDivider: false
                 ) {
@@ -968,18 +992,19 @@ private struct QwenModelCard: View {
                 }
             } else {
                 SettingsRow(
-                    icon: "arrow.down.circle.fill",
-                    iconColor: Color(hex: "#AF52DE"),
-                    title: "Qwen2.5-1.5B-Instruct-4bit",
-                    subtitle: L10n.ui(for: lang, fr: "~900 Mo · IA locale sur Apple Silicon", en: "~900 MB · Local AI on Apple Silicon", es: "~900 MB · IA local en Apple Silicon", zh: "~900 MB · Apple Silicon 本地 AI", ja: "~900 MB · Apple Silicon ローカル AI", ru: "~900 МБ · локальный ИИ на Apple Silicon"),
+                    icon: formatter.installError != nil ? "exclamationmark.triangle.fill" : "arrow.down.circle.fill",
+                    iconColor: formatter.installError != nil ? Color(hex: "#FF9500") : Color(hex: "#AF52DE"),
+                    title: "Qwen3.5-0.8B-4bit",
+                    subtitle: formatter.installError ?? L10n.ui(for: lang, fr: "~625 Mo · IA locale sur Apple Silicon", en: "~625 MB · Local AI on Apple Silicon", es: "~625 MB · IA local en Apple Silicon", zh: "~625 MB · Apple Silicon 本地 AI", ja: "~625 MB · Apple Silicon ローカル AI", ru: "~625 МБ · локальный ИИ на Apple Silicon"),
                     showDivider: false
                 ) {
-                    if let error = formatter.installError {
-                        Text(error)
-                            .font(.system(size: 10))
-                            .foregroundColor(Color(hex: "#FF3B30"))
-                            .lineLimit(2)
-                            .frame(maxWidth: 160, alignment: .trailing)
+                    if formatter.installError != nil {
+                        Button(L10n.ui(for: lang, fr: "Réessayer", en: "Retry", es: "Reintentar", zh: "重试", ja: "再試行", ru: "Повторить")) {
+                            Task { await AdvancedLLMFormatter.shared.installModel() }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color(hex: "#FF9500"))
                     } else {
                         Button(L10n.ui(for: lang, fr: "Installer", en: "Install", es: "Instalar", zh: "安装", ja: "インストール", ru: "Установить")) {
                             Task { await AdvancedLLMFormatter.shared.installModel() }

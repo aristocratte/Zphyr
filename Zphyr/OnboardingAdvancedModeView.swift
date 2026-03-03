@@ -2,7 +2,7 @@
 //  OnboardingAdvancedModeView.swift
 //  Zphyr
 //
-//  Preflight slide: optional Qwen2.5-1.5B-Instruct-4bit installation.
+//  Preflight slide: optional Qwen3.5-0.8B-4bit installation.
 //  Shown after the Whisper model slide. User can skip and install later in Settings.
 //
 
@@ -70,7 +70,7 @@ struct OnboardingAdvancedModeView: View {
                 AdvFeatureRow(icon: "arrow.down.circle",
                               color: Color(hex: "#34C759"),
                               title: "Téléchargement unique",
-                              subtitle: "Qwen2.5-1.5B-Instruct-4bit · ~900 Mo · stocké en cache local")
+                              subtitle: "Qwen3.5-0.8B-4bit · ~625 Mo · stocké en cache local")
             }
             .padding(20)
             .background(zSurface)
@@ -88,7 +88,7 @@ struct OnboardingAdvancedModeView: View {
                     HStack(spacing: 10) {
                         Image(systemName: "arrow.down.circle.fill")
                             .font(.system(size: 16, weight: .semibold))
-                        Text("Installer maintenant (~900 Mo)")
+                        Text("Installer maintenant (~625 Mo)")
                             .font(.system(size: 15, weight: .semibold))
                     }
                     .foregroundColor(.white)

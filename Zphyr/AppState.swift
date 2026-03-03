@@ -86,7 +86,7 @@ enum FormattingMode: String, CaseIterable, Identifiable {
         case .trigger:
             return L10n.ui(for: lang, fr: "Normal (Trigger explicite)", en: "Normal (Explicit trigger)", es: "Normal (disparador)", zh: "普通（显式触发）", ja: "通常（明示的トリガー）", ru: "Обычный (триггер)")
         case .advanced:
-            return L10n.ui(for: lang, fr: "Avancé (IA locale Qwen)", en: "Advanced (local AI Qwen)", es: "Avanzado (IA local Qwen)", zh: "高级（本地 AI Qwen）", ja: "高度（ローカル AI Qwen）", ru: "Расширенный (локальный ИИ Qwen)")
+            return L10n.ui(for: lang, fr: "Avancé (IA locale Qwen3.5)", en: "Advanced (local AI Qwen3.5)", es: "Avanzado (IA local Qwen3.5)", zh: "高级（本地 AI Qwen3.5）", ja: "高度（ローカル AI Qwen3.5）", ru: "Расширенный (локальный ИИ Qwen3.5)")
         }
     }
 
@@ -95,7 +95,7 @@ enum FormattingMode: String, CaseIterable, Identifiable {
         case .trigger:
             return L10n.ui(for: lang, fr: "Dites «camel get user» → getUserProfile", en: "Say «camel get user» → getUserProfile", es: "Di «camel get user» → getUserProfile", zh: "说「camel get user」→ getUserProfile", ja: "「camel get user」→ getUserProfile", ru: "«camel get user» → getUserProfile")
         case .advanced:
-            return L10n.ui(for: lang, fr: "Qwen2.5-1.5B détecte les identifiants sans mot-clé (~900 Mo, local)", en: "Qwen2.5-1.5B auto-detects identifiers without trigger (~900 MB, local)", es: "Qwen2.5-1.5B detecta identificadores sin disparador (~900 MB, local)", zh: "Qwen2.5-1.5B 自动检测标识符无需触发词（~900 MB，本地）", ja: "Qwen2.5-1.5B がトリガーなしで自動検出（~900 MB、ローカル）", ru: "Qwen2.5-1.5B автоопределяет идентификаторы без триггера (~900 МБ, локально)")
+            return L10n.ui(for: lang, fr: "Qwen3.5-0.8B détecte les identifiants sans mot-clé (~625 Mo, local)", en: "Qwen3.5-0.8B auto-detects identifiers without trigger (~625 MB, local)", es: "Qwen3.5-0.8B detecta identificadores sin disparador (~625 MB, local)", zh: "Qwen3.5-0.8B 自动检测标识符无需触发词（~625 MB，本地）", ja: "Qwen3.5-0.8B がトリガーなしで自動検出（~625 MB、ローカル）", ru: "Qwen3.5-0.8B автоопределяет идентификаторы без триггера (~625 МБ, локально)")
         }
     }
 }
@@ -144,6 +144,7 @@ enum DictationState: Equatable {
     case idle
     case listening
     case processing
+    case formatting   // LLM post-processing (Qwen advanced mode)
     case done(text: String)
 }
 

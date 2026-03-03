@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-// MARK: - Context tab
+// MARK: - Context
 
 private enum StyleContext: String, CaseIterable, Identifiable {
     case personal = "personal"
@@ -17,29 +17,21 @@ private enum StyleContext: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    func label(for languageCode: String) -> String {
+    var icon: String {
         switch self {
-        case .personal:
-            return L10n.ui(for: languageCode, fr: "Messages perso", en: "Personal messages", es: "Mensajes personales", zh: "个人消息", ja: "個人メッセージ", ru: "Личные сообщения")
-        case .work:
-            return L10n.ui(for: languageCode, fr: "Messages pro", en: "Work messages", es: "Mensajes de trabajo", zh: "工作消息", ja: "仕事メッセージ", ru: "Рабочие сообщения")
-        case .email:
-            return L10n.ui(for: languageCode, fr: "E-mail", en: "Email", es: "Correo", zh: "邮件", ja: "メール", ru: "Почта")
-        case .other:
-            return L10n.ui(for: languageCode, fr: "Autres apps", en: "Other apps", es: "Otras apps", zh: "其他应用", ja: "その他のアプリ", ru: "Другие приложения")
+        case .personal: return "message"
+        case .work:     return "briefcase"
+        case .email:    return "envelope"
+        case .other:    return "square.grid.2x2"
         }
     }
 
-    func contextNote(for languageCode: String) -> String {
+    func label(for languageCode: String) -> String {
         switch self {
-        case .personal:
-            return L10n.ui(for: languageCode, fr: "S'applique dans les messageries personnelles", en: "Applies in personal messaging apps", es: "Se aplica en apps de mensajería personal", zh: "适用于个人聊天应用", ja: "個人向けメッセージアプリで適用", ru: "Применяется в личных мессенджерах")
-        case .work:
-            return L10n.ui(for: languageCode, fr: "S'applique dans les messageries professionnelles", en: "Applies in work messaging apps", es: "Se aplica en apps de mensajería profesional", zh: "适用于工作沟通应用", ja: "業務向けメッセージアプリで適用", ru: "Применяется в рабочих мессенджерах")
-        case .email:
-            return L10n.ui(for: languageCode, fr: "S'applique dans toutes les apps mail", en: "Applies in all email apps", es: "Se aplica en todas las apps de correo", zh: "适用于所有邮件应用", ja: "すべてのメールアプリで適用", ru: "Применяется во всех почтовых приложениях")
-        case .other:
-            return L10n.ui(for: languageCode, fr: "S'applique dans toutes les autres apps", en: "Applies in all other apps", es: "Se aplica en todas las demás apps", zh: "适用于所有其他应用", ja: "その他すべてのアプリで適用", ru: "Применяется во всех остальных приложениях")
+        case .personal: return L10n.ui(for: languageCode, fr: "Personnel", en: "Personal",  es: "Personal",    zh: "个人",   ja: "個人",   ru: "Личное")
+        case .work:     return L10n.ui(for: languageCode, fr: "Pro",       en: "Work",      es: "Trabajo",     zh: "工作",   ja: "仕事",   ru: "Работа")
+        case .email:    return L10n.ui(for: languageCode, fr: "E-mail",    en: "Email",     es: "Correo",      zh: "邮件",   ja: "メール", ru: "Почта")
+        case .other:    return L10n.ui(for: languageCode, fr: "Autres",    en: "Other",     es: "Otras",       zh: "其他",   ja: "その他", ru: "Другое")
         }
     }
 }
@@ -49,105 +41,97 @@ private enum StyleContext: String, CaseIterable, Identifiable {
 struct StyleView: View {
     @Bindable private var state = AppState.shared
     @State private var selectedContext: StyleContext = .personal
+    @Namespace private var contextNS
 
     private var languageCode: String { state.selectedLanguage.id }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
 
-            // Header
-            VStack(alignment: .leading, spacing: 4) {
-                Text(t("Style", "Style", "Estilo", "风格", "スタイル", "Стиль"))
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundColor(Color(hex: "1A1A1A"))
-                Text(
-                    t("Choisissez comment Zphyr formate votre dictée selon le contexte.",
-                      "Choose how Zphyr formats your dictation by context.",
-                      "Elige cómo Zphyr formatea tu dictado según el contexto.",
-                      "选择 Zphyr 如何根据上下文格式化你的听写。",
-                      "文脈ごとに Zphyr の整形方法を選択します。",
-                      "Выберите, как Zphyr форматирует диктовку в зависимости от контекста.")
-                )
-                    .font(.system(size: 13))
-                    .foregroundColor(Color(hex: "888880"))
-            }
-            .padding(.horizontal, 32)
-            .padding(.top, 28)
-            .padding(.bottom, 24)
+                // ── Header ──────────────────────────────────────────────
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(t("Style", "Style", "Estilo", "风格", "スタイル", "Стиль"))
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(Color(hex: "111111"))
+                    Text(t("Adapte la mise en forme selon le contexte de saisie.",
+                           "Adjusts formatting based on where you dictate.",
+                           "Adapta el formato según el contexto de uso.",
+                           "根据使用场景自动调整格式。",
+                           "入力場所に応じてフォーマットを調整します。",
+                           "Форматирование адаптируется под контекст ввода."))
+                        .font(.system(size: 12.5))
+                        .foregroundColor(Color(hex: "888880"))
+                }
 
-            // Context tabs — underline style
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 0) {
+                // ── Context picker ───────────────────────────────────────
+                HStack(spacing: 2) {
                     ForEach(StyleContext.allCases) { ctx in
                         Button {
-                            withAnimation(.easeInOut(duration: 0.18)) {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
                                 selectedContext = ctx
                             }
                         } label: {
-                            VStack(spacing: 0) {
+                            HStack(spacing: 5) {
+                                Image(systemName: ctx.icon)
+                                    .font(.system(size: 11.5, weight: .medium))
                                 Text(ctx.label(for: languageCode))
-                                    .font(.system(size: 13, weight: selectedContext == ctx ? .semibold : .regular))
-                                    .foregroundColor(selectedContext == ctx ? Color(hex: "1A1A1A") : Color(hex: "999994"))
-                                    .padding(.horizontal, 20)
-                                    .padding(.vertical, 10)
-
-                                Rectangle()
-                                    .fill(selectedContext == ctx ? Color(hex: "1A1A1A") : Color.clear)
-                                    .frame(height: 2)
+                                    .font(.system(size: 12.5,
+                                                  weight: selectedContext == ctx ? .semibold : .medium))
+                            }
+                            .foregroundColor(selectedContext == ctx ? Color(hex: "111111") : Color(hex: "888880"))
+                            .padding(.vertical, 7)
+                            .padding(.horizontal, 13)
+                            .background {
+                                if selectedContext == ctx {
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .fill(Color.white)
+                                        .shadow(color: .black.opacity(0.07), radius: 3, x: 0, y: 1)
+                                        .matchedGeometryEffect(id: "ctx_pill", in: contextNS)
+                                }
                             }
                         }
                         .buttonStyle(.plain)
                     }
                 }
-            }
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(Color(hex: "E8E8E6")).frame(height: 1)
-            }
-            .padding(.horizontal, 32)
+                .padding(4)
+                .background(Color(hex: "E8E8E6"))
+                .cornerRadius(11)
 
-            // Context note
-            Text(selectedContext.contextNote(for: languageCode))
-                .font(.system(size: 12))
-                .foregroundColor(Color(hex: "AAAAAA"))
-                .padding(.horizontal, 32)
-                .padding(.top, 16)
-                .padding(.bottom, 12)
-
-            // Tone rows
-            VStack(spacing: 0) {
-                ForEach(WritingTone.allCases) { tone in
-                    ToneRow(
-                        tone: tone,
-                        context: selectedContext,
-                        languageCode: languageCode,
-                        isSelected: currentTone == tone
-                    ) {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            setTone(tone)
+                // ── Tone list ────────────────────────────────────────────
+                VStack(spacing: 0) {
+                    ForEach(WritingTone.allCases) { tone in
+                        ToneRow(
+                            tone: tone,
+                            context: selectedContext,
+                            languageCode: languageCode,
+                            isSelected: currentTone == tone
+                        ) {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+                                setTone(tone)
+                            }
+                        }
+                        if tone != WritingTone.allCases.last {
+                            Divider()
+                                .padding(.leading, 58)
+                                .padding(.trailing, 16)
                         }
                     }
+                }
+                .background(Color.white)
+                .cornerRadius(14)
+                .shadow(color: .black.opacity(0.04), radius: 6, x: 0, y: 1)
 
-                    if tone != WritingTone.allCases.last {
-                        Divider().padding(.leading, 56)
-                    }
+                if let notice = state.advancedFeaturesNotice {
+                    Text(notice)
+                        .font(.system(size: 11))
+                        .foregroundColor(Color(hex: "AAAAAA"))
                 }
             }
-            .background(Color.white)
-            .cornerRadius(14)
-            .shadow(color: .black.opacity(0.04), radius: 8, x: 0, y: 2)
             .padding(.horizontal, 32)
-
-            if let notice = state.advancedFeaturesNotice {
-                Text(notice)
-                    .font(.system(size: 11))
-                    .foregroundColor(Color(hex: "888880"))
-                    .padding(.horizontal, 32)
-                    .padding(.top, 14)
-            }
-
-            Spacer()
+            .padding(.vertical, 28)
         }
-        .background(Color(hex: "F7F7F5"))
+        .background(Color(hex: "F5F5F3"))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -181,47 +165,55 @@ private struct ToneRow: View {
 
     @State private var isHovered = false
 
+    private var accentColor: Color { Color(hex: "22D3B8") }
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 14) {
-                // Selection indicator
+            HStack(spacing: 12) {
+
+                // Icon badge
                 ZStack {
-                    Circle()
-                        .stroke(isSelected ? Color(hex: "1A1A1A") : Color(hex: "DDDDDA"), lineWidth: 1.5)
-                        .frame(width: 20, height: 20)
-                    if isSelected {
-                        Circle()
-                            .fill(Color(hex: "1A1A1A"))
-                            .frame(width: 10, height: 10)
-                    }
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(isSelected ? accentColor.opacity(0.12) : Color(hex: "F0F0EE"))
+                        .frame(width: 36, height: 36)
+                    Image(systemName: tone.icon)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(isSelected ? accentColor : Color(hex: "888880"))
                 }
 
                 // Labels
                 VStack(alignment: .leading, spacing: 2) {
                     Text(tone.displayName(for: languageCode))
-                        .font(.system(size: 14, weight: isSelected ? .semibold : .regular))
-                        .foregroundColor(Color(hex: "1A1A1A"))
+                        .font(.system(size: 13.5, weight: isSelected ? .semibold : .regular))
+                        .foregroundColor(Color(hex: "111111"))
                     Text(tone.subtitle(for: languageCode))
-                        .font(.system(size: 12))
+                        .font(.system(size: 11.5))
                         .foregroundColor(Color(hex: "AAAAAA"))
                 }
 
                 Spacer()
 
-                // Preview snippet
+                // Preview pill
                 Text(previewSnippet)
-                    .font(.system(size: 11))
-                    .foregroundColor(Color(hex: "BBBBBB"))
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundColor(Color(hex: "BBBBBA"))
                     .lineLimit(1)
-                    .frame(maxWidth: 260, alignment: .trailing)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Color(hex: "F0F0EE"))
+                    .cornerRadius(6)
+                    .frame(maxWidth: 200, alignment: .trailing)
+
+                // Checkmark
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(accentColor)
+                    .opacity(isSelected ? 1 : 0)
+                    .frame(width: 16)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-            .background(
-                isHovered && !isSelected
-                    ? Color(hex: "F7F7F5")
-                    : Color.white
-            )
+            .padding(.horizontal, 14)
+            .padding(.vertical, 13)
+            .background(isHovered && !isSelected ? Color(hex: "F8F8F7") : Color.white)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

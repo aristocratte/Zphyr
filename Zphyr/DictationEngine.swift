@@ -70,6 +70,9 @@ final class DictationEngine {
     private var inputNode: AVAudioInputNode?
     private var audioBuffer: [Float] = []
 
+    /// Prevents overlapping dictation sessions (start/stop race conditions).
+    private var isDictating: Bool = false
+
     private let overlayController = DictationOverlayController()
 
     /// The app that was frontmost when the user started dictating.
@@ -276,25 +279,35 @@ final class DictationEngine {
     // MARK: - Dictation Pipeline
 
     func startDictation() async {
+        // ── Guard: no overlapping sessions ───────────────────────────────────
+        guard !isDictating else { return }
+
         let state = AppState.shared
 
-        // Guard: microphone — always re-request to surface the system dialog if needed
-        let granted = await state.requestMicrophoneAccess()
-        guard granted else {
-            state.error = L10n.ui(
-                for: state.selectedLanguage.id,
-                fr: "Accès au microphone refusé. Autorisez Zphyr dans Réglages Système → Confidentialité → Microphone.",
-                en: "Microphone access denied. Allow Zphyr in System Settings → Privacy & Security → Microphone.",
-                es: "Acceso al micrófono denegado. Autoriza Zphyr en Ajustes del Sistema → Privacidad y seguridad → Micrófono.",
-                zh: "麦克风权限被拒绝。请在 系统设置 → 隐私与安全性 → 麦克风 中允许 Zphyr。",
-                ja: "マイクへのアクセスが拒否されました。システム設定 → プライバシーとセキュリティ → マイク で Zphyr を許可してください。",
-                ru: "Доступ к микрофону запрещен. Разрешите Zphyr в Системных настройках → Конфиденциальность и безопасность → Микрофон."
-            )
-            return
+        // ── Guard: microphone ─────────────────────────────────────────────────
+        // Only show the system dialog when permission is unknown/denied.
+        // If already granted, skip the async call entirely to avoid a suspension
+        // window where the key could be released before we even start the engine.
+        if state.micPermission != .granted {
+            let granted = await state.requestMicrophoneAccess()
+            guard granted else {
+                state.error = L10n.ui(
+                    for: state.selectedLanguage.id,
+                    fr: "Accès au microphone refusé. Autorisez Zphyr dans Réglages Système → Confidentialité → Microphone.",
+                    en: "Microphone access denied. Allow Zphyr in System Settings → Privacy & Security → Microphone.",
+                    es: "Acceso al micrófono denegado. Autoriza Zphyr en Ajustes del Sistema → Privacidad y seguridad → Micrófono.",
+                    zh: "麦克风权限被拒绝。请在 系统设置 → 隐私与安全性 → 麦克风 中允许 Zphyr。",
+                    ja: "マイクへのアクセスが拒否されました。システム設定 → プライバシーとセキュリティ → マイク で Zphyr を許可してください。",
+                    ru: "Доступ к микрофону запрещен. Разрешите Zphyr в Системных настройках → Конфиденциальность и безопасность → Микрофон."
+                )
+                return
+            }
+            // After the async permission check, verify the key is still held.
+            // The user may have released it while the dialog was showing.
+            guard ShortcutManager.shared.isHolding else { return }
         }
-        state.micPermission = .granted
 
-        // Guard: model ready
+        // ── Guard: model ready ────────────────────────────────────────────────
         guard state.modelStatus.isReady, whisperKit != nil else {
             state.error = L10n.ui(
                 for: state.selectedLanguage.id,
@@ -308,6 +321,8 @@ final class DictationEngine {
             return
         }
 
+        isDictating = true
+
         // Capture the frontmost app BEFORE we start (it may lose focus once we activate)
         targetApp = NSWorkspace.shared.frontmostApplication
         Self.pipelineLogger.notice("[Dictation] start; target app=\(self.targetApp?.bundleIdentifier ?? "nil", privacy: .public)")
@@ -320,14 +335,22 @@ final class DictationEngine {
     }
 
     func stopDictation() async {
+        guard isDictating else { return }
+        isDictating = false
+
         let state = AppState.shared
         stopAudioCapture()
+        // Flush any pending MainActor audio-buffer tasks before reading the snapshot.
+        // The audio tap posts `Task { @MainActor in audioBuffer.append(…) }` from a
+        // background thread; a brief yield ensures those tasks complete first.
+        try? await Task.sleep(nanoseconds: 100_000_000) // 100 ms
         state.dictationState = .processing
         Self.pipelineLogger.notice("[Dictation] stop; captured samples=\(self.audioBuffer.count)")
 
         let rawText = await runWhisperTranscription()
         var finalText = postProcess(rawText)
         finalText = await applyCodeFormatting(finalText)
+        finalText = capitalizeProperNouns(in: finalText)
         Self.pipelineLogger.notice("[Dictation] transcription lengths raw=\(rawText.count) final=\(finalText.count)")
 
         state.lastTranscription = finalText
@@ -341,16 +364,30 @@ final class DictationEngine {
                 Self.pipelineLogger.notice("[Dictation] autoInsert=off; copied transcription to clipboard")
             }
         } else {
-            Self.pipelineLogger.notice("[Dictation] no transcription text to insert")
-            state.error = L10n.ui(
-                for: state.selectedLanguage.id,
-                fr: "Aucun texte détecté. Essaie de parler un peu plus longtemps.",
-                en: "No text detected. Try speaking a bit longer.",
-                es: "No se detectó texto. Intenta hablar un poco más.",
-                zh: "未检测到文本，请尝试说得更久一些。",
-                ja: "テキストが検出されませんでした。もう少し長く話してみてください。",
-                ru: "Текст не распознан. Попробуйте говорить немного дольше."
-            )
+            let bufferCount = audioBuffer.count
+            Self.pipelineLogger.notice("[Dictation] no transcription text — bufferCount=\(bufferCount, privacy: .public) rawText.count=\(rawText.count, privacy: .public)")
+            if bufferCount < 1600 {
+                // Buffer too short: less than 0.1s of audio at 16kHz
+                state.error = L10n.ui(
+                    for: state.selectedLanguage.id,
+                    fr: "Enregistrement trop court. Maintiens la touche et parle, puis relâche.",
+                    en: "Recording too short. Hold the key while speaking, then release.",
+                    es: "Grabación demasiado corta. Mantén la tecla mientras hablas.",
+                    zh: "录音太短，请按住按键说话再松开。",
+                    ja: "録音が短すぎます。キーを押しながら話し、離してください。",
+                    ru: "Запись слишком короткая. Удерживайте клавишу пока говорите."
+                )
+            } else {
+                state.error = L10n.ui(
+                    for: state.selectedLanguage.id,
+                    fr: "Aucun texte détecté (\(bufferCount/16)ms audio). Parle plus fort ou plus longtemps.",
+                    en: "No text detected (\(bufferCount/16)ms audio). Speak louder or longer.",
+                    es: "No se detectó texto (\(bufferCount/16)ms audio). Habla más fuerte o más tiempo.",
+                    zh: "未检测到文本（\(bufferCount/16)ms 音频）。请说得更大声或更长。",
+                    ja: "テキストが検出されませんでした（\(bufferCount/16)ms の音声）。もっと大きく、または長く話してください。",
+                    ru: "Текст не распознан (\(bufferCount/16) мс аудио). Говорите громче или дольше."
+                )
+            }
         }
 
         targetApp = nil
@@ -371,6 +408,7 @@ final class DictationEngine {
         case .trigger:
             return CodeFormatter().formatTranscribedText(text, defaultStyle: style)
         case .advanced:
+            AppState.shared.dictationState = .formatting
             if let result = await AdvancedLLMFormatter.shared.format(text, style: style) {
                 return result
             }
@@ -384,6 +422,9 @@ final class DictationEngine {
     private let whisperSampleRate: Double = 16_000
 
     private func startAudioCapture() {
+        // Always tear down any previous engine (safety net for race conditions).
+        stopAudioCapture()
+
         let engine = AVAudioEngine()
         audioEngine = engine
 
@@ -560,19 +601,26 @@ final class DictationEngine {
         _ audioSnapshot: [Float],
         language lang: String?
     ) async -> String {
-        guard let wk = whisperKit, !audioSnapshot.isEmpty else { return "" }
+        let durationMs = Int(Double(audioSnapshot.count) / 16.0)
+        Self.pipelineLogger.notice("[Dictation] transcribeAudioSamples: samples=\(audioSnapshot.count, privacy: .public) (~\(durationMs, privacy: .public)ms) lang=\(lang ?? "auto", privacy: .public) whisperKitNil=\(self.whisperKit == nil, privacy: .public)")
+
+        guard let wk = whisperKit else {
+            Self.pipelineLogger.error("[Dictation] whisperKit is nil at transcription time — model not loaded")
+            return ""
+        }
+        guard !audioSnapshot.isEmpty else {
+            Self.pipelineLogger.error("[Dictation] audioSnapshot is EMPTY — no audio was captured")
+            return ""
+        }
+
         return await Task.detached(priority: .userInitiated) {
             Self.pipelineLogger.notice("[Dictation] decoding language=\(lang ?? "auto", privacy: .public)")
 
             // Build the initial_prompt from the custom dictionary (vocabulary injection).
-            // The prompt is built on MainActor because DictionaryStore is @MainActor.
             let prompt = await MainActor.run {
                 ContextFetcher.buildWhisperPrompt(language: lang ?? "en")
             }
 
-            // Tokenize the prompt text so WhisperKit can inject it as initial_prompt.
-            // This is the critical step that was missing: promptTokens must be [Int], not a String.
-            // Filter out special tokens (they would corrupt the decoder state).
             var promptTokenIds: [Int]? = nil
             if !prompt.isEmpty, let tokenizer = wk.tokenizer {
                 promptTokenIds = tokenizer
@@ -587,33 +635,23 @@ final class DictationEngine {
                 task: .transcribe,
                 language: lang,
                 temperature: 0.0,
-                temperatureFallbackCount: 3,
+                temperatureFallbackCount: 5,
                 sampleLength: 224,
-                usePrefillPrompt: true,
-                usePrefillCache: promptTokenIds == nil,
+                usePrefillPrompt: false,
+                usePrefillCache: false,
                 skipSpecialTokens: true,
-                withoutTimestamps: true,
-                promptTokens: promptTokenIds,
-                compressionRatioThreshold: 2.4,
-                logProbThreshold: -1.0,
-                firstTokenLogProbThreshold: -1.5,
-                noSpeechThreshold: 0.6
+                withoutTimestamps: false,
+                promptTokens: promptTokenIds
             )
 
             do {
-                let results: [TranscriptionResult]
-                if !prompt.isEmpty {
-                    results = try await wk.transcribe(
-                        audioArray: audioSnapshot,
-                        decodeOptions: options,
-                        callback: nil
-                    )
-                } else {
-                    results = try await wk.transcribe(audioArray: audioSnapshot, decodeOptions: options)
-                }
-                return results.compactMap { $0.text }.joined(separator: " ")
+                let results = try await wk.transcribe(audioArray: audioSnapshot, decodeOptions: options)
+                let texts = results.map { $0.text }
+                Self.pipelineLogger.notice("[Dictation] whisper results: count=\(results.count, privacy: .public) texts=\(texts.joined(separator: "|"), privacy: .public)")
+                return texts.joined(separator: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             } catch {
+                Self.pipelineLogger.error("[Dictation] transcribe threw: \(error.localizedDescription, privacy: .public)")
                 await MainActor.run {
                     AppState.shared.error = L10n.ui(
                         for: AppState.shared.selectedLanguage.id,
@@ -733,12 +771,17 @@ final class DictationEngine {
         (targetApp ?? NSWorkspace.shared.frontmostApplication)?.bundleIdentifier
     }
 
-    /// Strips common filler words, applies tone-based formatting, and trims whitespace.
+    private let smartFormatter = SmartTextFormatter()
+
+    /// Full post-processing pipeline:
+    ///   filler removal → repetition cleanup → list/todo detection → tone formatting → dictionary/snippets
     private func postProcess(_ text: String) -> String {
         guard !text.isEmpty else { return text }
         let languageCode = AppState.shared.selectedLanguage.id
 
         var result = text
+
+        // ── 1. Filler word removal ────────────────────────────────────────────
         for filler in fillerWords(for: languageCode) {
             result = result.replacingOccurrences(
                 of: "\\b\(NSRegularExpression.escapedPattern(for: filler))\\b",
@@ -746,54 +789,134 @@ final class DictationEngine {
                 options: [.regularExpression, .caseInsensitive]
             )
         }
-
-        // Collapse multiple spaces and trim
         result = result
             .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // ── 2. Smart formatting (repetitions, list, todos) ────────────────────
+        let sf = smartFormatter.run(result, languageCode: languageCode)
+        result = sf.text
+        result = result
+            .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // ── 3. Dictionary mappings & snippet macros ───────────────────────────
+        result = applyDictionaryPronunciationMappings(to: result)
+        result = applyContextualLinkSnippets(to: result, bundleID: activeBundleIdentifier())
+
+        // ── 4. If a list was detected, minimal formatting then done ───────────
+        if sf.isList {
+            var finalList = result
+            if !sf.todos.isEmpty {
+                finalList = SmartTextFormatter.todoBlock(from: sf.todos) + "\n\n" + finalList
+            }
+            return normalizeWhitespacePreservingParagraphs(in: finalList)
+        }
+
+        // ── 5. Tone-based formatting ──────────────────────────────────────────
         let tone = activeTone()
 
         switch tone {
         case .formal:
             result = applyFormalPunctuation(to: result, languageCode: languageCode)
+            result = insertTransitionSentenceBoundaries(in: result, languageCode: languageCode)
             result = capitalizeSentences(in: result)
+            result = applyAutomaticFormalParagraphFormatting(to: result, languageCode: languageCode)
 
         case .casual:
-            // Capitalise first letter; strip trailing period if text is short (< 6 words)
-            if let first = result.first {
-                result = first.uppercased() + result.dropFirst()
-            }
-            let wordCount = result.split(separator: " ").count
-            if wordCount < 6 && result.hasSuffix(".") {
-                result = String(result.dropLast())
-            }
+            // Inject sentence boundaries before known transition words, then capitalize
+            result = applyLightPunctuation(to: result, languageCode: languageCode)
+            result = capitalizeSentences(in: result)
 
         case .veryCasual:
-            // All lowercase, remove terminal period
             result = result.lowercased()
-            if result.hasSuffix(".") {
-                result = String(result.dropLast())
-            }
-            // Remove other punctuation except apostrophes, commas and question marks
-            result = result.replacingOccurrences(
-                of: "[!;:]",
-                with: "",
-                options: .regularExpression
-            )
+            if result.hasSuffix(".") { result = String(result.dropLast()) }
+            result = result.replacingOccurrences(of: "[!;:]", with: "", options: .regularExpression)
         }
 
-        result = applyDictionaryPronunciationMappings(to: result)
-        result = applyContextualLinkSnippets(to: result, bundleID: activeBundleIdentifier())
-        if tone == .formal {
-            result = applyAutomaticFormalParagraphFormatting(
-                to: result,
-                languageCode: languageCode
-            )
+        // ── 6. Prepend TODO checklist if any tasks were extracted ─────────────
+        if !sf.todos.isEmpty {
+            let block = SmartTextFormatter.todoBlock(from: sf.todos)
+            result = result.isEmpty ? block : block + "\n\n" + result
         }
 
         result = normalizeWhitespacePreservingParagraphs(in: result)
+        return result
+    }
 
+    /// Shared helper: inserts ". Transition" before known sentence-starting transition words
+    /// so that `capitalizeSentences` can capitalize mid-text sentences naturally.
+    /// Called by both casual (`applyLightPunctuation`) and formal tone paths.
+    private func insertTransitionSentenceBoundaries(in text: String, languageCode: String) -> String {
+        let starters: [String]
+        switch languageCode {
+        case "fr":
+            starters = ["ensuite", "puis", "cependant", "néanmoins", "toutefois",
+                        "par conséquent", "donc", "ainsi", "de plus", "par ailleurs",
+                        "en revanche", "en fait", "d'ailleurs"]
+        case "es":
+            starters = ["luego", "después", "sin embargo", "no obstante",
+                        "por lo tanto", "así que", "además"]
+        case "de":
+            starters = ["dann", "jedoch", "außerdem", "deshalb", "danach"]
+        default:
+            starters = ["then", "however", "therefore", "moreover", "furthermore",
+                        "subsequently", "additionally", "besides", "nonetheless"]
+        }
+
+        var result = text
+        for starter in starters {
+            let escaped = NSRegularExpression.escapedPattern(for: starter)
+            // Match: word (possibly with comma) + spaces + starter keyword
+            // Only when the preceding token is NOT already followed by sentence-terminal punctuation
+            let pattern = "(?i)([A-Za-zÀ-ÿ0-9_]{2,})([,]?\\s+)(\(escaped))\\b"
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                let range = NSRange(result.startIndex..., in: result)
+                result = regex.stringByReplacingMatches(
+                    in: result, range: range,
+                    withTemplate: "$1. \(starter.prefix(1).uppercased())\(starter.dropFirst())"
+                )
+            }
+        }
+        return result
+    }
+
+    /// Casual-tone punctuation: inserts sentence boundaries then adds final period.
+    private func applyLightPunctuation(to text: String, languageCode: String) -> String {
+        var result = insertTransitionSentenceBoundaries(in: text, languageCode: languageCode)
+
+        // Capitalise first letter
+        if let first = result.first {
+            result = first.uppercased() + result.dropFirst()
+        }
+
+        // Add closing period to substantial texts (≥ 5 words) that lack one
+        let wordCount = result.split(separator: " ").count
+        if wordCount >= 5, let last = result.last, !".!?".contains(last) {
+            result += "."
+        }
+
+        return result
+    }
+
+    /// Capitalises programming language names that appear as plain words in the output.
+    private func capitalizeProperNouns(in text: String) -> String {
+        var result = text
+        let nouns: [(String, String)] = [
+            ("\\bpython\\b",     "Python"),
+            ("\\bswift\\b",      "Swift"),
+            ("\\bjavascript\\b", "JavaScript"),
+            ("\\btypescript\\b", "TypeScript"),
+            ("\\bkotlin\\b",     "Kotlin"),
+            ("\\brust\\b",       "Rust"),
+            ("\\bgolang\\b",     "Go"),
+        ]
+        for (pattern, replacement) in nouns {
+            result = result.replacingOccurrences(
+                of: pattern, with: replacement,
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
         return result
     }
 
@@ -872,10 +995,14 @@ final class DictationEngine {
     }
 
     private func fillerWords(for languageCode: String) -> [String] {
-        let common = ["hmm", "hm"]
-        let fr = ["euh", "euh,", "euh.", "bah", "bah,", "ben", "voilà,", "donc,", "alors,", "enfin,", "genre,"]
-        let en = ["uh", "um", "uh,", "um,", "like,", "you know,"]
-        let es = ["eh", "eh,", "eh.", "emm", "este", "pues", "o sea"]
+        let common = ["hmm", "hm", "mhm"]
+        let fr = [
+            "euh", "euh,", "euh.", "bah", "bah,", "ben", "ben,",
+            "voilà,", "voilà.", "voilà", "donc,", "alors,", "enfin,",
+            "genre,", "genre", "hein,", "hein", "quoi,",
+        ]
+        let en = ["uh", "um", "uh,", "um,", "like,", "you know,", "you know", "right,", "so,"]
+        let es = ["eh", "eh,", "eh.", "emm", "este", "pues", "o sea", "bueno,"]
         let zh = ["嗯", "呃", "那个", "就是", "然后"]
         let ja = ["えー", "えっと", "あの", "その", "まあ"]
         let ru = ["ээ", "эм", "ну", "как бы", "это"]
