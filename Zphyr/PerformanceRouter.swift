@@ -23,7 +23,7 @@ struct PerformanceProfile: Sendable, Equatable {
     }
 
     var allowsProMode: Bool {
-        tier == .pro
+        tier != .eco
     }
 
     var allowsWhisperASR: Bool {

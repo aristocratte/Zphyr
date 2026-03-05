@@ -637,10 +637,10 @@ final class DictationEngine {
         if effectiveMode == .advanced && state.isProModeUnlocked {
             state.dictationState = .formatting
             formatter = proTextFormatter
-            Self.pipelineLogger.notice("[Formatting] using PRO formatter (mode=\(effectiveMode.rawValue, privacy: .public) proUnlocked=true)")
+            Self.pipelineLogger.notice("[Formatting] ✅ using PRO formatter (LLM) — mode=\(effectiveMode.rawValue, privacy: .public) proUnlocked=true tier=\(state.performanceProfile.tier.rawValue, privacy: .public)")
         } else {
             formatter = ecoTextFormatter
-            Self.pipelineLogger.notice("[Formatting] using ECO formatter (mode=\(effectiveMode.rawValue, privacy: .public) proUnlocked=\(state.isProModeUnlocked, privacy: .public))")
+            Self.pipelineLogger.notice("[Formatting] ⚠️ using ECO formatter (regex only) — preferredMode=\(state.formattingMode.rawValue, privacy: .public) effectiveMode=\(effectiveMode.rawValue, privacy: .public) proUnlocked=\(state.isProModeUnlocked, privacy: .public) tier=\(state.performanceProfile.tier.rawValue, privacy: .public) advancedInstalled=\(state.advancedModeInstalled, privacy: .public)")
         }
         Self.pipelineLogger.notice(
             "[Formatting] input rawLen=\(rawASRText.count, privacy: .public) postLen=\(normalizedText.count, privacy: .public) listBlocksCount=\(listBlocksCount, privacy: .public) backend=\(self.lastTranscriptionBackendName, privacy: .public)"
