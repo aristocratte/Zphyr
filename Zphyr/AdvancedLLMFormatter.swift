@@ -2,8 +2,8 @@
 //  AdvancedLLMFormatter.swift
 //  Zphyr
 //
-//  On-device LLM code formatting using Apple's MLX Swift framework.
-//  Model: mlx-community/Qwen3.5-0.8B-4bit (~625 MB, 4-bit quantized)
+//  On-device LLM text formatting using Apple's MLX Swift framework.
+//  Model: mlx-community/Qwen3-1.7B-4bit (~1.1 GB, 4-bit quantized)
 //  Runs on Apple Silicon via Metal — zero network latency after initial download.
 //
 //  ─── ONE-TIME SETUP IN XCODE ────────────────────────────────────────────────
@@ -17,6 +17,21 @@
 import Foundation
 import os
 
+struct LLMFormattingConstraints: Sendable {
+    let maxTokens: Int
+    let temperature: Float
+    let forbiddenConversationalInsertions: [String]
+
+    static let strict = LLMFormattingConstraints(
+        maxTokens: 512,
+        temperature: 0,
+        forbiddenConversationalInsertions: [
+            "ok", "okay", "yes", "yeah", "sure", "please", "thanks", "thank", "bonjour",
+            "salut", "merci", "hello", "hi", "hola", "ciao", "voila", "voilà"
+        ]
+    )
+}
+
 #if canImport(MLXLLM)
 import MLXLLM
 import MLXLMCommon
@@ -27,8 +42,83 @@ import MLXLMCommon
 final class AdvancedLLMFormatter {
 
     static let shared     = AdvancedLLMFormatter()
-    static let modelId    = "mlx-community/Qwen3.5-0.8B-4bit"
-    static let modelBytes: Double = 625 * 1_024 * 1_024   // ~625 MB
+    static let modelId    = "mlx-community/Qwen3-1.7B-4bit"
+    static let modelBytes: Double = 1_100 * 1_024 * 1_024  // ~1.1 GB
+
+    /// Best-effort discovery of the local cache directory for the formatting model.
+    static func resolveInstallURL() -> URL? {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+
+        // MLX Swift caches models at ~/Library/Caches/models/<org>/<model>/
+        let mlxDirect = home
+            .appendingPathComponent("Library/Caches/models/mlx-community/Qwen3-1.7B-4bit")
+        if fm.fileExists(atPath: mlxDirect.path),
+           directoryContainsModelFiles(mlxDirect) {
+            return mlxDirect
+        }
+
+        // Fallback: HuggingFace Python-style cache roots
+        let roots = [
+            home.appendingPathComponent(".cache/huggingface/hub"),
+            home.appendingPathComponent("Library/Caches/huggingface/hub"),
+            home.appendingPathComponent("Library/Application Support/huggingface/hub")
+        ]
+
+        var candidates: [URL] = []
+        for root in roots where fm.fileExists(atPath: root.path) {
+            guard let entries = try? fm.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            for entry in entries {
+                let name = entry.lastPathComponent.lowercased()
+                let isMatch = name.contains("models--mlx-community--qwen3-1.7b-4bit")
+                    || name.contains("qwen3-1.7b-4bit")
+                guard isMatch else { continue }
+
+                let snapshots = entry.appendingPathComponent("snapshots")
+                if fm.fileExists(atPath: snapshots.path),
+                   let snapshotEntries = try? fm.contentsOfDirectory(
+                    at: snapshots,
+                    includingPropertiesForKeys: [.contentModificationDateKey],
+                    options: [.skipsHiddenFiles]
+                   ),
+                   !snapshotEntries.isEmpty {
+                    if let latestSnapshot = snapshotEntries.max(by: {
+                        let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                        let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                        return lhs < rhs
+                    }), Self.directoryContainsModelFiles(latestSnapshot) {
+                        candidates.append(latestSnapshot)
+                        continue
+                    }
+                }
+
+                if Self.directoryContainsModelFiles(entry) {
+                    candidates.append(entry)
+                }
+            }
+        }
+
+        return candidates.max(by: {
+            let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return lhs < rhs
+        })
+    }
+
+    /// Returns `true` only when the directory contains actual model weight files.
+    private static func directoryContainsModelFiles(_ url: URL) -> Bool {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return false }
+        let hasConfig = contents.contains { $0.lastPathComponent == "config.json" }
+        let hasWeights = contents.contains { $0.pathExtension == "safetensors" }
+        return hasConfig && hasWeights
+    }
 
     // MARK: - Observable state (drives onboarding + settings UI)
     var downloadProgress: Double  = 0
@@ -77,7 +167,7 @@ final class AdvancedLLMFormatter {
                                 let bps      = (dp * Self.modelBytes) / dt
                                 let received = p * Self.modelBytes
                                 self.downloadSpeed   = bps > 0 ? Self.formatSpeed(bps) : ""
-                                self.downloadedMB    = String(format: "%.0f / 625 MB",
+                                self.downloadedMB    = String(format: "%.0f / 1100 MB",
                                                               received / 1_048_576)
                                 self.lastFraction    = p
                                 self.lastSpeedUpdate = now
@@ -139,12 +229,51 @@ final class AdvancedLLMFormatter {
         log.notice("[AdvancedLLM] model unloaded")
     }
 
+    /// Deletes all cached model files for Qwen3-1.7B-4bit from disk.
+    static func removeModelFromDisk() {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+
+        // MLX Swift cache: ~/Library/Caches/models/mlx-community/Qwen3-1.7B-4bit/
+        let mlxDirect = home
+            .appendingPathComponent("Library/Caches/models/mlx-community/Qwen3-1.7B-4bit")
+        if fm.fileExists(atPath: mlxDirect.path) {
+            try? fm.removeItem(at: mlxDirect)
+        }
+
+        // HuggingFace Python-style caches
+        let roots = [
+            home.appendingPathComponent(".cache/huggingface/hub"),
+            home.appendingPathComponent("Library/Caches/huggingface/hub"),
+            home.appendingPathComponent("Library/Application Support/huggingface/hub")
+        ]
+        for root in roots where fm.fileExists(atPath: root.path) {
+            guard let entries = try? fm.contentsOfDirectory(
+                at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            ) else { continue }
+            for entry in entries {
+                let name = entry.lastPathComponent.lowercased()
+                if name.contains("models--mlx-community--qwen3-1.7b-4bit")
+                    || name.contains("qwen3-1.7b-4bit") {
+                    try? fm.removeItem(at: entry)
+                }
+            }
+        }
+    }
+
     // MARK: - Formatting
 
     /// Formats code identifiers in `text` using the local LLM.
     /// Returns `nil` on any failure — callers must fall back to `CodeFormatter`.
-    func format(_ text: String, style: CodeStyle) async -> String? {
-        guard let container else { return nil }
+    func format(_ text: String, style: CodeStyle, constraints: LLMFormattingConstraints) async -> String? {
+        guard let container else {
+            log.notice("[AdvancedLLM] skipped: model not loaded (container is nil)")
+            return nil
+        }
+
+        let inputWords = text.split(whereSeparator: \.isWhitespace).count
+        log.notice("[AdvancedLLM] generating… input=\(inputWords, privacy: .public) words style=\(String(describing: style), privacy: .public)")
+        let startTime = CFAbsoluteTimeGetCurrent()
 
         // Default style hint appended at end so the LLM has a fallback when
         // context doesn't specify a language/convention.
@@ -157,6 +286,7 @@ final class AdvancedLLMFormatter {
         case .kebab:     defaultStyleHint = "kebab-case"
         }
 
+        let forbiddenList = constraints.forbiddenConversationalInsertions.joined(separator: ", ")
         let systemPrompt = """
             Tu es un assistant de FORMATAGE UNIQUEMENT.
             Tu ne dois JAMAIS réécrire, changer, remplacer, ajouter ou supprimer un seul mot du texte original.
@@ -179,6 +309,7 @@ final class AdvancedLLMFormatter {
                - Pas de blocs de code, pas de guillemets, pas de markdown autour du résultat
 
             3. Tu dois sortir EXACTEMENT le texte d'origine, mais avec uniquement les améliorations de formatage ci-dessus.
+            4. Tu n'as pas le droit d'ajouter des mots conversationnels comme : \(forbiddenList).
 
             Exemples :
 
@@ -202,23 +333,40 @@ final class AdvancedLLMFormatter {
             let lmInput = try await container.prepare(input: userInput)
             let stream  = try await container.generate(
                 input: lmInput,
-                parameters: GenerateParameters(maxTokens: 512, temperature: 0)
+                parameters: GenerateParameters(
+                    maxTokens: constraints.maxTokens,
+                    temperature: constraints.temperature
+                )
             )
             var output = ""
             for await generation in stream {
                 if case .chunk(let chunk) = generation { output += chunk }
             }
             let result = output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-            guard !result.isEmpty else { return nil }
+            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+            let outputWords = result.split(whereSeparator: \.isWhitespace).count
+            log.notice("[AdvancedLLM] generated in \(String(format: "%.2f", elapsed), privacy: .public)s output=\(outputWords, privacy: .public) words")
+            guard !result.isEmpty else {
+                log.notice("[AdvancedLLM] empty result after trimming")
+                return nil
+            }
 
             // ── Hallucination guard ──────────────────────────────────────────
             // If the model added significantly more words than the input, it's
             // likely making things up. Reject and let the regex fallback run.
-            let inputWords  = text.split(whereSeparator: \.isWhitespace).count
-            let outputWords = result.split(whereSeparator: \.isWhitespace).count
             let tolerance   = max(4, inputWords / 5)   // allow up to +20 % or +4 words
             if outputWords > inputWords + tolerance {
                 log.warning("[AdvancedLLM] hallucination guard triggered (in=\(inputWords) out=\(outputWords)), using regex fallback")
+                return nil
+            }
+
+            let sourceTokens = tokenSet(text)
+            let candidateTokens = tokenSet(result)
+            let forbiddenInsertions = constraints.forbiddenConversationalInsertions
+                .map { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).lowercased() }
+                .filter { candidateTokens.contains($0) && !sourceTokens.contains($0) }
+            if !forbiddenInsertions.isEmpty {
+                log.warning("[AdvancedLLM] forbidden insertion guard triggered: \(forbiddenInsertions.joined(separator: ","), privacy: .public)")
                 return nil
             }
 
@@ -235,6 +383,18 @@ final class AdvancedLLMFormatter {
         if bps >= 1_048_576 { return String(format: "%.1f MB/s", bps / 1_048_576) }
         return String(format: "%.0f KB/s", bps / 1_024)
     }
+
+    private func tokenSet(_ text: String) -> Set<String> {
+        let normalized = text
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: "[^\\p{L}\\p{N}]+", with: " ", options: .regularExpression)
+        return Set(
+            normalized
+                .split(whereSeparator: { $0.isWhitespace })
+                .map(String.init)
+        )
+    }
 }
 
 #else
@@ -247,7 +407,8 @@ final class AdvancedLLMFormatter {
 @MainActor
 final class AdvancedLLMFormatter {
     static let shared          = AdvancedLLMFormatter()
-    static let modelId         = "mlx-community/Qwen3.5-0.8B-4bit"
+    static let modelId         = "mlx-community/Qwen3-1.7B-4bit"
+    static func resolveInstallURL() -> URL? { nil }
     var downloadProgress: Double = 0
     var isInstalling: Bool       = false
     var installError: String?    = "⚠️ Ajoutez mlx-swift-lm dans Xcode (Branch: main, produits: MLXLLM + MLXLMCommon)."
@@ -258,7 +419,8 @@ final class AdvancedLLMFormatter {
     func cancelInstall()         {}
     func loadIfInstalled() async {}
     func unload()                {}
-    func format(_ text: String, style: CodeStyle) async -> String? { nil }
+    static func removeModelFromDisk() {}
+    func format(_ text: String, style: CodeStyle, constraints: LLMFormattingConstraints) async -> String? { nil }
 }
 
 #endif

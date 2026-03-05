@@ -65,7 +65,9 @@ struct MainView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .task {
-            // Pre-load Whisper model in background on launch
+            appState.refreshPerformanceProfile()
+            engine.refreshASRBackendSelection()
+            // Pre-load ASR model in background on launch
             await engine.loadModel()
             if AppState.shared.modelStatus.isReady {
                 ShortcutManager.shared.startListening()
@@ -672,12 +674,12 @@ struct AudioTranscriptionView: View {
                 .font(.system(size: 22, weight: .bold))
                 .foregroundColor(Color(hex: "#1A1A1A"))
             Text(
-                t("Importez un fichier audio, choisissez la langue, puis lancez la retranscription locale avec Whisper.",
-                  "Import an audio file, choose a language, then run local transcription with Whisper.",
-                  "Importa un archivo de audio, elige el idioma y lanza la transcripción local con Whisper.",
-                  "导入音频文件，选择语言，然后用 Whisper 本地转写。",
-                  "音声ファイルを読み込み、言語を選んで Whisper でローカル文字起こしを実行します。",
-                  "Импортируйте аудиофайл, выберите язык и запустите локальную транскрибацию через Whisper.")
+                t("Importez un fichier audio, choisissez la langue, puis lancez la retranscription locale avec Qwen3-ASR.",
+                  "Import an audio file, choose a language, then run local transcription with Qwen3-ASR.",
+                  "Importa un archivo de audio, elige el idioma y lanza la transcripción local con Qwen3-ASR.",
+                  "导入音频文件，选择语言，然后用 Qwen3-ASR 本地转写。",
+                  "音声ファイルを読み込み、言語を選んで Qwen3-ASR でローカル文字起こしを実行します。",
+                  "Импортируйте аудиофайл, выберите язык и запустите локальную транскрибацию через Qwen3-ASR.")
             )
                 .font(.system(size: 13))
                 .foregroundColor(Color(hex: "#888880"))

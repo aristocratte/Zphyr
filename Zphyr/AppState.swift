@@ -46,7 +46,7 @@ enum ModelStatus: Equatable {
 // MARK: - Download speed tracking
 struct DownloadStats {
     var bytesReceived: Int64 = 0
-    var totalBytes: Int64 = 632 * 1024 * 1024  // ~632 MB default
+    var totalBytes: Int64 = 0
     var speedBytesPerSec: Double = 0            // smoothed
     var startedAt: Date = Date()
 
@@ -59,9 +59,19 @@ struct DownloadStats {
     }
 
     var formattedReceived: String {
-        let mb = Double(bytesReceived) / 1_000_000
-        let total = Double(totalBytes) / 1_000_000
-        return String(format: "%.0f / %.0f MB", mb, total)
+        let received = Double(bytesReceived)
+        let total = Double(totalBytes)
+        let mb = received / 1_000_000
+        let totalMB = total / 1_000_000
+
+        if received < 1_000_000 {
+            let kb = received / 1_000
+            return String(format: "%.0f KB / %.0f MB", kb, totalMB)
+        }
+        if received < 100_000_000 {
+            return String(format: "%.1f / %.0f MB", mb, totalMB)
+        }
+        return String(format: "%.0f / %.0f MB", mb, totalMB)
     }
 
     var eta: String {
@@ -86,7 +96,7 @@ enum FormattingMode: String, CaseIterable, Identifiable {
         case .trigger:
             return L10n.ui(for: lang, fr: "Normal (Trigger explicite)", en: "Normal (Explicit trigger)", es: "Normal (disparador)", zh: "普通（显式触发）", ja: "通常（明示的トリガー）", ru: "Обычный (триггер)")
         case .advanced:
-            return L10n.ui(for: lang, fr: "Avancé (IA locale Qwen3.5)", en: "Advanced (local AI Qwen3.5)", es: "Avanzado (IA local Qwen3.5)", zh: "高级（本地 AI Qwen3.5）", ja: "高度（ローカル AI Qwen3.5）", ru: "Расширенный (локальный ИИ Qwen3.5)")
+            return L10n.ui(for: lang, fr: "Avancé (IA locale Qwen3-1.7B)", en: "Advanced (local AI Qwen3-1.7B)", es: "Avanzado (IA local Qwen3-1.7B)", zh: "高级（本地 AI Qwen3-1.7B）", ja: "高度（ローカル AI Qwen3-1.7B）", ru: "Расширенный (локальный ИИ Qwen3-1.7B)")
         }
     }
 
@@ -95,7 +105,7 @@ enum FormattingMode: String, CaseIterable, Identifiable {
         case .trigger:
             return L10n.ui(for: lang, fr: "Dites «camel get user» → getUserProfile", en: "Say «camel get user» → getUserProfile", es: "Di «camel get user» → getUserProfile", zh: "说「camel get user」→ getUserProfile", ja: "「camel get user」→ getUserProfile", ru: "«camel get user» → getUserProfile")
         case .advanced:
-            return L10n.ui(for: lang, fr: "Qwen3.5-0.8B détecte les identifiants sans mot-clé (~625 Mo, local)", en: "Qwen3.5-0.8B auto-detects identifiers without trigger (~625 MB, local)", es: "Qwen3.5-0.8B detecta identificadores sin disparador (~625 MB, local)", zh: "Qwen3.5-0.8B 自动检测标识符无需触发词（~625 MB，本地）", ja: "Qwen3.5-0.8B がトリガーなしで自動検出（~625 MB、ローカル）", ru: "Qwen3.5-0.8B автоопределяет идентификаторы без триггера (~625 МБ, локально)")
+            return L10n.ui(for: lang, fr: "Qwen3-1.7B détecte les identifiants sans mot-clé (~1,1 Go, local)", en: "Qwen3-1.7B auto-detects identifiers without trigger (~1.1 GB, local)", es: "Qwen3-1.7B detecta identificadores sin disparador (~1,1 GB, local)", zh: "Qwen3-1.7B 自动检测标识符无需触发词（~1.1 GB，本地）", ja: "Qwen3-1.7B がトリガーなしで自動検出（~1.1 GB、ローカル）", ru: "Qwen3-1.7B автоопределяет идентификаторы без триггера (~1,1 ГБ, локально)")
         }
     }
 }
@@ -169,6 +179,8 @@ final class AppState {
     private static let styleWorkKey = "zphyr.style.work"
     private static let styleEmailKey = "zphyr.style.email"
     private static let styleOtherKey = "zphyr.style.other"
+    private static let preferredASRBackendKey = "zphyr.asr.preferredBackend"
+    private var isApplyingPerformanceRouting = false
 
     // Snippets defaults keys
     static let snippetLinkedInURLKey = "zphyr.snippet.linkedin.url"
@@ -199,6 +211,19 @@ final class AppState {
     var downloadStats: DownloadStats = DownloadStats()
     var modelInstallPath: String? = nil
     var isDownloadPaused: Bool = false
+    var preferredASRBackend: ASRBackendKind = {
+        let raw = UserDefaults.standard.string(forKey: AppState.preferredASRBackendKey)
+        return ASRBackendKind(rawValue: raw ?? "") ?? .appleSpeechAnalyzer
+    }() {
+        didSet {
+            UserDefaults.standard.set(preferredASRBackend.rawValue, forKey: AppState.preferredASRBackendKey)
+            enforcePerformanceRouting()
+        }
+    }
+    var activeASRBackend: ASRBackendKind = .appleSpeechAnalyzer
+    var qwen3asrInstalled: Bool = UserDefaults.standard.bool(forKey: "zphyr.qwen3asrInstalled") {
+        didSet { UserDefaults.standard.set(qwen3asrInstalled, forKey: "zphyr.qwen3asrInstalled") }
+    }
 
     // Dictation
     var dictationState: DictationState = .idle
@@ -257,7 +282,10 @@ final class AppState {
         let saved = UserDefaults.standard.string(forKey: "zphyr.formattingMode") ?? "trigger"
         return FormattingMode(rawValue: saved) ?? .trigger
     }() {
-        didSet { UserDefaults.standard.set(formattingMode.rawValue, forKey: "zphyr.formattingMode") }
+        didSet {
+            UserDefaults.standard.set(formattingMode.rawValue, forKey: "zphyr.formattingMode")
+            enforcePerformanceRouting()
+        }
     }
 
     // Settings — default code style (persisted, default .camel)
@@ -332,10 +360,44 @@ final class AppState {
 
     // Transient error to surface in UI
     var error: String?
+    var performanceProfile: PerformanceProfile = PerformanceRouter.shared.currentProfile()
+
+    var isProModeUnlocked: Bool {
+        performanceProfile.allowsProMode
+    }
+
+    var isQwenASRUnlocked: Bool {
+        performanceProfile.allowsQwenASR
+    }
 
     private init() {
+        refreshPerformanceProfile()
         refreshMicPermission()
         refreshAccessibility()
+    }
+
+    func refreshPerformanceProfile() {
+        performanceProfile = PerformanceRouter.shared.currentProfile()
+        enforcePerformanceRouting()
+    }
+
+    func enforcePerformanceRouting() {
+        guard !isApplyingPerformanceRouting else { return }
+        isApplyingPerformanceRouting = true
+        defer { isApplyingPerformanceRouting = false }
+
+        let router = PerformanceRouter.shared
+        let profile = performanceProfile
+
+        let effectiveBackend = router.effectiveASRBackend(preferred: preferredASRBackend, profile: profile)
+        if preferredASRBackend != effectiveBackend {
+            preferredASRBackend = effectiveBackend
+        }
+
+        let effectiveMode = router.effectiveFormattingMode(preferred: formattingMode, profile: profile)
+        if formattingMode != effectiveMode {
+            formattingMode = effectiveMode
+        }
     }
 
     private func syncLaunchAtLoginFromSystem() {

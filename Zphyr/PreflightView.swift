@@ -129,6 +129,24 @@ struct PreflightView: View {
     private var modelStatus: ModelStatus    { AppState.shared.modelStatus }
     private var downloadStats: DownloadStats { AppState.shared.downloadStats }
     private var lang: String                 { AppState.shared.uiDisplayLanguage.rawValue }
+    private var asrDescriptor: ASRBackendDescriptor { DictationEngine.shared.currentASRDescriptor }
+    private var asrRequiresInstall: Bool { asrDescriptor.requiresModelInstall }
+    private var isProModeUnlocked: Bool { AppState.shared.isProModeUnlocked }
+    private var performanceProfile: PerformanceProfile { AppState.shared.performanceProfile }
+    private var isPreparingModelDownload: Bool {
+        guard asrRequiresInstall else { return false }
+        guard case .downloading = modelStatus else { return false }
+        guard !AppState.shared.isDownloadPaused else { return false }
+        return downloadStats.bytesReceived < 256_000 && downloadStats.speedBytesPerSec < 20_000
+    }
+
+    private func percentLabel(_ progress: Double) -> String {
+        let pct = max(0, progress * 100)
+        if pct > 0 && pct < 10 {
+            return String(format: "%.1f%%", pct)
+        }
+        return "\(Int(pct))%"
+    }
 
     var body: some View {
         ZStack {
@@ -162,6 +180,8 @@ struct PreflightView: View {
             }
         }
         .onAppear {
+            AppState.shared.refreshPerformanceProfile()
+            DictationEngine.shared.refreshASRBackendSelection()
             startBackgroundAnimations()
             startModelInBackground()
             startWelcomeReveal()
@@ -275,6 +295,8 @@ struct PreflightView: View {
         .onDisappear {
             permissionPollTask?.cancel()
             featTask?.cancel()
+            advancedModeInstallTask?.cancel()
+            advancedModeInstallTask = nil
         }
         .sheet(isPresented: $showModelTest) {
             ModelTestView()
@@ -527,7 +549,12 @@ struct PreflightView: View {
             }
 
         case .advancedMode:
-            if AdvancedLLMFormatter.shared.isInstalling {
+            if !isProModeUnlocked {
+                PFPrimaryButton(
+                    label: t("Continuer", "Continue", "Continuar", "继续", "続ける", "Продолжить"),
+                    icon: "arrow.right"
+                ) { advance() }
+            } else if AdvancedLLMFormatter.shared.isInstalling {
                 EmptyView()
             } else if AppState.shared.advancedModeInstalled {
                 PFPrimaryButton(
@@ -587,7 +614,41 @@ struct PreflightView: View {
     @ViewBuilder
     private var advancedModeSlide: some View {
         let formatter = AdvancedLLMFormatter.shared
-        if formatter.isInstalling {
+        if !isProModeUnlocked {
+            VStack(spacing: 18) {
+                ZStack {
+                    Circle()
+                        .fill(Color.zSurface2)
+                        .frame(width: 84, height: 84)
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 30, weight: .semibold))
+                        .foregroundColor(Color.zTextDim)
+                }
+
+                Text(t("Mode Pro indisponible sur cette machine", "Pro mode is unavailable on this machine", "El modo Pro no está disponible en esta máquina", "此设备不支持专业模式", "このマシンでは Pro モードを利用できません", "Режим Pro недоступен на этом устройстве"))
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(Color.zText)
+                    .multilineTextAlignment(.center)
+
+                Text(
+                    t(
+                        "Profil détecté : \(performanceProfile.displayLabel(for: lang)). Zphyr reste en mode Éco (Regex) pour garantir fluidité et stabilité.",
+                        "Detected profile: \(performanceProfile.displayLabel(for: lang)). Zphyr stays in Eco mode (regex) for smooth and stable performance.",
+                        "Perfil detectado: \(performanceProfile.displayLabel(for: lang)). Zphyr permanece en modo Eco (regex) para mayor fluidez y estabilidad.",
+                        "检测到的配置：\(performanceProfile.displayLabel(for: lang))。Zphyr 将保持在节能模式（正则）以确保流畅稳定。",
+                        "検出されたプロファイル: \(performanceProfile.displayLabel(for: lang))。安定性のため Zphyr はエコモード（Regex）のまま動作します。",
+                        "Обнаруженный профиль: \(performanceProfile.displayLabel(for: lang)). Zphyr остаётся в эко-режиме (regex) для стабильной работы."
+                    )
+                )
+                .font(.system(size: 13))
+                .foregroundColor(Color.zTextSub)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 620)
+                .lineSpacing(3)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.zBg)
+        } else if formatter.isInstalling {
             // Installing — show progress ring
             VStack(spacing: 28) {
                 ZStack {
@@ -610,7 +671,7 @@ struct PreflightView: View {
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundColor(Color.zText)
 
-                    Text("Qwen3.5-0.8B-4bit · ~625 MB")
+                    Text("Qwen3-1.7B-4bit · ~1.1 GB")
                         .font(.system(size: 13))
                         .foregroundColor(Color.zTextDim)
 
@@ -667,7 +728,7 @@ struct PreflightView: View {
                 Text(t("Mode IA installé !", "AI mode installed!", "¡Modo IA instalado!", "AI 模式已安装！", "AI モードがインストールされました！", "Режим ИИ установлен!"))
                     .font(.system(size: 22, weight: .bold))
                     .foregroundColor(Color.zText)
-                Text("Qwen3.5-0.8B-4bit · prêt")
+                Text("Qwen3-1.7B-4bit · prêt")
                     .font(.system(size: 13))
                     .foregroundColor(Color.zTextDim)
             }
@@ -1334,7 +1395,7 @@ struct PreflightView: View {
                         .foregroundColor(color)
                         .transition(.scale.combined(with: .opacity))
                 } else {
-                    Text("\(Int(progress * 100))%")
+                    Text(percentLabel(progress))
                         .font(.system(size: 11).monospacedDigit())
                         .foregroundColor(color.opacity(0.55))
                 }
@@ -1862,8 +1923,25 @@ struct PreflightView: View {
                                 .multilineTextAlignment(.center)
                                 .tracking(0.5)
                         }
+                    } else if isPreparingModelDownload {
+                        VStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(Color.zAccent)
+                            Text(t(
+                                "Connexion",
+                                "Connecting",
+                                "Conexión",
+                                "连接中",
+                                "接続中",
+                                "Подключение"
+                            ))
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(Color.zTextDim)
+                            .tracking(0.3)
+                        }
                     } else {
-                        Text("\(Int(modelStatus.progress * 100))%")
+                        Text(percentLabel(modelStatus.progress))
                             .font(.system(size: 28, weight: .bold, design: .rounded).monospacedDigit())
                             .foregroundColor(Color.zText)
                             .contentTransition(.numericText())
@@ -1903,118 +1981,27 @@ struct PreflightView: View {
                 .padding(.bottom, 24)
 
             // ── Download detail card ──────────────────────────────────
-            if case .downloading = modelStatus {
-                VStack(spacing: 0) {
-                    // Progress bar inside card
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(Color.black.opacity(0.04))
-                                .frame(height: 5)
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(
-                                    LinearGradient(
-                                        colors: [Color.zAccent, Color.zBlue],
-                                        startPoint: .leading,
-                                        endPoint: .trailing
-                                    )
-                                )
-                                .frame(width: geo.size.width * CGFloat(modelStatus.progress), height: 5)
-                                .animation(.easeInOut(duration: 0.3), value: modelStatus.progress)
-                        }
-                    }
-                    .frame(height: 5)
-                    .padding(.bottom, 14)
-
-                    // Stats row
-                    HStack(spacing: 0) {
-                        // Size
-                        if downloadStats.bytesReceived > 0 {
-                            VStack(spacing: 3) {
-                                Image(systemName: "arrow.down.circle")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundColor(Color.zTextDim)
-                                Text(downloadStats.formattedReceived)
-                                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                                    .foregroundColor(Color.zText)
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-
-                        // Divider
-                        if downloadStats.bytesReceived > 0 && !downloadStats.formattedSpeed.isEmpty {
-                            Rectangle()
-                                .fill(Color.zBorder)
-                                .frame(width: 1, height: 28)
-                        }
-
-                        // Speed
-                        if !downloadStats.formattedSpeed.isEmpty {
-                            VStack(spacing: 3) {
-                                Image(systemName: "gauge.with.needle")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundColor(Color.zTextDim)
-                                Text(downloadStats.formattedSpeed)
-                                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                                    .foregroundColor(Color.zText)
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-
-                        // Divider
-                        if !downloadStats.formattedSpeed.isEmpty && !downloadStats.eta.isEmpty {
-                            Rectangle()
-                                .fill(Color.zBorder)
-                                .frame(width: 1, height: 28)
-                        }
-
-                        // ETA
-                        if !downloadStats.eta.isEmpty {
-                            VStack(spacing: 3) {
-                                Image(systemName: "clock")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundColor(Color.zTextDim)
-                                Text(downloadStats.eta)
-                                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                                    .foregroundColor(Color.zText)
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-                    }
-
-                    // Cancel button
-                    Button {
-                        DictationEngine.shared.cancelModelDownload()
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 10, weight: .bold))
-                            Text(t("Annuler", "Cancel", "Cancelar", "取消", "キャンセル", "Отменить"))
-                                .font(.system(size: 12, weight: .semibold))
-                        }
-                        .foregroundColor(Color.zTextSub)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 9)
-                        .background(Color.black.opacity(0.04))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.top, 14)
-                }
-                .padding(16)
-                .background(Color.white)
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.zBorder, lineWidth: 1))
-                .shadow(color: .black.opacity(0.04), radius: 8, y: 2)
-                .frame(maxWidth: 340)
+            if asrRequiresInstall, case .downloading = modelStatus {
+                DownloadCard(
+                    progress: modelStatus.progress,
+                    stats: downloadStats,
+                    isPaused: AppState.shared.isDownloadPaused,
+                    lang: lang
+                )
+                .frame(maxWidth: 360)
                 .padding(.bottom, 20)
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
 
             // ── Model info chips ──────────────────────────────────────
             HStack(spacing: 8) {
-                PFInfoChip(icon: "cpu", text: "large-v3 turbo")
-                PFInfoChip(icon: "memorychip", text: "CoreML · ANE")
+                if asrRequiresInstall {
+                    PFInfoChip(icon: "cpu", text: asrDescriptor.displayName)
+                    PFInfoChip(icon: "memorychip", text: "MLX 8-bit · ANE")
+                } else {
+                    PFInfoChip(icon: "apple.logo", text: "Apple Speech Analyzer")
+                    PFInfoChip(icon: "bolt.horizontal", text: t("Aucun téléchargement", "No download", "Sin descarga", "无需下载", "ダウンロード不要", "Без загрузки"))
+                }
                 PFInfoChip(
                     icon: "lock.shield",
                     text: t("100% local", "100% local", "100% local", "100% 本地", "100% ローカル", "100% локально")
@@ -2047,7 +2034,7 @@ struct PreflightView: View {
             }
 
             // ── Retry on failure ──────────────────────────────────────
-            if case .failed = modelStatus {
+            if asrRequiresInstall, case .failed = modelStatus {
                 Button {
                     DictationEngine.shared.cancelModelDownload()
                     Task {
@@ -2078,10 +2065,28 @@ struct PreflightView: View {
     }
 
     private var modelTitleText: String {
+        if !asrRequiresInstall {
+            switch modelStatus {
+            case .loading:
+                return t("Préparation du moteur local…", "Preparing local engine…", "Preparando motor local…", "正在准备本地引擎…", "ローカルエンジンを準備中…", "Подготовка локального движка…")
+            case .ready:
+                return t("Moteur Apple prêt !", "Apple engine ready!", "¡Motor Apple listo!", "Apple 引擎已就绪！", "Apple エンジン準備完了！", "Apple-движок готов!")
+            case .failed:
+                return t("Backend indisponible", "Backend unavailable", "Backend no disponible", "后端不可用", "バックエンド利用不可", "Бэкенд недоступен")
+            default:
+                return t("Activation du moteur local", "Enabling local engine", "Activando motor local", "启用本地引擎", "ローカルエンジンを有効化", "Включение локального движка")
+            }
+        }
         switch modelStatus {
         case .notDownloaded:
             return t("Installation du moteur IA", "Installing the AI engine", "Instalando el motor IA", "安装 AI 引擎", "AI エンジンをインストール", "Установка AI-движка")
         case .downloading:
+            if AppState.shared.isDownloadPaused {
+                return t("En pause", "Paused", "En pausa", "已暂停", "一時停止中", "На паузе")
+            }
+            if isPreparingModelDownload {
+                return t("Préparation du téléchargement…", "Preparing download…", "Preparando descarga…", "正在准备下载…", "ダウンロードを準備中…", "Подготовка загрузки…")
+            }
             return t("Téléchargement en cours…", "Downloading…", "Descargando…", "下载中…", "ダウンロード中…", "Загрузка…")
         case .loading:
             return t("Compilation Neural Engine", "Compiling Neural Engine", "Compilando Neural Engine", "编译 Neural Engine", "Neural Engine をコンパイル中", "Компиляция Neural Engine")
@@ -2093,15 +2098,44 @@ struct PreflightView: View {
     }
 
     private var modelSubtitleText: String {
-        switch modelStatus {
-        case .notDownloaded, .downloading:
+        if !asrRequiresInstall {
             return t(
-                "Whisper s'installe une seule fois (632 MB). Il s'exécute ensuite 100% en local.",
-                "Whisper installs once (632 MB). It then runs 100% locally.",
-                "Whisper se instala una sola vez (632 MB). Funciona 100% localmente.",
-                "Whisper 仅需安装一次（632 MB），之后 100% 本地运行。",
-                "Whisper は一度だけインストール（632 MB）。以後 100% ローカルで動作。",
-                "Whisper устанавливается один раз (632 МБ). Далее работает 100% локально."
+                "Apple Speech Analyzer fonctionne directement en local. Aucun modèle volumineux à télécharger.",
+                "Apple Speech Analyzer runs locally right away. No large model download is required.",
+                "Apple Speech Analyzer funciona en local de inmediato. No requiere descargar un modelo pesado.",
+                "Apple Speech Analyzer 可直接本地运行，无需下载大型模型。",
+                "Apple Speech Analyzer はすぐにローカル動作します。大きなモデルのダウンロードは不要です。",
+                "Apple Speech Analyzer работает локально сразу, без загрузки тяжелой модели."
+            )
+        }
+        switch modelStatus {
+        case .notDownloaded:
+            return t(
+                "Qwen3-ASR s'installe une seule fois (~2,46 GB). Il s'exécute ensuite 100% en local.",
+                "Qwen3-ASR installs once (~2.46 GB). It then runs 100% locally.",
+                "Qwen3-ASR se instala una sola vez (~2,46 GB). Funciona 100% localmente.",
+                "Qwen3-ASR 仅需安装一次（约 2.46 GB），之后 100% 本地运行。",
+                "Qwen3-ASR は一度だけインストール（約 2.46 GB）。以後 100% ローカルで動作。",
+                "Qwen3-ASR устанавливается один раз (~2,46 ГБ). Далее работает 100% локально."
+            )
+        case .downloading:
+            if isPreparingModelDownload {
+                return t(
+                    "Connexion au serveur de modèle… Le démarrage peut prendre quelques secondes selon le réseau.",
+                    "Connecting to the model server… Startup can take a few seconds depending on your network.",
+                    "Conectando al servidor del modelo… El inicio puede tardar unos segundos según tu red.",
+                    "正在连接模型服务器… 根据网络情况，启动可能需要几秒钟。",
+                    "モデルサーバーに接続中… ネットワーク状況により開始まで数秒かかることがあります。",
+                    "Подключение к серверу модели… Запуск может занять несколько секунд в зависимости от сети."
+                )
+            }
+            return t(
+                "Qwen3-ASR s'installe une seule fois (~2,46 GB). Il s'exécute ensuite 100% en local.",
+                "Qwen3-ASR installs once (~2.46 GB). It then runs 100% locally.",
+                "Qwen3-ASR se instala una sola vez (~2,46 GB). Funciona 100% localmente.",
+                "Qwen3-ASR 仅需安装一次（约 2.46 GB），之后 100% 本地运行。",
+                "Qwen3-ASR は一度だけインストール（約 2.46 GB）。以後 100% ローカルで動作。",
+                "Qwen3-ASR устанавливается один раз (~2,46 ГБ). Далее работает 100% локально."
             )
         case .loading:
             return t(
@@ -2114,12 +2148,12 @@ struct PreflightView: View {
             )
         case .ready:
             return t(
-                "Whisper tourne entièrement sur ton Mac, sans aucun serveur.",
-                "Whisper runs entirely on your Mac, with no server involved.",
-                "Whisper funciona completamente en tu Mac, sin servidor.",
-                "Whisper 完全在你的 Mac 上本地运行，无需服务器。",
-                "Whisper はサーバー不要でMac上で完全に動作します。",
-                "Whisper работает полностью на вашем Mac без серверов."
+                "Qwen3-ASR tourne entièrement sur ton Mac, sans aucun serveur.",
+                "Qwen3-ASR runs entirely on your Mac, with no server involved.",
+                "Qwen3-ASR funciona completamente en tu Mac, sin servidor.",
+                "Qwen3-ASR 完全在你的 Mac 上本地运行，无需服务器。",
+                "Qwen3-ASR はサーバー不要でMac上で完全に動作します。",
+                "Qwen3-ASR работает полностью на вашем Mac без серверов."
             )
         case .failed(let msg):
             let prefix = t("Vérifiez votre connexion et réessayez.",
@@ -2315,6 +2349,14 @@ struct PreflightView: View {
                     .scaleEffect(shortcutKeyPressed ? 0.93 : 1.0)
                     .offset(y: shortcutKeyPressed ? 5 : 0)
                     .animation(.spring(response: 0.18, dampingFraction: 0.7), value: shortcutKeyPressed)
+                    .onTapGesture {
+                        guard !shortcutKeyPressed else { return }
+                        withAnimation(.spring(response: 0.14, dampingFraction: 0.65)) { shortcutKeyPressed = true }
+                        Task {
+                            try? await Task.sleep(for: .milliseconds(180))
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.55)) { shortcutKeyPressed = false }
+                        }
+                    }
 
                     // Key name label
                     Text(ShortcutManager.shared.selectedTriggerKey.displayName(for: lang))
@@ -3298,6 +3340,242 @@ private struct ShortcutStepRow: View {
     }
 }
 
+// MARK: - Download Card (Model slide)
+
+private struct DownloadCard: View {
+    let progress: Double
+    let stats: DownloadStats
+    let isPaused: Bool
+    let lang: String
+
+    @State private var shimmerX: CGFloat = -1.0
+    @State private var dotPulse: Bool = false
+    private var isPreparingTransfer: Bool {
+        !isPaused && stats.bytesReceived < 256_000 && stats.speedBytesPerSec < 20_000
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+
+            // ── Progress bar ────────────────────────────────────────────
+            GeometryReader { geo in
+                let fillW = geo.size.width * CGFloat(progress)
+                let visibleFillW = isPreparingTransfer ? max(fillW, 6) : fillW
+                ZStack(alignment: .leading) {
+                    // Track
+                    Capsule()
+                        .fill(Color.black.opacity(0.05))
+                        .frame(height: 6)
+
+                    // Fill
+                    Capsule()
+                        .fill(LinearGradient(
+                            colors: isPaused
+                                ? [Color(hex: "CCCCCA"), Color(hex: "BBBBBA")]
+                                : [Color.zAccent, Color.zBlue],
+                            startPoint: .leading, endPoint: .trailing
+                        ))
+                        .frame(width: visibleFillW, height: 6)
+                        .animation(.easeInOut(duration: 0.45), value: progress)
+                        // Shimmer overlay (only while downloading)
+                        .overlay(
+                            Group {
+                                if !isPaused {
+                                    Capsule()
+                                        .fill(LinearGradient(
+                                            colors: [.clear, .white.opacity(0.45), .clear],
+                                            startPoint: .leading, endPoint: .trailing
+                                        ))
+                                        .frame(width: visibleFillW * 0.4)
+                                        .offset(x: visibleFillW * shimmerX)
+                                }
+                            }
+                        )
+                        .clipShape(Capsule())
+                    if isPreparingTransfer {
+                        Circle()
+                            .fill(Color.zBlue.opacity(dotPulse ? 0.95 : 0.5))
+                            .frame(width: 6, height: 6)
+                            .offset(x: 1)
+                    }
+                }
+                .onAppear {
+                    guard !isPaused else { return }
+                    withAnimation(.linear(duration: 1.8).repeatForever(autoreverses: false)) {
+                        shimmerX = 1.0
+                    }
+                    if isPreparingTransfer {
+                        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                            dotPulse = true
+                        }
+                    }
+                }
+                .onChange(of: isPaused) { _, paused in
+                    if paused {
+                        shimmerX = -1.0
+                    } else {
+                        withAnimation(.linear(duration: 1.8).repeatForever(autoreverses: false)) {
+                            shimmerX = 1.0
+                        }
+                    }
+                }
+                .onChange(of: isPreparingTransfer) { _, preparing in
+                    if preparing {
+                        dotPulse = false
+                        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                            dotPulse = true
+                        }
+                    } else {
+                        dotPulse = false
+                    }
+                }
+            }
+            .frame(height: 6)
+            .padding(.bottom, 16)
+
+            // ── Stats row ───────────────────────────────────────────────
+            if isPaused {
+                HStack(spacing: 6) {
+                    Image(systemName: "pause.circle.fill")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(Color.zTextDim)
+                    Text(L10n.ui(for: lang, fr: "Téléchargement en pause",
+                                 en: "Download paused",
+                                 es: "Descarga pausada",
+                                 zh: "下载已暂停",
+                                 ja: "ダウンロードを一時停止",
+                                 ru: "Загрузка приостановлена"))
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundColor(Color.zTextDim)
+                    if stats.bytesReceived > 0 {
+                        Text("· \(stats.formattedReceived)")
+                            .font(.system(size: 11.5).monospacedDigit())
+                            .foregroundColor(Color.zTextDim.opacity(0.7))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.bottom, 14)
+            } else {
+                if isPreparingTransfer {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .scaleEffect(0.72)
+                        Text(L10n.ui(
+                            for: lang,
+                            fr: "Préparation du téléchargement…",
+                            en: "Preparing download…",
+                            es: "Preparando descarga…",
+                            zh: "正在准备下载…",
+                            ja: "ダウンロードを準備中…",
+                            ru: "Подготовка загрузки…"
+                        ))
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.zTextDim)
+                    }
+                    .padding(.bottom, 14)
+                } else {
+                    HStack(spacing: 0) {
+                        if stats.bytesReceived > 0 {
+                            DownloadStatItem(icon: "arrow.down", value: stats.formattedReceived)
+                        }
+                        if stats.bytesReceived > 0 && !stats.formattedSpeed.isEmpty {
+                            statDivider
+                        }
+                        if !stats.formattedSpeed.isEmpty {
+                            DownloadStatItem(icon: "gauge.medium", value: stats.formattedSpeed)
+                        }
+                        if !stats.formattedSpeed.isEmpty && !stats.eta.isEmpty {
+                            statDivider
+                        }
+                        if !stats.eta.isEmpty {
+                            DownloadStatItem(icon: "clock", value: stats.eta)
+                        }
+                    }
+                    .padding(.bottom, 14)
+                }
+            }
+
+            // ── Action buttons ──────────────────────────────────────────
+            HStack(spacing: 8) {
+                // Pause / Resume
+                Button {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                        if isPaused {
+                            DictationEngine.shared.resumeModelDownload()
+                        } else {
+                            DictationEngine.shared.pauseModelDownload()
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: isPaused ? "play.fill" : "pause.fill")
+                            .font(.system(size: 10.5, weight: .semibold))
+                        Text(isPaused
+                             ? L10n.ui(for: lang, fr: "Reprendre", en: "Resume", es: "Reanudar", zh: "继续", ja: "再開", ru: "Возобновить")
+                             : L10n.ui(for: lang, fr: "Pause",     en: "Pause",  es: "Pausar",   zh: "暂停", ja: "一時停止", ru: "Пауза"))
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundColor(Color.zText)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(isPaused ? Color.zAccent.opacity(0.10) : Color.black.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+
+                // Cancel
+                Button {
+                    DictationEngine.shared.cancelModelDownload()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                        Text(L10n.ui(for: lang, fr: "Annuler", en: "Cancel", es: "Cancelar", zh: "取消", ja: "キャンセル", ru: "Отменить"))
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundColor(Color.zTextSub)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(Color.black.opacity(0.03))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(16)
+        .background(Color.white)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(
+            isPaused ? Color(hex: "DDDDDA") : Color.zBorder, lineWidth: 1))
+        .shadow(color: .black.opacity(isPaused ? 0.03 : 0.06), radius: isPaused ? 6 : 12, y: 2)
+        .animation(.easeInOut(duration: 0.3), value: isPaused)
+    }
+
+    private var statDivider: some View {
+        Rectangle()
+            .fill(Color.zBorder)
+            .frame(width: 1, height: 26)
+    }
+}
+
+private struct DownloadStatItem: View {
+    let icon: String
+    let value: String
+
+    var body: some View {
+        VStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundColor(Color.zTextDim)
+            Text(value)
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .foregroundColor(Color.zText)
+                .contentTransition(.numericText())
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
 // MARK: Stat Chip (Model slide)
 
 private struct PFStatChip: View {
@@ -3690,7 +3968,7 @@ private struct BentoLocalCard: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(Color.zText)
 
-                    Text("Whisper tourne directement sur l'Apple Silicon Neural Engine. Aucune requête réseau. Aucune donnée ne quitte jamais ton Mac.")
+                    Text("Qwen3-ASR tourne directement sur l'Apple Silicon Neural Engine. Aucune requête réseau. Aucune donnée ne quitte jamais ton Mac.")
                         .font(.system(size: 12))
                         .foregroundColor(Color.zTextSub)
                         .lineSpacing(2.5)
@@ -3715,23 +3993,33 @@ private struct BentoLocalCard: View {
             .padding(18)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .onAppear { pulseSonar() }
+        .task { await pulseSonarLoop() }
     }
 
-    private func pulseSonar() {
-        Task {
-            while true {
-                for i in 0..<3 {
-                    try? await Task.sleep(for: .milliseconds(500))
-                    withAnimation(.easeOut(duration: 1.6)) {
-                        ringScales[i] = 2.8
-                        ringOpacities[i] = 0
-                    }
-                    try? await Task.sleep(for: .milliseconds(80))
-                    withAnimation(.none) {
-                        ringScales[i] = 1
-                        ringOpacities[i] = i == 0 ? 0.55 : i == 1 ? 0.35 : 0.18
-                    }
+    @MainActor
+    private func pulseSonarLoop() async {
+        while !Task.isCancelled {
+            for i in 0..<3 {
+                do {
+                    try await Task.sleep(for: .milliseconds(500))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeOut(duration: 1.6)) {
+                    ringScales[i] = 2.8
+                    ringOpacities[i] = 0
+                }
+
+                do {
+                    try await Task.sleep(for: .milliseconds(80))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                withAnimation(.none) {
+                    ringScales[i] = 1
+                    ringOpacities[i] = i == 0 ? 0.55 : i == 1 ? 0.35 : 0.18
                 }
             }
         }
@@ -3799,30 +4087,40 @@ private struct BentoHoldCard: View {
                 )
                 .padding(14)
         }
-        .onAppear { animateWaveform() }
+        .task { await animateWaveformLoop() }
     }
 
-    private func animateWaveform() {
-        Task {
-            while true {
-                // idle pause
-                try? await Task.sleep(for: .milliseconds(900))
-                // "active" burst
-                for _ in 0..<18 {
-                    try? await Task.sleep(for: .milliseconds(80))
-                    withAnimation(.spring(response: 0.14, dampingFraction: 0.5)) {
-                        for i in 0..<9 {
-                            let base: CGFloat = 5
-                            let amp: CGFloat = CGFloat.random(in: 14...30)
-                            barHeights[i] = base + amp * abs(sin(Double(i) * 0.8 + phase))
-                        }
-                        phase += 0.55
+    @MainActor
+    private func animateWaveformLoop() async {
+        while !Task.isCancelled {
+            // idle pause
+            do {
+                try await Task.sleep(for: .milliseconds(900))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+
+            // "active" burst
+            for _ in 0..<18 {
+                do {
+                    try await Task.sleep(for: .milliseconds(80))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                withAnimation(.spring(response: 0.14, dampingFraction: 0.5)) {
+                    for i in 0..<9 {
+                        let base: CGFloat = 5
+                        let amp: CGFloat = CGFloat.random(in: 14...30)
+                        barHeights[i] = base + amp * abs(sin(Double(i) * 0.8 + phase))
                     }
+                    phase += 0.55
                 }
-                // decay
-                withAnimation(.spring(response: 0.45, dampingFraction: 0.7)) {
-                    barHeights = Array(repeating: 4, count: 9)
-                }
+            }
+            // decay
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.7)) {
+                barHeights = Array(repeating: 4, count: 9)
             }
         }
     }
@@ -3835,7 +4133,7 @@ private struct BentoCodeCard: View {
         ("func", false), ("transcribe", true), ("(", false),
         ("audioURL", true), (":", false), ("URL", true), (")", false), ("{", false),
         ("let", false), ("result", true), ("=", false), ("await", false),
-        ("whisper", true), (".", false), ("run", true), ("(", false), ("audioURL", true), (")", false),
+        ("qwenASR", true), (".", false), ("run", true), ("(", false), ("audioURL", true), (")", false),
     ]
     @State private var highlighted: Int = 0
 
@@ -3890,25 +4188,33 @@ private struct BentoCodeCard: View {
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .onAppear { cycleTokens() }
+        .task { await cycleTokensLoop() }
     }
 
-    private func cycleTokens() {
-        Task {
-            while true {
-                let identifiers = tokens.enumerated().filter { $0.element.1 }.map { $0.offset }
-                for idx in identifiers {
-                    withAnimation { highlighted = idx }
-                    try? await Task.sleep(for: .milliseconds(520))
+    @MainActor
+    private func cycleTokensLoop() async {
+        while !Task.isCancelled {
+            let identifiers = tokens.enumerated().filter { $0.element.1 }.map { $0.offset }
+            for idx in identifiers {
+                guard !Task.isCancelled else { return }
+                withAnimation { highlighted = idx }
+                do {
+                    try await Task.sleep(for: .milliseconds(520))
+                } catch {
+                    return
                 }
-                withAnimation { highlighted = -1 }
-                try? await Task.sleep(for: .milliseconds(700))
+            }
+            withAnimation { highlighted = -1 }
+            do {
+                try await Task.sleep(for: .milliseconds(700))
+            } catch {
+                return
             }
         }
     }
 }
 
-// ── Card 4: 99 languages ─────────────────────────────────────────────────────
+// ── Card 4: 30 languages ─────────────────────────────────────────────────────
 private struct BentoLangCard: View {
     private let accent = Color(hex: "E8433A")
     private let langs: [(String, String)] = [
@@ -3936,10 +4242,10 @@ private struct BentoLangCard: View {
                 }
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("22 langues")
+                    Text("30 langues")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(Color.zText)
-                    Text("Toutes les langues Whisper, précision maximale.")
+                    Text("Toutes les langues Qwen3-ASR, précision maximale.")
                         .font(.system(size: 11))
                         .foregroundColor(Color.zTextSub)
                         .lineSpacing(2)
@@ -3972,31 +4278,41 @@ private struct BentoLangCard: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             // Count badge
-            Text("22")
+            Text("30")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(accent)
                 .padding(.horizontal, 8).padding(.vertical, 4)
                 .background(accent.opacity(0.10), in: Capsule())
                 .padding(14)
         }
-        .onAppear { cycleLangs() }
+        .task { await cycleLangsLoop() }
     }
 
-    private func cycleLangs() {
-        Task {
-            while true {
-                try? await Task.sleep(for: .milliseconds(1600))
-                withAnimation(.easeIn(duration: 0.18)) {
-                    slideOffset = -8
-                    opacity = 0
-                }
-                try? await Task.sleep(for: .milliseconds(200))
-                currentIdx = (currentIdx + 1) % langs.count
-                slideOffset = 8
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    slideOffset = 0
-                    opacity = 1
-                }
+    @MainActor
+    private func cycleLangsLoop() async {
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(for: .milliseconds(1600))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeIn(duration: 0.18)) {
+                slideOffset = -8
+                opacity = 0
+            }
+
+            do {
+                try await Task.sleep(for: .milliseconds(200))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            currentIdx = (currentIdx + 1) % langs.count
+            slideOffset = 8
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                slideOffset = 0
+                opacity = 1
             }
         }
     }
@@ -4063,18 +4379,28 @@ private struct BentoStyleCard: View {
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .onAppear { cycleStyles() }
+        .task { await cycleStylesLoop() }
     }
 
-    private func cycleStyles() {
-        Task {
-            while true {
-                try? await Task.sleep(for: .milliseconds(2200))
-                withAnimation(.easeIn(duration: 0.15)) { textOpacity = 0 }
-                try? await Task.sleep(for: .milliseconds(180))
-                styleIdx = (styleIdx + 1) % styles.count
-                withAnimation(.easeOut(duration: 0.22)) { textOpacity = 1 }
+    @MainActor
+    private func cycleStylesLoop() async {
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(for: .milliseconds(2200))
+            } catch {
+                return
             }
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeIn(duration: 0.15)) { textOpacity = 0 }
+
+            do {
+                try await Task.sleep(for: .milliseconds(180))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            styleIdx = (styleIdx + 1) % styles.count
+            withAnimation(.easeOut(duration: 0.22)) { textOpacity = 1 }
         }
     }
 }

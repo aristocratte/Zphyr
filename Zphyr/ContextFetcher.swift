@@ -2,7 +2,7 @@
 //  ContextFetcher.swift
 //  Zphyr
 //
-//  Builds the Whisper initial_prompt from the user's custom dictionary.
+//  Builds ASR hint prompts from the user's custom dictionary.
 //  All Accessibility / AX code has been removed — no system-wide text access.
 //
 
@@ -10,8 +10,8 @@ import Foundation
 
 struct ContextFetcher {
 
-    /// Builds the Whisper initial_prompt from the custom dictionary only.
-    /// Injects known words and spoken-form pronunciations so Whisper recognises them.
+    /// Builds an ASR prompt from the custom dictionary only.
+    /// Injects known words and spoken-form pronunciations so local ASR better recognises them.
     @MainActor
     static func buildWhisperPrompt(language: String) -> String {
         var parts: [String] = []

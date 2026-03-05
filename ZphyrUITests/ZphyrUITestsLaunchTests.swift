@@ -6,8 +6,15 @@
 //
 
 import XCTest
+import ApplicationServices
 
 final class ZphyrUITestsLaunchTests: XCTestCase {
+
+    private func requireUIAutomationAuthorization() throws {
+        guard AXIsProcessTrusted() else {
+            throw XCTSkip("UI automation is not authorized on this machine.")
+        }
+    }
 
     override class var runsForEachTargetApplicationUIConfiguration: Bool {
         true
@@ -15,6 +22,7 @@ final class ZphyrUITestsLaunchTests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        try requireUIAutomationAuthorization()
     }
 
     @MainActor

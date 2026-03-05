@@ -150,10 +150,17 @@ enum SecureLocalDataStore {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
 
-        var existing: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &existing)
-        if status == errSecSuccess, let data = existing as? Data, data.count == 32 {
+        func loadExistingKey() -> SymmetricKey? {
+            var existing: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &existing)
+            guard status == errSecSuccess else { return nil }
+            guard let data = existing as? Data, data.count == 32 else { return nil }
             return SymmetricKey(data: data)
+        }
+
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        if status == errSecSuccess, let key = loadExistingKey() {
+            return key
         }
 
         guard status == errSecItemNotFound else {
@@ -184,6 +191,16 @@ enum SecureLocalDataStore {
             return nil
         }
 
-        return SymmetricKey(data: keyBytes)
+        if addStatus == errSecSuccess {
+            return SymmetricKey(data: keyBytes)
+        }
+
+        // Another thread/process inserted the key first; always read canonical keychain value.
+        if let key = loadExistingKey() {
+            return key
+        }
+
+        logger.error("[SecureStore] duplicate key detected but fetch failed")
+        return nil
     }
 }

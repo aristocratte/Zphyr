@@ -6,14 +6,22 @@
 //
 
 import XCTest
+import ApplicationServices
 
 final class ZphyrUITests: XCTestCase {
+
+    private func requireUIAutomationAuthorization() throws {
+        guard AXIsProcessTrusted() else {
+            throw XCTSkip("UI automation is not authorized on this machine.")
+        }
+    }
 
     override func setUpWithError() throws {
         // Put setup code here. This method is called before the invocation of each test method in the class.
 
         // In UI tests it is usually best to stop immediately when a failure occurs.
         continueAfterFailure = false
+        try requireUIAutomationAuthorization()
 
         // In UI tests it’s important to set the initial state - such as interface orientation - required for your tests before they run. The setUp method is a good place to do this.
     }
@@ -24,11 +32,17 @@ final class ZphyrUITests: XCTestCase {
 
     @MainActor
     func testExample() throws {
-        throw XCTSkip("Placeholder test skipped; launch behavior is covered by performance and launch tests.")
+        let app = XCUIApplication()
+        app.launch()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
     }
 
     @MainActor
     func testLaunchPerformance() throws {
-        throw XCTSkip("Performance launch test is flaky in CI-like environments; functional launch is covered by launch tests.")
+        measure(metrics: [XCTApplicationLaunchMetric()]) {
+            let app = XCUIApplication()
+            app.launch()
+            app.terminate()
+        }
     }
 }

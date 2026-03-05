@@ -150,12 +150,12 @@ struct OnboardingView: View {
                     .font(.system(size: 28, weight: .bold))
                     .foregroundColor(Color(hex: "#1A1A1A"))
                 Text(
-                    t("Dictée vocale locale pour développeurs.\nPropulsé par Whisper large-v3-turbo.",
-                      "Local voice dictation for developers.\nPowered by Whisper large-v3-turbo.",
-                      "Dictado local por voz para desarrolladores.\nImpulsado por Whisper large-v3-turbo.",
-                      "面向开发者的本地语音听写。\n由 Whisper large-v3-turbo 驱动。",
-                      "開発者向けのローカル音声入力。\nWhisper large-v3-turbo 搭載。",
-                      "Локальная голосовая диктовка для разработчиков.\nНа базе Whisper large-v3-turbo.")
+                    t("Dictée vocale locale pour développeurs.\nPropulsé par un backend ASR local.",
+                      "Local voice dictation for developers.\nPowered by a local ASR backend.",
+                      "Dictado local por voz para desarrolladores.\nImpulsado por un backend ASR local.",
+                      "面向开发者的本地语音听写。\n由本地 ASR 后端驱动。",
+                      "開発者向けのローカル音声入力。\nローカル ASR バックエンド搭載。",
+                      "Локальная голосовая диктовка для разработчиков.\nНа базе локального ASR-бэкенда.")
                 )
                     .font(.system(size: 14))
                     .foregroundColor(Color(hex: "#888880"))
@@ -165,7 +165,7 @@ struct OnboardingView: View {
 
             HStack(spacing: 14) {
                 FeaturePill(icon: "lock.shield", text: t("100% local", "100% local", "100% local", "100% 本地", "100% ローカル", "100% локально"))
-                FeaturePill(icon: "waveform", text: "Whisper turbo")
+                FeaturePill(icon: "waveform", text: "ASR")
                 FeaturePill(icon: "bolt.fill", text: t("Ultra rapide", "Ultra fast", "Ultrarrápido", "超快", "超高速", "Очень быстро"))
             }
         }
@@ -284,12 +284,12 @@ struct OnboardingView: View {
                         Text(t("Langue", "Language", "Idioma", "语言", "言語", "Язык"))
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(Color(hex: "#1A1A1A"))
-                        Text(t("Whisper large-v3-turbo · 99 langues",
-                               "Whisper large-v3-turbo · 99 languages",
-                               "Whisper large-v3-turbo · 99 idiomas",
-                               "Whisper large-v3-turbo · 99 种语言",
-                               "Whisper large-v3-turbo · 99言語",
-                               "Whisper large-v3-turbo · 99 языков"))
+                        Text(t("Qwen3-ASR-1.7B · 30 langues",
+                               "Local ASR · multilingual",
+                               "ASR local · multilingüe",
+                               "本地 ASR · 多语言",
+                               "ローカル ASR · 多言語",
+                               "Локальный ASR · многоязычный"))
                             .font(.system(size: 11))
                             .foregroundColor(Color(hex: "#AAAAAA"))
                     }

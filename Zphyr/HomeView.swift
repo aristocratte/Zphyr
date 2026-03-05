@@ -116,18 +116,18 @@ struct HomeView: View {
                                 .fill(appState.modelStatus.isReady ? Color(hex: "#34C759") : Color(hex: "#CCCCC8"))
                                 .frame(width: 6, height: 6)
                             Text(appState.modelStatus.isReady
-                                 ? t("Whisper actif · Maintenez \(triggerDisplayName)",
-                                     "Whisper ready · Hold \(triggerDisplayName)",
-                                     "Whisper listo · Mantén \(triggerDisplayName)",
-                                     "Whisper 已就绪 · 按住 \(triggerDisplayName)",
-                                     "Whisper 準備完了 · \(triggerDisplayName) を長押し",
-                                     "Whisper готов · Удержите \(triggerDisplayName)")
-                                 : t("Whisper non chargé",
-                                     "Whisper not loaded",
-                                     "Whisper no cargado",
-                                     "Whisper 未加载",
-                                     "Whisper 未読み込み",
-                                     "Whisper не загружен"))
+                                 ? t("Qwen3-ASR actif · Maintenez \(triggerDisplayName)",
+                                     "Qwen3-ASR ready · Hold \(triggerDisplayName)",
+                                     "Qwen3-ASR listo · Mantén \(triggerDisplayName)",
+                                     "Qwen3-ASR 已就绪 · 按住 \(triggerDisplayName)",
+                                     "Qwen3-ASR 準備完了 · \(triggerDisplayName) を長押し",
+                                     "Qwen3-ASR готов · Удержите \(triggerDisplayName)")
+                                 : t("Qwen3-ASR non chargé",
+                                     "Qwen3-ASR not loaded",
+                                     "Qwen3-ASR no cargado",
+                                     "Qwen3-ASR 未加载",
+                                     "Qwen3-ASR 未読み込み",
+                                     "Qwen3-ASR не загружен"))
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(Color(hex: "#888880"))
                         }
@@ -399,7 +399,7 @@ private struct ModelStatCard: View {
                         .font(.system(size: 20, weight: .bold))
                         .foregroundColor(appState.modelStatus.isReady ? Color(hex: "#111111") : Color(hex: "#CCCCCC"))
                 }
-                Text(t("Modèle Whisper", "Whisper model", "Modelo Whisper", "Whisper 模型", "Whisper モデル", "Модель Whisper"))
+                Text(t("Modèle Qwen3-ASR", "Qwen3-ASR model", "Modelo Qwen3-ASR", "Qwen3-ASR 模型", "Qwen3-ASR モデル", "Модель Qwen3-ASR"))
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundColor(Color(hex: "#AAAAAA"))
             }

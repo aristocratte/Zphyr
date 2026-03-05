@@ -5,6 +5,7 @@
 
 import SwiftUI
 import AppKit
+import Darwin.Mach
 
 @main
 struct ZphyrApp: App {
@@ -29,8 +30,21 @@ struct ZphyrApp: App {
 }
 
 // MARK: - AppDelegate
-final class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var statusItem: NSStatusItem?
+    private let statusPopover = NSPopover()
+    private let popoverStore = MenuBarPopoverStore()
+    private var statusRefreshTimer: Timer?
+    private var cachedPrimaryModelInstallURL: URL?
+    private var cachedPrimaryModelDiskBytes: Int64 = 0
+    private var cachedFormatterModelDiskBytes: Int64 = 0
+    private var lastProcessCPUSample: ProcessCPUSample?
+
+    private struct ProcessCPUSample {
+        let timestamp: TimeInterval
+        let totalCPUTime: TimeInterval
+    }
 
     // Called once the window is ready — set initial size based on preflight state
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -75,6 +89,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { showMainWindow() }
         return true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        stopStatusRefreshTimer()
     }
 
     @objc func windowWillClose(_ notification: Notification) {
@@ -163,9 +181,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "waveform.and.mic", accessibilityDescription: "Zphyr")
             button.image?.isTemplate = true
-            button.action = #selector(toggleMainWindow)
+            button.action = #selector(toggleStatusPopover(_:))
             button.target = self
+            button.sendAction(on: [.leftMouseUp])
         }
+
+        statusPopover.behavior = .transient
+        statusPopover.delegate = self
+        statusPopover.animates = true
+        statusPopover.contentSize = NSSize(width: 352, height: 334)
+        statusPopover.contentViewController = NSHostingController(
+            rootView: MenuBarPopoverView(
+                store: popoverStore,
+                onToggleMainWindow: { [weak self] in
+                    self?.toggleMainWindowFromPopover()
+                },
+                onLoadPrimaryModel: { [weak self] in
+                    self?.loadPrimaryModelFromPopover()
+                },
+                onOpenPrimaryModelFolder: { [weak self] in
+                    self?.openPrimaryModelFolderFromPopover()
+                },
+                onQuit: { [weak self] in
+                    self?.quitFromPopover()
+                }
+            )
+        )
+
+        lastProcessCPUSample = Self.currentProcessCPUSample()
+        refreshStatusPopover(recomputeDiskUsage: true)
     }
 
     @objc func toggleMainWindow() {
@@ -181,6 +225,255 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    // MARK: - Status popover
+
+    @objc private func toggleStatusPopover(_ sender: Any?) {
+        guard let button = statusItem?.button else { return }
+        if statusPopover.isShown {
+            statusPopover.performClose(sender)
+            stopStatusRefreshTimer()
+            return
+        }
+        refreshStatusPopover(recomputeDiskUsage: true)
+        statusPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        startStatusRefreshTimer()
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        stopStatusRefreshTimer()
+    }
+
+    private func refreshStatusPopover(recomputeDiskUsage: Bool) {
+        if recomputeDiskUsage {
+            cachedPrimaryModelInstallURL = resolveWhisperInstallURL()
+            cachedPrimaryModelDiskBytes = resolveWhisperDiskUsageBytes()
+            cachedFormatterModelDiskBytes = resolveQwenDiskUsageBytes()
+        }
+
+        let appHasVisibleWindow = NSApp.windows.contains(where: \.isVisible)
+        let state = AppState.shared
+        let primaryInstalled = cachedPrimaryModelInstallURL != nil || state.modelStatus.isReady
+        let primaryFolderAvailable = cachedPrimaryModelInstallURL != nil
+        let formatterInstalled = AppState.shared.advancedModeInstalled || cachedFormatterModelDiskBytes > 0
+        let totalRAM = Int64(ProcessInfo.processInfo.physicalMemory)
+        let processCPU = sampledCurrentProcessCPUPercent()
+        let maxCPU = max(100.0, Double(ProcessInfo.processInfo.activeProcessorCount) * 100.0)
+
+        popoverStore.isMainWindowVisible = appHasVisibleWindow
+        popoverStore.modelStatus = state.modelStatus
+        popoverStore.snapshot = MenuBarUsageSnapshot(
+            primaryModelDiskBytes: cachedPrimaryModelDiskBytes,
+            formatterModelDiskBytes: cachedFormatterModelDiskBytes,
+            processRAMBytes: Self.currentProcessMemoryFootprintBytes(),
+            totalRAMBytes: totalRAM,
+            processCPUPercent: processCPU,
+            maxCPUPercent: maxCPU,
+            primaryModelInstalled: primaryInstalled,
+            primaryModelFolderAvailable: primaryFolderAvailable,
+            formatterModelInstalled: formatterInstalled
+        )
+    }
+
+    private func toggleMainWindowFromPopover() {
+        toggleMainWindow()
+        refreshStatusPopover(recomputeDiskUsage: false)
+        statusPopover.performClose(nil)
+    }
+
+    private func loadPrimaryModelFromPopover() {
+        statusPopover.performClose(nil)
+        Task {
+            await DictationEngine.shared.loadModel()
+            self.refreshStatusPopover(recomputeDiskUsage: true)
+        }
+    }
+
+    private func openPrimaryModelFolderFromPopover() {
+        guard let modelURL = cachedPrimaryModelInstallURL ?? resolveWhisperInstallURL() else { return }
+        statusPopover.performClose(nil)
+        NSWorkspace.shared.activateFileViewerSelecting([modelURL])
+    }
+
+    private func quitFromPopover() {
+        statusPopover.performClose(nil)
+        NSApp.terminate(nil)
+    }
+
+    private func startStatusRefreshTimer() {
+        stopStatusRefreshTimer()
+        statusRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor [weak self] in
+                self?.refreshStatusPopover(recomputeDiskUsage: false)
+            }
+        }
+    }
+
+    private func stopStatusRefreshTimer() {
+        statusRefreshTimer?.invalidate()
+        statusRefreshTimer = nil
+    }
+
+    private func sampledCurrentProcessCPUPercent() -> Double {
+        guard let sample = Self.currentProcessCPUSample() else { return 0 }
+        defer { lastProcessCPUSample = sample }
+        guard let previous = lastProcessCPUSample else { return 0 }
+        let elapsed = sample.timestamp - previous.timestamp
+        guard elapsed > 0 else { return 0 }
+        if elapsed > 10 { return 0 } // reset stale baseline after long inactivity
+        let cpuDelta = sample.totalCPUTime - previous.totalCPUTime
+        guard cpuDelta > 0 else { return 0 }
+        return max(0, (cpuDelta / elapsed) * 100.0)
+    }
+
+    private func resolveWhisperInstallURL() -> URL? {
+        let fileManager = FileManager.default
+
+        if let explicitPath = AppState.shared.modelInstallPath, fileManager.fileExists(atPath: explicitPath) {
+            return URL(fileURLWithPath: explicitPath)
+        }
+
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/huggingface/hub/models--aufklarer--Qwen3-ASR-1.7B-MLX-8bit/snapshots")
+        guard fileManager.fileExists(atPath: root.path),
+              let candidates = try? fileManager.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+              ) else {
+            return nil
+        }
+
+        if let mainSnapshot = candidates.first(where: { $0.lastPathComponent == "main" }) {
+            return mainSnapshot
+        }
+
+        return candidates.max(by: {
+            let lhsDate = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let rhsDate = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return lhsDate < rhsDate
+        })
+    }
+
+    private func resolveWhisperDiskUsageBytes() -> Int64 {
+        guard let whisperURL = resolveWhisperInstallURL() else { return 0 }
+        return directoryAllocatedSize(at: whisperURL)
+    }
+
+    private func resolveQwenDiskUsageBytes() -> Int64 {
+        qwenInstallDirectories().reduce(0) { $0 + directoryAllocatedSize(at: $1) }
+    }
+
+    private func qwenInstallDirectories() -> [URL] {
+        let fileManager = FileManager.default
+        let home = fileManager.homeDirectoryForCurrentUser
+
+        var uniquePaths = Set<String>()
+        var results: [URL] = []
+
+        // MLX Swift cache: ~/Library/Caches/models/mlx-community/Qwen3-1.7B-4bit/
+        let mlxDirect = home
+            .appendingPathComponent("Library/Caches/models/mlx-community/Qwen3-1.7B-4bit")
+        if fileManager.fileExists(atPath: mlxDirect.path) {
+            uniquePaths.insert(mlxDirect.standardizedFileURL.path)
+            results.append(mlxDirect)
+        }
+
+        // HuggingFace Python-style cache roots
+        let roots = [
+            home.appendingPathComponent(".cache/huggingface/hub"),
+            home.appendingPathComponent("Library/Caches/huggingface/hub"),
+            home.appendingPathComponent("Library/Application Support/huggingface/hub")
+        ]
+
+        for root in roots where fileManager.fileExists(atPath: root.path) {
+            guard let entries = try? fileManager.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            for entry in entries {
+                let name = entry.lastPathComponent.lowercased()
+                let isQwenModelFolder = name.contains("models--mlx-community--qwen3-1.7b-4bit") || name.contains("qwen3-1.7b-4bit")
+                guard isQwenModelFolder else { continue }
+                let normalizedPath = entry.standardizedFileURL.path
+                guard !uniquePaths.contains(normalizedPath) else { continue }
+                uniquePaths.insert(normalizedPath)
+                results.append(entry)
+            }
+        }
+
+        return results
+    }
+
+    private func directoryAllocatedSize(at url: URL) -> Int64 {
+        let fileManager = FileManager.default
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileAllocatedSizeKey, .totalFileAllocatedSizeKey, .fileSizeKey]
+
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return 0 }
+        guard isDirectory.boolValue else {
+            let values = try? url.resourceValues(forKeys: keys)
+            return Int64(values?.totalFileAllocatedSize ?? values?.fileAllocatedSize ?? values?.fileSize ?? 0)
+        }
+
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles],
+            errorHandler: nil
+        ) else { return 0 }
+
+        var totalBytes: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: keys), values.isRegularFile == true else { continue }
+            totalBytes += Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0)
+        }
+        return totalBytes
+    }
+
+    private static func currentProcessMemoryFootprintBytes() -> Int64 {
+        var vmInfo = task_vm_info_data_t()
+        var vmInfoCount = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let vmResult: kern_return_t = withUnsafeMutablePointer(to: &vmInfo) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(vmInfoCount)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &vmInfoCount)
+            }
+        }
+        if vmResult == KERN_SUCCESS {
+            return Int64(vmInfo.phys_footprint)
+        }
+
+        var info = mach_task_basic_info()
+        var infoCount = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result: kern_return_t = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(infoCount)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &infoCount)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        return Int64(info.resident_size)
+    }
+
+    private static func currentProcessCPUSample() -> ProcessCPUSample? {
+        var info = task_thread_times_info_data_t()
+        var infoCount = mach_msg_type_number_t(MemoryLayout<task_thread_times_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result: kern_return_t = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(infoCount)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_THREAD_TIMES_INFO), $0, &infoCount)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+
+        let userTime = TimeInterval(info.user_time.seconds) + TimeInterval(info.user_time.microseconds) / 1_000_000
+        let systemTime = TimeInterval(info.system_time.seconds) + TimeInterval(info.system_time.microseconds) / 1_000_000
+        return ProcessCPUSample(
+            timestamp: Date().timeIntervalSinceReferenceDate,
+            totalCPUTime: userTime + systemTime
+        )
     }
 }
 

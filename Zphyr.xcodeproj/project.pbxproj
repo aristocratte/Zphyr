@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		0BAFF6EF2F56DDCF00F80183 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 0BAFF6EE2F56DDCF00F80183 /* MLXLLM */; };
-		0BC33DB32F5483ED0063711F /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0BC33DB22F5483ED0063711F /* WhisperKit */; };
 		0BC33DC22F54A4760063711F /* DictionaryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC33DC12F54A4760063711F /* DictionaryView.swift */; };
 /* End PBXBuildFile section */
 
@@ -60,7 +59,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				0BAFF6EF2F56DDCF00F80183 /* MLXLLM in Frameworks */,
-				0BC33DB32F5483ED0063711F /* WhisperKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -130,7 +128,6 @@
 			);
 			name = Zphyr;
 			packageProductDependencies = (
-				0BC33DB22F5483ED0063711F /* WhisperKit */,
 				0BAFF6EE2F56DDCF00F80183 /* MLXLLM */,
 			);
 			productName = Zphyr;
@@ -216,7 +213,6 @@
 			mainGroup = 0BC33D6E2F5479BA0063711F;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				0BC33DB12F5483ED0063711F /* XCRemoteSwiftPackageReference "WhisperKit" */,
 				0BAFF6ED2F56DB1B00F80183 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -424,8 +420,9 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Zphyr utilise le microphone pour la dictée vocale locale avec Whisper. Aucune donnée audio n'est envoyée sur internet.";
+					GENERATE_INFOPLIST_FILE = YES;
+					INFOPLIST_KEY_NSMicrophoneUsageDescription = "Zphyr utilise le microphone pour la dictée vocale locale avec Qwen3-ASR. Aucune donnée audio n'est envoyée sur internet.";
+					INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Zphyr utilise la reconnaissance vocale locale pour transcrire la dictée.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -469,8 +466,9 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Zphyr utilise le microphone pour la dictée vocale locale avec Whisper. Aucune donnée audio n'est envoyée sur internet.";
+					GENERATE_INFOPLIST_FILE = YES;
+					INFOPLIST_KEY_NSMicrophoneUsageDescription = "Zphyr utilise le microphone pour la dictée vocale locale avec Qwen3-ASR. Aucune donnée audio n'est envoyée sur internet.";
+					INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Zphyr utilise la reconnaissance vocale locale pour transcrire la dictée.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -654,14 +652,6 @@
 				kind = branch;
 			};
 		};
-		0BC33DB12F5483ED0063711F /* XCRemoteSwiftPackageReference "WhisperKit" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/argmaxinc/WhisperKit";
-			requirement = {
-				branch = main;
-				kind = branch;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -669,11 +659,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 0BAFF6ED2F56DB1B00F80183 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
 			productName = MLXLLM;
-		};
-		0BC33DB22F5483ED0063711F /* WhisperKit */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 0BC33DB12F5483ED0063711F /* XCRemoteSwiftPackageReference "WhisperKit" */;
-			productName = WhisperKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

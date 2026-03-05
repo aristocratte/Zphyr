@@ -2,20 +2,77 @@
 //  DictationEngine.swift
 //  Zphyr
 //
-//  Audio capture → WhisperKit transcription → post-processing → injection.
+//  Audio capture → ASR backend transcription → post-processing → injection.
 //  No external LLM. All processing is 100% local.
 //
 
 import Foundation
-import AVFoundation
+@preconcurrency import AVFoundation
 import AppKit
 import Observation
 import os
-import WhisperKit
+
+private final class AudioSampleBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var samples: [Float] = []
+
+    enum AppendStatus {
+        case appended
+        case truncated
+        case full
+    }
+
+    func reset() {
+        lock.lock()
+        samples.removeAll(keepingCapacity: true)
+        lock.unlock()
+    }
+
+    func reserveCapacity(_ capacity: Int) {
+        guard capacity > 0 else { return }
+        lock.lock()
+        samples.reserveCapacity(capacity)
+        lock.unlock()
+    }
+
+    func append(_ chunk: [Float], maxSamples: Int) -> AppendStatus {
+        chunk.withUnsafeBufferPointer { pointer in
+            append(pointer, maxSamples: maxSamples)
+        }
+    }
+
+    func append(_ chunk: UnsafeBufferPointer<Float>, maxSamples: Int) -> AppendStatus {
+        guard !chunk.isEmpty else { return .appended }
+        lock.lock()
+        defer { lock.unlock() }
+        let remaining = max(0, maxSamples - samples.count)
+        guard remaining > 0 else { return .full }
+        if chunk.count <= remaining {
+            samples.append(contentsOf: chunk)
+            return .appended
+        }
+        let prefix = chunk.prefix(remaining)
+        samples.append(contentsOf: prefix)
+        return .truncated
+    }
+
+    func snapshot() -> [Float] {
+        lock.lock()
+        defer { lock.unlock() }
+        return samples
+    }
+
+    func count() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return samples.count
+    }
+}
 
 // MARK: - Supported Languages
 struct WhisperLanguage: Identifiable, Hashable {
-    let id: String        // BCP-47 / Whisper language code
+    // Kept as `WhisperLanguage` for API compatibility across the app.
+    let id: String        // BCP-47 dictation language code
     let name: String
     let flag: String
 
@@ -25,28 +82,37 @@ struct WhisperLanguage: Identifiable, Hashable {
 
 extension WhisperLanguage {
     static let all: [WhisperLanguage] = [
-        WhisperLanguage(id: "fr", name: "Français",          flag: "🇫🇷", tier: .excellent),
+        // Qwen3-ASR supported languages (30)
+        WhisperLanguage(id: "zh", name: "中文（普通话）",       flag: "🇨🇳", tier: .excellent),
         WhisperLanguage(id: "en", name: "English",           flag: "🇺🇸", tier: .excellent),
-        WhisperLanguage(id: "es", name: "Español",           flag: "🇪🇸", tier: .excellent),
+        WhisperLanguage(id: "ar", name: "العربية",            flag: "🇸🇦", tier: .excellent),
         WhisperLanguage(id: "de", name: "Deutsch",           flag: "🇩🇪", tier: .excellent),
-        WhisperLanguage(id: "it", name: "Italiano",          flag: "🇮🇹", tier: .excellent),
+        WhisperLanguage(id: "fr", name: "Français",          flag: "🇫🇷", tier: .excellent),
+        WhisperLanguage(id: "es", name: "Español",           flag: "🇪🇸", tier: .excellent),
         WhisperLanguage(id: "pt", name: "Português",         flag: "🇵🇹", tier: .excellent),
-        WhisperLanguage(id: "nl", name: "Nederlands",        flag: "🇳🇱", tier: .excellent),
-        WhisperLanguage(id: "pl", name: "Polski",            flag: "🇵🇱", tier: .excellent),
+        WhisperLanguage(id: "id", name: "Bahasa Indonesia",  flag: "🇮🇩", tier: .good),
+        WhisperLanguage(id: "it", name: "Italiano",          flag: "🇮🇹", tier: .excellent),
+        WhisperLanguage(id: "ko", name: "한국어",              flag: "🇰🇷", tier: .excellent),
         WhisperLanguage(id: "ru", name: "Русский",           flag: "🇷🇺", tier: .excellent),
-        WhisperLanguage(id: "zh", name: "中文",              flag: "🇨🇳", tier: .excellent),
-        WhisperLanguage(id: "ja", name: "日本語",             flag: "🇯🇵", tier: .excellent),
-        WhisperLanguage(id: "ko", name: "한국어",             flag: "🇰🇷", tier: .excellent),
-        WhisperLanguage(id: "ar", name: "العربية",           flag: "🇸🇦", tier: .good),
+        WhisperLanguage(id: "th", name: "ภาษาไทย",           flag: "🇹🇭", tier: .good),
+        WhisperLanguage(id: "vi", name: "Tiếng Việt",        flag: "🇻🇳", tier: .good),
+        WhisperLanguage(id: "ja", name: "日本語",              flag: "🇯🇵", tier: .excellent),
         WhisperLanguage(id: "tr", name: "Türkçe",            flag: "🇹🇷", tier: .good),
+        WhisperLanguage(id: "hi", name: "हिन्दी",              flag: "🇮🇳", tier: .good),
+        WhisperLanguage(id: "ms", name: "Bahasa Melayu",     flag: "🇲🇾", tier: .good),
+        WhisperLanguage(id: "nl", name: "Nederlands",        flag: "🇳🇱", tier: .excellent),
         WhisperLanguage(id: "sv", name: "Svenska",           flag: "🇸🇪", tier: .good),
         WhisperLanguage(id: "da", name: "Dansk",             flag: "🇩🇰", tier: .good),
         WhisperLanguage(id: "fi", name: "Suomi",             flag: "🇫🇮", tier: .good),
-        WhisperLanguage(id: "nb", name: "Norsk",             flag: "🇳🇴", tier: .good),
+        WhisperLanguage(id: "pl", name: "Polski",            flag: "🇵🇱", tier: .excellent),
         WhisperLanguage(id: "cs", name: "Čeština",           flag: "🇨🇿", tier: .good),
-        WhisperLanguage(id: "uk", name: "Українська",        flag: "🇺🇦", tier: .good),
-        WhisperLanguage(id: "hi", name: "हिन्दी",             flag: "🇮🇳", tier: .good),
-        WhisperLanguage(id: "id", name: "Bahasa Indonesia",  flag: "🇮🇩", tier: .good),
+        WhisperLanguage(id: "tl", name: "Filipino",          flag: "🇵🇭", tier: .good),
+        WhisperLanguage(id: "fa", name: "فارسی",             flag: "🇮🇷", tier: .good),
+        WhisperLanguage(id: "el", name: "Ελληνικά",          flag: "🇬🇷", tier: .good),
+        WhisperLanguage(id: "hu", name: "Magyar",            flag: "🇭🇺", tier: .good),
+        WhisperLanguage(id: "ro", name: "Română",            flag: "🇷🇴", tier: .good),
+        WhisperLanguage(id: "mk", name: "Македонски",        flag: "🇲🇰", tier: .good),
+        WhisperLanguage(id: "yue", name: "粵語",               flag: "🇭🇰", tier: .good),
     ]
 }
 
@@ -65,13 +131,16 @@ final class DictationEngine {
         case emptyAudio
     }
 
-    private var whisperKit: WhisperKit?
     private var audioEngine: AVAudioEngine?
     private var inputNode: AVAudioInputNode?
-    private var audioBuffer: [Float] = []
+    private let audioSampleBuffer = AudioSampleBuffer()
 
     /// Prevents overlapping dictation sessions (start/stop race conditions).
     private var isDictating: Bool = false
+
+    /// True while a previous transcription/insertion is still in-flight.
+    /// Prevents a new dictation from starting until the pipeline is fully done.
+    private var isProcessing: Bool = false
 
     private let overlayController = DictationOverlayController()
 
@@ -80,9 +149,89 @@ final class DictationEngine {
     private var targetApp: NSRunningApplication?
     private var correctionMonitorTask: Task<Void, Never>?
     private var modelLoadTask: Task<Void, Never>?
-    private var lastAudioLevelUpdateAt: Date = .distantPast
+    private var didHitAudioCaptureLimit = false
+    private var asrBackend: any ASRService
+    private let ecoTextFormatter = EcoTextFormatter()
+    private let proTextFormatter = ProTextFormatter()
+    private let qwenTranscriptionTimeoutSeconds: Double = 8.0
+    private var fillerRegexCache: [String: [NSRegularExpression]] = [:]
+    private var transitionRuleCache: [String: [TransitionBoundaryRule]] = [:]
+    private var formalPunctuationRuleCache: [String: [(regex: NSRegularExpression, replacement: String)]] = [:]
+    private let properNounRules: [(regex: NSRegularExpression, replacement: String)] = {
+        let entries: [(String, String)] = [
+            ("\\bpython\\b", "Python"),
+            ("\\bswift\\b", "Swift"),
+            ("\\bjavascript\\b", "JavaScript"),
+            ("\\btypescript\\b", "TypeScript"),
+            ("\\bkotlin\\b", "Kotlin"),
+            ("\\brust\\b", "Rust"),
+            ("\\bgolang\\b", "Go"),
+        ]
+        return entries.compactMap { pattern, replacement in
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                return nil
+            }
+            return (regex, replacement)
+        }
+    }()
+    private let spaceBeforePunctuationRegex = try? NSRegularExpression(pattern: "\\s+([,;:.!?\\)])")
+    private let missingSpaceAfterPunctuationRegex = try? NSRegularExpression(pattern: "([,;:.!?])([^\\s])")
+    private let spaceAfterOpenParenRegex = try? NSRegularExpression(pattern: "\\(\\s+")
+    private let dashSpacingRegex = try? NSRegularExpression(pattern: "\\s*—\\s*")
 
-    private init() {}
+    var currentASRDescriptor: ASRBackendDescriptor { asrBackend.descriptor }
+    var currentASRBackendKind: ASRBackendKind { asrBackend.descriptor.kind }
+
+    private struct TransitionBoundaryRule {
+        let regex: NSRegularExpression
+        let replacement: String
+    }
+
+    private init() {
+        let state = AppState.shared
+        state.refreshPerformanceProfile()
+        let router = PerformanceRouter.shared
+        let preferred = router.effectiveASRBackend(
+            preferred: state.preferredASRBackend,
+            profile: state.performanceProfile
+        )
+        self.asrBackend = ASRBackendFactory.make(preferred: preferred)
+        state.preferredASRBackend = preferred
+        state.activeASRBackend = asrBackend.descriptor.kind
+        if !asrBackend.descriptor.requiresModelInstall {
+            state.modelStatus = .ready
+        }
+    }
+
+    func refreshASRBackendSelection() {
+        AppState.shared.refreshPerformanceProfile()
+        setASRBackend(AppState.shared.preferredASRBackend)
+    }
+
+    func setASRBackend(_ preferred: ASRBackendKind) {
+        modelLoadTask?.cancel()
+        modelLoadTask = nil
+        asrBackend.cancelInstall()
+
+        let state = AppState.shared
+        state.refreshPerformanceProfile()
+        let effectivePreferred = PerformanceRouter.shared.effectiveASRBackend(
+            preferred: preferred,
+            profile: state.performanceProfile
+        )
+
+        asrBackend = ASRBackendFactory.make(preferred: effectivePreferred)
+        state.preferredASRBackend = effectivePreferred
+        state.activeASRBackend = asrBackend.descriptor.kind
+        state.isDownloadPaused = false
+        state.downloadStats = DownloadStats()
+        state.modelInstallPath = asrBackend.installPath
+        if asrBackend.descriptor.requiresModelInstall {
+            state.modelStatus = asrBackend.isLoaded ? .ready : .notDownloaded
+        } else {
+            state.modelStatus = .ready
+        }
+    }
 
     // MARK: - Sound Effects
 
@@ -104,8 +253,8 @@ final class DictationEngine {
 
     // MARK: - Model Loading
 
-    /// Downloads and loads the Whisper large-v3-turbo model.
-    /// Progress is reported via AppState.shared.modelStatus.
+    /// Loads the currently-selected ASR backend.
+    /// For installable backends, this also drives download progress in AppState.
     func loadModel() async {
         if let inFlight = modelLoadTask {
             if inFlight.isCancelled {
@@ -130,31 +279,36 @@ final class DictationEngine {
         let existing = modelLoadTask
         existing?.cancel()
         modelLoadTask = nil
-        whisperKit = nil
-        AppState.shared.modelStatus = .notDownloaded
+        asrBackend.cancelInstall()
         AppState.shared.isDownloadPaused = false
+        if asrBackend.descriptor.requiresModelInstall {
+            AppState.shared.modelStatus = .notDownloaded
+        } else {
+            AppState.shared.modelStatus = .ready
+        }
+    }
+
+    func pauseModelDownload() {
+        guard case .downloading = AppState.shared.modelStatus else { return }
+        AppState.shared.isDownloadPaused = true
+        asrBackend.pauseInstall()
+        AppState.shared.downloadStats.speedBytesPerSec = 0
+    }
+
+    func resumeModelDownload() {
+        AppState.shared.isDownloadPaused = false
+        asrBackend.resumeInstall()
     }
 
     func uninstallModel() {
         cancelModelDownload()
-        whisperKit = nil
-
-        // Delete from the known install path (set during download)
-        if let installPath = AppState.shared.modelInstallPath {
-            try? FileManager.default.removeItem(atPath: installPath)
+        asrBackend.uninstallModel()
+        AppState.shared.modelInstallPath = asrBackend.installPath
+        if asrBackend.descriptor.requiresModelInstall {
+            AppState.shared.modelStatus = .notDownloaded
+        } else {
+            AppState.shared.modelStatus = .ready
         }
-
-        // Also sweep the WhisperKit download directory (~/Documents/huggingface)
-        let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let whisperKitDir = documentsDir.appendingPathComponent("huggingface/models/argmaxinc/whisperkit-coreml")
-        if let contents = try? FileManager.default.contentsOfDirectory(at: whisperKitDir, includingPropertiesForKeys: nil) {
-            for url in contents where url.lastPathComponent.contains("whisper") {
-                try? FileManager.default.removeItem(at: url)
-            }
-        }
-
-        AppState.shared.modelInstallPath = nil
-        AppState.shared.modelStatus = .notDownloaded
     }
 
     func reinstallModel() async {
@@ -164,111 +318,127 @@ final class DictationEngine {
 
     private func performModelLoad() async {
         let state = AppState.shared
-        guard !state.modelStatus.isReady else { return }
+        state.refreshPerformanceProfile()
         guard !Task.isCancelled else { return }
-        whisperKit = nil
+        let effectivePreferred = PerformanceRouter.shared.effectiveASRBackend(
+            preferred: state.preferredASRBackend,
+            profile: state.performanceProfile
+        )
+        if effectivePreferred != currentASRBackendKind {
+            setASRBackend(effectivePreferred)
+        }
 
-        state.modelStatus = .downloading(progress: 0.02)
-        state.downloadStats = DownloadStats()
+        if state.modelStatus.isReady, asrBackend.isLoaded {
+            return
+        }
+
+        let backend = asrBackend
+        let descriptor = backend.descriptor
+        state.activeASRBackend = descriptor.kind
+
+        if !descriptor.requiresModelInstall {
+            state.modelStatus = .loading
+            await backend.loadIfInstalled()
+            state.modelInstallPath = backend.installPath
+            state.downloadStats = DownloadStats()
+            state.modelStatus = .ready
+            Self.modelLogger.notice("[ModelLoad] backend ready without install: \(descriptor.displayName, privacy: .public)")
+            return
+        }
+
+        let totalBytes = descriptor.approxModelBytes ?? 0
+        state.downloadStats = DownloadStats(bytesReceived: 0, totalBytes: totalBytes, speedBytesPerSec: 0, startedAt: Date())
+        state.modelStatus = .downloading(progress: max(0.0, min(backend.downloadProgress, 1.0)))
+        state.isDownloadPaused = backend.isPaused
+
+        let startedAt = Date()
+        var lastProgress: Double = 0
+        var lastTime = Date()
 
         do {
-            let modelName = "openai_whisper-large-v3-v20240930_turbo_632MB"
-            let totalBytes: Int64 = 632 * 1024 * 1024
-            let startedAt = Date()
-            Self.modelLogger.notice("[ModelLoad] starting download for \(modelName, privacy: .public)")
+            Self.modelLogger.notice("[ModelLoad] preparing backend \(descriptor.displayName, privacy: .public)")
 
-            // Phase 1: download (with speed tracking)
-            state.modelStatus = .downloading(progress: 0.01)
-            var lastProgress: Double = 0
-            var lastTime: Date = Date()
-
-            let modelFolder = try await WhisperKit.download(
-                variant: modelName,
-                progressCallback: { progress in
-                    Task { @MainActor in
-                        let p = progress.fractionCompleted
-                        AppState.shared.modelStatus = .downloading(progress: p)
-
-                        // Compute download speed from delta progress
-                        let now = Date()
-                        let dt = now.timeIntervalSince(lastTime)
-                        if dt >= 0.5 {
-                            let dp = p - lastProgress
-                            let bytesDelta = Int64(dp * Double(totalBytes))
-                            let rawSpeed = Double(bytesDelta) / dt
-                            // Exponential smoothing
-                            let prev = AppState.shared.downloadStats.speedBytesPerSec
-                            AppState.shared.downloadStats.speedBytesPerSec =
-                                prev == 0 ? rawSpeed : prev * 0.6 + rawSpeed * 0.4
-                            AppState.shared.downloadStats.bytesReceived = Int64(p * Double(totalBytes))
-                            AppState.shared.downloadStats.totalBytes = totalBytes
-                            lastProgress = p
-                            lastTime = now
-                        }
-                    }
-                }
-            )
-
-            // Bail out if cancelled between download and init (prevents ANE contention)
-            guard !Task.isCancelled else {
-                Self.modelLogger.notice("[ModelLoad] cancelled after download; aborting init")
-                state.modelStatus = .notDownloaded
+            await backend.loadIfInstalled()
+            if backend.isLoaded {
+                state.modelInstallPath = backend.installPath
+                state.downloadStats.bytesReceived = totalBytes
+                state.modelStatus = .ready
+                Self.modelLogger.notice("[ModelLoad] backend already installed and loaded")
                 return
             }
 
-            Self.modelLogger.notice("[ModelLoad] download completed at \(modelFolder.path, privacy: .public)")
-            state.modelInstallPath = modelFolder.path
+            let installTask = Task {
+                await backend.installModel()
+            }
 
-            // Phase 2: load into memory
+            while !installTask.isCancelled {
+                if Task.isCancelled {
+                    installTask.cancel()
+                    backend.cancelInstall()
+                    throw CancellationError()
+                }
+
+                let progress = max(0.0, min(backend.downloadProgress, 1.0))
+                if backend.isInstalling {
+                    state.modelStatus = .downloading(progress: progress)
+                }
+
+                state.downloadStats.totalBytes = totalBytes
+                state.downloadStats.bytesReceived = Int64(Double(totalBytes) * progress)
+
+                let now = Date()
+                let dt = now.timeIntervalSince(lastTime)
+                if dt >= 0.5 && !state.isDownloadPaused {
+                    let dp = progress - lastProgress
+                    let bytesDelta = Int64(dp * Double(totalBytes))
+                    let rawSpeed = max(0, Double(bytesDelta) / dt)
+                    let prev = state.downloadStats.speedBytesPerSec
+                    state.downloadStats.speedBytesPerSec = prev == 0 ? rawSpeed : (prev * 0.6 + rawSpeed * 0.4)
+                    lastProgress = progress
+                    lastTime = now
+                } else if backend.isPaused {
+                    // Reset baseline so speed doesn't spike on resume
+                    lastProgress = progress
+                    lastTime = now
+                }
+                state.isDownloadPaused = backend.isPaused
+
+                if !backend.isInstalling {
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(250))
+            }
+
+            await installTask.value
+            guard !Task.isCancelled else { throw CancellationError() }
+
             state.modelStatus = .loading
-            Self.modelLogger.notice("[ModelLoad] initializing WhisperKit (prewarm disabled)")
-
-            let loadingWatchdog = Task { @MainActor in
-                try? await Task.sleep(for: .seconds(75))
-                if case .loading = AppState.shared.modelStatus {
-                    AppState.shared.modelStatus = .failed(
-                        L10n.ui(
-                            for: AppState.shared.selectedLanguage.id,
-                            fr: "Le chargement du modèle prend trop de temps. Réessayez.",
-                            en: "Model loading is taking too long. Please retry.",
-                            es: "La carga del modelo tarda demasiado. Inténtalo de nuevo.",
-                            zh: "模型加载耗时过长，请重试。",
-                            ja: "モデルの読み込みに時間がかかりすぎています。再試行してください。",
-                            ru: "Загрузка модели занимает слишком много времени. Повторите попытку."
-                        )
-                    )
-                    Self.modelLogger.error("[ModelLoad] loading watchdog triggered after 75s")
-                }
+            if !backend.isLoaded {
+                await backend.loadIfInstalled()
             }
-            defer { loadingWatchdog.cancel() }
-
-            let config = WhisperKitConfig(
-                model: modelName,
-                modelFolder: modelFolder.path,
-                verbose: false,
-                logLevel: .error,
-                prewarm: false,
-                load: true,
-                download: false
-            )
-            whisperKit = try await WhisperKit(config)
-
-            guard !Task.isCancelled else {
-                Self.modelLogger.notice("[ModelLoad] cancelled after init; releasing")
-                whisperKit = nil
-                state.modelStatus = .notDownloaded
-                return
+            guard backend.isLoaded else {
+                let reason = backend.installError ?? L10n.ui(
+                    for: state.selectedLanguage.id,
+                    fr: "Le moteur ASR n'a pas pu être chargé.",
+                    en: "The ASR backend could not be loaded.",
+                    es: "No se pudo cargar el backend ASR.",
+                    zh: "无法加载 ASR 后端。",
+                    ja: "ASR バックエンドを読み込めませんでした。",
+                    ru: "Не удалось загрузить ASR-бэкенд."
+                )
+                throw NSError(domain: "ASRBackend", code: -1, userInfo: [NSLocalizedDescriptionKey: reason])
             }
 
+            state.modelInstallPath = backend.installPath
+            state.downloadStats.bytesReceived = totalBytes
             state.modelStatus = .ready
-            let elapsed = Date().timeIntervalSince(startedAt)
-            Self.modelLogger.notice("[ModelLoad] ready in \(elapsed, privacy: .public)s")
-            Task { await AdvancedLLMFormatter.shared.loadIfInstalled() }
 
+            let elapsed = Date().timeIntervalSince(startedAt)
+            Self.modelLogger.notice("[ModelLoad] backend ready in \(elapsed, privacy: .public)s")
         } catch {
-            if Task.isCancelled {
+            if Task.isCancelled || error is CancellationError {
                 Self.modelLogger.notice("[ModelLoad] cancelled")
-                state.modelStatus = .notDownloaded
+                state.modelStatus = descriptor.requiresModelInstall ? .notDownloaded : .ready
             } else {
                 Self.modelLogger.error("[ModelLoad] failed: \(error.localizedDescription, privacy: .public)")
                 state.modelStatus = .failed(error.localizedDescription)
@@ -281,6 +451,8 @@ final class DictationEngine {
     func startDictation() async {
         // ── Guard: no overlapping sessions ───────────────────────────────────
         guard !isDictating else { return }
+        // ── Guard: previous transcription still in-flight ────────────────────
+        guard !isProcessing else { return }
 
         let state = AppState.shared
 
@@ -307,16 +479,16 @@ final class DictationEngine {
             guard ShortcutManager.shared.isHolding else { return }
         }
 
-        // ── Guard: model ready ────────────────────────────────────────────────
-        guard state.modelStatus.isReady, whisperKit != nil else {
+        // ── Guard: ASR backend ready ──────────────────────────────────────────
+        guard state.modelStatus.isReady, asrBackend.isLoaded else {
             state.error = L10n.ui(
                 for: state.selectedLanguage.id,
-                fr: "Le modèle Whisper n'est pas encore chargé.",
-                en: "Whisper model is not loaded yet.",
-                es: "El modelo Whisper aún no está cargado.",
-                zh: "Whisper 模型尚未加载。",
-                ja: "Whisper モデルはまだ読み込まれていません。",
-                ru: "Модель Whisper еще не загружена."
+                fr: "Le moteur de dictée n'est pas encore prêt.",
+                en: "The dictation backend is not ready yet.",
+                es: "El backend de dictado aún no está listo.",
+                zh: "听写后端尚未就绪。",
+                ja: "音声入力バックエンドはまだ準備できていません。",
+                ru: "Бэкенд диктовки еще не готов."
             )
             return
         }
@@ -327,31 +499,53 @@ final class DictationEngine {
         targetApp = NSWorkspace.shared.frontmostApplication
         Self.pipelineLogger.notice("[Dictation] start; target app=\(self.targetApp?.bundleIdentifier ?? "nil", privacy: .public)")
 
-        audioBuffer = []
+        audioSampleBuffer.reset()
+        // Pre-allocate enough for long dictations to avoid repeated reallocations on the realtime audio thread.
+        let preallocatedSamples = min(maxDictationSamples, Int(whisperSampleRate * 120))
+        audioSampleBuffer.reserveCapacity(preallocatedSamples)
+        didHitAudioCaptureLimit = false
         state.dictationState = .listening
         overlayController.show()
+        guard startAudioCapture() else {
+            // Ensure the session is fully rolled back when audio init fails.
+            isDictating = false
+            targetApp = nil
+            state.dictationState = .idle
+            overlayController.hide()
+            return
+        }
         playDictationStartSound()
-        startAudioCapture()
     }
 
     func stopDictation() async {
         guard isDictating else { return }
         isDictating = false
+        isProcessing = true
 
         let state = AppState.shared
         stopAudioCapture()
-        // Flush any pending MainActor audio-buffer tasks before reading the snapshot.
-        // The audio tap posts `Task { @MainActor in audioBuffer.append(…) }` from a
-        // background thread; a brief yield ensures those tasks complete first.
-        try? await Task.sleep(nanoseconds: 100_000_000) // 100 ms
+        // Give CoreAudio a brief moment to flush the last callback before snapshotting.
+        try? await Task.sleep(nanoseconds: 30_000_000) // 30 ms
         state.dictationState = .processing
-        Self.pipelineLogger.notice("[Dictation] stop; captured samples=\(self.audioBuffer.count)")
+        let capturedSamples = audioSampleBuffer.count()
+        Self.pipelineLogger.notice("[Dictation] stop; captured samples=\(capturedSamples)")
 
-        let rawText = await runWhisperTranscription()
-        var finalText = postProcess(rawText)
-        finalText = await applyCodeFormatting(finalText)
+        let asrStartedAt = CFAbsoluteTimeGetCurrent()
+        let rawText = await runASRTranscription()
+        let asrDurationMs = Int((CFAbsoluteTimeGetCurrent() - asrStartedAt) * 1_000)
+
+        let postProcessStartedAt = CFAbsoluteTimeGetCurrent()
+        let normalizedText = postProcess(rawText)
+        let postProcessDurationMs = Int((CFAbsoluteTimeGetCurrent() - postProcessStartedAt) * 1_000)
+
+        let formatterStartedAt = CFAbsoluteTimeGetCurrent()
+        var finalText = await applyFormattingPipeline(rawASRText: rawText, normalizedText: normalizedText)
+        let formatterDurationMs = Int((CFAbsoluteTimeGetCurrent() - formatterStartedAt) * 1_000)
         finalText = capitalizeProperNouns(in: finalText)
         Self.pipelineLogger.notice("[Dictation] transcription lengths raw=\(rawText.count) final=\(finalText.count)")
+        Self.pipelineLogger.notice(
+            "[Dictation] stage timings asr=\(asrDurationMs, privacy: .public)ms post=\(postProcessDurationMs, privacy: .public)ms format=\(formatterDurationMs, privacy: .public)ms"
+        )
 
         state.lastTranscription = finalText
         state.dictationState = .done(text: finalText)
@@ -364,7 +558,7 @@ final class DictationEngine {
                 Self.pipelineLogger.notice("[Dictation] autoInsert=off; copied transcription to clipboard")
             }
         } else {
-            let bufferCount = audioBuffer.count
+            let bufferCount = capturedSamples
             Self.pipelineLogger.notice("[Dictation] no transcription text — bufferCount=\(bufferCount, privacy: .public) rawText.count=\(rawText.count, privacy: .public)")
             if bufferCount < 1600 {
                 // Buffer too short: less than 0.1s of audio at 16kHz
@@ -396,32 +590,64 @@ final class DictationEngine {
 
         try? await Task.sleep(for: .milliseconds(600))
         state.dictationState = .idle
+        isProcessing = false
     }
 
-    // MARK: - Code Formatting Pipeline
+    // MARK: - Text Formatter Pipeline
 
-    private func applyCodeFormatting(_ text: String) async -> String {
-        guard !text.isEmpty else { return text }
-        let mode = AppState.shared.formattingMode
-        let style = AppState.shared.defaultCodeStyle
-        switch mode {
-        case .trigger:
-            return CodeFormatter().formatTranscribedText(text, defaultStyle: style)
-        case .advanced:
-            AppState.shared.dictationState = .formatting
-            if let result = await AdvancedLLMFormatter.shared.format(text, style: style) {
-                return result
-            }
-            return CodeFormatter().formatAdvanced(text, defaultStyle: style)
+    private func applyFormattingPipeline(rawASRText: String, normalizedText: String) async -> String {
+        guard !normalizedText.isEmpty else { return normalizedText }
+
+        let state = AppState.shared
+        state.refreshPerformanceProfile()
+        let effectiveMode = PerformanceRouter.shared.effectiveFormattingMode(
+            preferred: state.formattingMode,
+            profile: state.performanceProfile
+        )
+        let context = TextFormatterContext(
+            rawASRText: rawASRText,
+            normalizedText: normalizedText,
+            languageCode: state.selectedLanguage.id,
+            defaultCodeStyle: state.defaultCodeStyle,
+            preferredMode: effectiveMode
+        )
+
+        let formatter: any TextFormatter
+        if effectiveMode == .advanced && state.isProModeUnlocked {
+            state.dictationState = .formatting
+            formatter = proTextFormatter
+            Self.pipelineLogger.notice("[Formatting] using PRO formatter (mode=\(effectiveMode.rawValue, privacy: .public) proUnlocked=true)")
+        } else {
+            formatter = ecoTextFormatter
+            Self.pipelineLogger.notice("[Formatting] using ECO formatter (mode=\(effectiveMode.rawValue, privacy: .public) proUnlocked=\(state.isProModeUnlocked, privacy: .public))")
         }
+
+        let result = await formatter.format(context)
+        if result.usedDeterministicFallback {
+            Self.pipelineLogger.notice("[Formatting] result: deterministic fallback (rejectedTokens=\(result.rejectedIntroducedTokens.count, privacy: .public))")
+        } else {
+            Self.pipelineLogger.notice("[Formatting] result: LLM text accepted")
+        }
+        if result.usedDeterministicFallback, !result.rejectedIntroducedTokens.isEmpty {
+            Self.pipelineLogger.warning(
+                "[Dictation] integrity fallback triggered; introduced tokens=\(result.rejectedIntroducedTokens.joined(separator: ","), privacy: .public)"
+            )
+        }
+        return result.text
     }
 
     // MARK: - Audio Capture
 
-    /// Whisper expects 16 kHz mono Float32 PCM.
+    /// The ASR engine expects 16 kHz mono Float32 PCM.
     private let whisperSampleRate: Double = 16_000
+    /// Hard cap to avoid unbounded memory growth if key-up is missed.
+    private let maxDictationDurationSeconds: Double = 300
+    private var maxDictationSamples: Int {
+        Int(whisperSampleRate * maxDictationDurationSeconds)
+    }
 
-    private func startAudioCapture() {
+    @discardableResult
+    private func startAudioCapture() -> Bool {
         // Always tear down any previous engine (safety net for race conditions).
         stopAudioCapture()
 
@@ -434,7 +660,7 @@ final class DictationEngine {
         // Native hardware format (e.g. 44100 or 48000 Hz, possibly multi-channel)
         let hwFormat = inputNode.outputFormat(forBus: 0)
 
-        // Target format: 16 kHz, mono, Float32 — what Whisper expects
+        // Target format: 16 kHz, mono, Float32 — expected by ASR
         guard let whisperFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: whisperSampleRate,
@@ -450,7 +676,7 @@ final class DictationEngine {
                 ja: "16kHz オーディオ形式を作成できませんでした。",
                 ru: "Не удалось создать аудиоформат 16 кГц."
             )
-            return
+            return false
         }
 
         // Build a converter from hardware format → 16kHz mono
@@ -464,60 +690,75 @@ final class DictationEngine {
                 ja: "オーディオコンバータを作成できませんでした。",
                 ru: "Не удалось создать аудиоконвертер."
             )
-            return
+            return false
         }
 
         // Tap on the hardware format, convert each buffer to 16kHz
+        var lastHUDLevelPushAt = CFAbsoluteTimeGetCurrent()
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] hwBuffer, _ in
             guard let self else { return }
+            autoreleasepool {
+                // Compute how many output frames correspond to this input buffer
+                let inputFrames = AVAudioFrameCount(hwBuffer.frameLength)
+                let ratio = self.whisperSampleRate / hwFormat.sampleRate
+                let outputFrames = AVAudioFrameCount(Double(inputFrames) * ratio + 1)
 
-            // Compute how many output frames correspond to this input buffer
-            let inputFrames = AVAudioFrameCount(hwBuffer.frameLength)
-            let ratio = self.whisperSampleRate / hwFormat.sampleRate
-            let outputFrames = AVAudioFrameCount(Double(inputFrames) * ratio + 1)
+                guard let outBuffer = AVAudioPCMBuffer(pcmFormat: whisperFormat, frameCapacity: outputFrames) else { return }
 
-            guard let outBuffer = AVAudioPCMBuffer(pcmFormat: whisperFormat, frameCapacity: outputFrames) else { return }
-
-            var conversionError: NSError?
-            var consumed = false
-            let status = converter.convert(to: outBuffer, error: &conversionError) { _, outStatus in
-                if consumed {
-                    outStatus.pointee = .noDataNow
-                    return nil
+                var conversionError: NSError?
+                var consumed = false
+                let status = converter.convert(to: outBuffer, error: &conversionError) { _, outStatus in
+                    if consumed {
+                        outStatus.pointee = .noDataNow
+                        return nil
+                    }
+                    consumed = true
+                    outStatus.pointee = .haveData
+                    return hwBuffer
                 }
-                consumed = true
-                outStatus.pointee = .haveData
-                return hwBuffer
-            }
 
-            guard status != .error, let channelData = outBuffer.floatChannelData?[0] else { return }
-            let frameCount = Int(outBuffer.frameLength)
-            let samples = Array(UnsafeBufferPointer(start: channelData, count: frameCount))
-            Task { @MainActor in
-                self.audioBuffer.append(contentsOf: samples)
-            }
-
-            // RMS spectrum for HUD (computed on the original hwBuffer for responsiveness)
-            guard let hwChannel = hwBuffer.floatChannelData?[0] else { return }
-            let hwFrames = Int(hwBuffer.frameLength)
-            let bandSize = max(1, hwFrames / 28)
-            var levels = [Float]()
-            levels.reserveCapacity(28)
-            for i in 0..<28 {
-                let start = i * bandSize
-                let end   = min(start + bandSize, hwFrames)
-                guard start < end else { levels.append(0.1); continue }
-                let slice = UnsafeBufferPointer(start: hwChannel + start, count: end - start)
-                var peak: Float = 0
-                for sample in slice {
-                    peak = max(peak, abs(sample))
+                guard status != .error, let channelData = outBuffer.floatChannelData?[0] else { return }
+                let frameCount = Int(outBuffer.frameLength)
+                guard frameCount > 0 else { return }
+                let samplePointer = UnsafeBufferPointer(start: channelData, count: frameCount)
+                let appendStatus = self.audioSampleBuffer.append(samplePointer, maxSamples: self.maxDictationSamples)
+                if appendStatus != .appended && !self.didHitAudioCaptureLimit {
+                    self.didHitAudioCaptureLimit = true
+                    if appendStatus == .truncated {
+                        Self.pipelineLogger.warning("[Dictation] audio capture reached max duration (\(Int(self.maxDictationDurationSeconds), privacy: .public)s); truncating additional samples")
+                    } else {
+                        Self.pipelineLogger.warning("[Dictation] audio capture reached max duration (\(Int(self.maxDictationDurationSeconds), privacy: .public)s); dropping additional samples")
+                    }
                 }
-                levels.append(min(1.0, peak * 8))
-            }
-            let now = Date()
-            if now.timeIntervalSince(self.lastAudioLevelUpdateAt) >= 0.08 {
-                self.lastAudioLevelUpdateAt = now
-                Task { @MainActor in AppState.shared.updateAudioLevels(levels) }
+
+                // RMS spectrum for HUD (computed on the original hwBuffer for responsiveness)
+                let now = CFAbsoluteTimeGetCurrent()
+                guard now - lastHUDLevelPushAt >= 0.10 else { return }
+                lastHUDLevelPushAt = now
+
+                guard let hwChannel = hwBuffer.floatChannelData?[0] else { return }
+                let hwFrames = Int(hwBuffer.frameLength)
+                guard hwFrames > 0 else { return }
+                let bandSize = max(1, hwFrames / 28)
+                var levels: [Float] = []
+                levels.reserveCapacity(28)
+                for i in 0..<28 {
+                    let start = i * bandSize
+                    let end = min(start + bandSize, hwFrames)
+                    guard start < end else {
+                        levels.append(0.1)
+                        continue
+                    }
+                    let slice = UnsafeBufferPointer(start: hwChannel + start, count: end - start)
+                    var peak: Float = 0
+                    for sample in slice {
+                        peak = max(peak, abs(sample))
+                    }
+                    levels.append(min(1.0, sqrt(min(1.0, peak * 18))))
+                }
+                Task { @MainActor in
+                    AppState.shared.updateAudioLevels(levels)
+                }
             }
         }
 
@@ -527,7 +768,9 @@ final class DictationEngine {
         } catch {
             AppState.shared.error = "Démarrage audio échoué : \(error.localizedDescription)"
             stopAudioCapture()
+            return false
         }
+        return true
     }
 
     private func stopAudioCapture() {
@@ -539,8 +782,8 @@ final class DictationEngine {
 
     // MARK: - Transcription
 
-    private func runWhisperTranscription() async -> String {
-        let audioSnapshot = audioBuffer
+    private func runASRTranscription() async -> String {
+        let audioSnapshot = audioSampleBuffer.snapshot()
         let languages = AppState.shared.selectedLanguages
         let lang: String? = languages.count > 1 ? nil : (languages.first?.id ?? "fr")
         return await transcribeAudioSamples(audioSnapshot, language: lang)
@@ -548,15 +791,15 @@ final class DictationEngine {
 
     func transcribeAudioFile(at url: URL, language: WhisperLanguage) async -> String {
         let state = AppState.shared
-        guard state.modelStatus.isReady, whisperKit != nil else {
+        guard state.modelStatus.isReady, asrBackend.isLoaded else {
             state.error = L10n.ui(
                 for: state.selectedLanguage.id,
-                fr: "Le modèle Whisper n'est pas encore chargé.",
-                en: "Whisper model is not loaded yet.",
-                es: "El modelo Whisper aún no está cargado.",
-                zh: "Whisper 模型尚未加载。",
-                ja: "Whisper モデルはまだ読み込まれていません。",
-                ru: "Модель Whisper еще не загружена."
+                fr: "Le moteur de dictée n'est pas encore prêt.",
+                en: "The dictation backend is not ready yet.",
+                es: "El backend de dictado aún no está listo.",
+                zh: "听写后端尚未就绪。",
+                ja: "音声入力バックエンドはまだ準備できていません。",
+                ru: "Бэкенд диктовки еще не готов."
             )
             return ""
         }
@@ -601,71 +844,189 @@ final class DictationEngine {
         _ audioSnapshot: [Float],
         language lang: String?
     ) async -> String {
-        let durationMs = Int(Double(audioSnapshot.count) / 16.0)
-        Self.pipelineLogger.notice("[Dictation] transcribeAudioSamples: samples=\(audioSnapshot.count, privacy: .public) (~\(durationMs, privacy: .public)ms) lang=\(lang ?? "auto", privacy: .public) whisperKitNil=\(self.whisperKit == nil, privacy: .public)")
-
-        guard let wk = whisperKit else {
-            Self.pipelineLogger.error("[Dictation] whisperKit is nil at transcription time — model not loaded")
+        let vad = VoiceActivityDetector(sampleRate: whisperSampleRate)
+        let processedAudio: [Float]
+        do {
+            let result = try vad.trim(audioSnapshot)
+            processedAudio = result.trimmedBuffer
+            let leadingMs = Int(Double(result.leadingTrimmedSamples) / 16.0)
+            let trailingMs = Int(Double(result.trailingTrimmedSamples) / 16.0)
+            if leadingMs > 0 || trailingMs > 0 {
+                Self.pipelineLogger.notice(
+                    "[Dictation] VAD trim applied; lead=\(leadingMs, privacy: .public)ms tail=\(trailingMs, privacy: .public)ms threshold=\(Double(result.threshold), privacy: .public)"
+                )
+            }
+        } catch {
+            await MainActor.run {
+                AppState.shared.error = L10n.ui(
+                    for: AppState.shared.selectedLanguage.id,
+                    fr: "Aucune voix détectée dans l'audio. Réessaie en parlant plus près du micro.",
+                    en: "No voice detected in the audio. Try speaking closer to the microphone.",
+                    es: "No se detectó voz en el audio. Intenta hablar más cerca del micrófono.",
+                    zh: "音频中未检测到语音。请靠近麦克风重试。",
+                    ja: "音声が検出されませんでした。マイクに近づいて再試行してください。",
+                    ru: "В аудио не обнаружен голос. Попробуйте говорить ближе к микрофону."
+                )
+            }
+            Self.pipelineLogger.error("[Dictation] VAD rejected audio: \(error.localizedDescription, privacy: .public)")
             return ""
         }
-        guard !audioSnapshot.isEmpty else {
+
+        let durationMs = Int(Double(processedAudio.count) / 16.0)
+        let primaryBackendName = asrBackend.descriptor.displayName
+        let primaryLoaded = asrBackend.isLoaded
+        Self.pipelineLogger.notice("[Dictation] transcribeAudioSamples: samples=\(processedAudio.count, privacy: .public) (~\(durationMs, privacy: .public)ms) lang=\(lang ?? "auto", privacy: .public) backend=\(primaryBackendName, privacy: .public) loaded=\(primaryLoaded, privacy: .public)")
+
+        guard !processedAudio.isEmpty else {
             Self.pipelineLogger.error("[Dictation] audioSnapshot is EMPTY — no audio was captured")
             return ""
         }
 
-        return await Task.detached(priority: .userInitiated) {
-            Self.pipelineLogger.notice("[Dictation] decoding language=\(lang ?? "auto", privacy: .public)")
+        let candidates = transcriptionCandidatesForCurrentRequest()
+        let orderedNames = candidates.map { $0.descriptor.displayName }.joined(separator: " -> ")
+        Self.pipelineLogger.notice("[Dictation] decoding candidates=\(orderedNames, privacy: .public)")
 
-            // Build the initial_prompt from the custom dictionary (vocabulary injection).
-            let prompt = await MainActor.run {
-                ContextFetcher.buildWhisperPrompt(language: lang ?? "en")
+        var lastFailure: Error?
+        for (index, backend) in candidates.enumerated() {
+            let descriptor = backend.descriptor
+
+            if descriptor.requiresModelInstall && !backend.isLoaded {
+                Self.pipelineLogger.error("[Dictation] decoding skipped attempt=\(index + 1, privacy: .public) backend=\(descriptor.displayName, privacy: .public) reason=backend not loaded")
+                continue
             }
 
-            var promptTokenIds: [Int]? = nil
-            if !prompt.isEmpty, let tokenizer = wk.tokenizer {
-                promptTokenIds = tokenizer
-                    .encode(text: " " + prompt.trimmingCharacters(in: .whitespaces))
-                    .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
-                if let ids = promptTokenIds {
-                    Self.pipelineLogger.notice("[CodeContext] injecting \(ids.count, privacy: .public) prompt tokens")
-                }
-            }
-
-            let options = DecodingOptions(
-                task: .transcribe,
-                language: lang,
-                temperature: 0.0,
-                temperatureFallbackCount: 5,
-                sampleLength: 224,
-                usePrefillPrompt: false,
-                usePrefillCache: false,
-                skipSpecialTokens: true,
-                withoutTimestamps: false,
-                promptTokens: promptTokenIds
-            )
+            let timeout = descriptor.kind == .qwenMLX ? qwenTranscriptionTimeoutSeconds : 15.0
+            Self.pipelineLogger.notice("[Dictation] decoding attempt=\(index + 1, privacy: .public) backend=\(descriptor.displayName, privacy: .public) timeout=\(timeout, privacy: .public)s")
 
             do {
-                let results = try await wk.transcribe(audioArray: audioSnapshot, decodeOptions: options)
-                let texts = results.map { $0.text }
-                Self.pipelineLogger.notice("[Dictation] whisper results: count=\(results.count, privacy: .public) texts=\(texts.joined(separator: "|"), privacy: .public)")
-                return texts.joined(separator: " ")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-            } catch {
-                Self.pipelineLogger.error("[Dictation] transcribe threw: \(error.localizedDescription, privacy: .public)")
-                await MainActor.run {
-                    AppState.shared.error = L10n.ui(
-                        for: AppState.shared.selectedLanguage.id,
-                        fr: "Transcription échouée : \(error.localizedDescription)",
-                        en: "Transcription failed: \(error.localizedDescription)",
-                        es: "La transcripción falló: \(error.localizedDescription)",
-                        zh: "转写失败：\(error.localizedDescription)",
-                        ja: "文字起こしに失敗しました: \(error.localizedDescription)",
-                        ru: "Ошибка транскрибации: \(error.localizedDescription)"
-                    )
+                let raw = try await transcribeWithTimeout(
+                    backend: backend,
+                    audio: processedAudio,
+                    timeoutSeconds: timeout
+                )
+                let result = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !result.isEmpty else { throw ASRBackendError.emptyResult }
+
+                if let qualityIssue = Self.transcriptionQualityIssue(result, durationMs: durationMs) {
+                    throw TranscriptionAttemptError.lowQuality(qualityIssue)
                 }
-                return ""
+
+                if descriptor.kind != self.asrBackend.descriptor.kind {
+                    let primaryName = self.asrBackend.descriptor.displayName
+                    Self.pipelineLogger.notice("[Dictation] fallback backend succeeded primary=\(primaryName, privacy: .public) used=\(descriptor.displayName, privacy: .public)")
+                }
+                Self.pipelineLogger.notice("[Dictation] backend result chars=\(result.count, privacy: .public)")
+                return result
+            } catch {
+                lastFailure = error
+                Self.pipelineLogger.error("[Dictation] decoding failed attempt=\(index + 1, privacy: .public) backend=\(descriptor.displayName, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             }
-        }.value
+        }
+
+        await MainActor.run {
+            AppState.shared.error = L10n.ui(
+                for: AppState.shared.selectedLanguage.id,
+                fr: "La transcription a échoué. Réessayez après rechargement du moteur.",
+                en: "Transcription failed. Retry after reloading the backend.",
+                es: "La transcripción falló. Vuelve a intentarlo tras recargar el backend.",
+                zh: "转写失败。请重新加载后端后重试。",
+                ja: "文字起こしに失敗しました。バックエンド再読み込み後に再試行してください。",
+                ru: "Сбой транскрибации. Повторите после перезагрузки бэкенда."
+            )
+        }
+        if let lastFailure {
+            Self.pipelineLogger.error("[Dictation] all backend attempts failed; last error=\(lastFailure.localizedDescription, privacy: .public)")
+        } else {
+            Self.pipelineLogger.error("[Dictation] all backend attempts failed; no backend available")
+        }
+        return ""
+    }
+
+    private enum TranscriptionAttemptError: LocalizedError {
+        case timedOut(seconds: Double)
+        case lowQuality(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .timedOut(let seconds):
+                return "Transcription timed out after \(Int(seconds.rounded()))s."
+            case .lowQuality(let reason):
+                return "Transcription rejected due to low-quality output (\(reason))."
+            }
+        }
+    }
+
+    private func transcriptionCandidatesForCurrentRequest() -> [any ASRService] {
+        guard asrBackend.descriptor.kind == .qwenMLX, AppleSpeechAnalyzerBackend.isRuntimeSupported else {
+            return [asrBackend]
+        }
+
+        // Qwen fallback strategy: prioritize Apple Speech when available,
+        // then keep Qwen as backup.
+        return [AppleSpeechAnalyzerBackend(), asrBackend]
+    }
+
+    private func transcribeWithTimeout(
+        backend: any ASRService,
+        audio: [Float],
+        timeoutSeconds: Double
+    ) async throws -> String {
+        let timeoutNanos = UInt64(max(1.0, timeoutSeconds) * 1_000_000_000)
+        return try await withThrowingTaskGroup(of: String.self, returning: String.self) { group in
+            group.addTask {
+                try await backend.transcribe(audioBuffer: audio)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutNanos)
+                throw TranscriptionAttemptError.timedOut(seconds: timeoutSeconds)
+            }
+            guard let firstCompleted = try await group.next() else {
+                throw ASRBackendError.transcriptionFailed("No transcription result produced.")
+            }
+            group.cancelAll()
+            return firstCompleted
+        }
+    }
+
+    private nonisolated static func transcriptionQualityIssue(_ text: String, durationMs: Int) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "empty_result" }
+
+        let durationSeconds = max(Double(durationMs) / 1_000.0, 0.25)
+        let charsPerSecond = Double(trimmed.count) / durationSeconds
+        if charsPerSecond > 45.0 {
+            return "chars_per_second=\(Int(charsPerSecond.rounded()))"
+        }
+
+        let words = trimmed.split(whereSeparator: { $0.isWhitespace })
+        let wordsPerSecond = Double(words.count) / durationSeconds
+        if wordsPerSecond > 8.0 {
+            return "words_per_second=\(Int(wordsPerSecond.rounded()))"
+        }
+
+        let longTokenCount = words.filter { $0.count >= 48 }.count
+        if longTokenCount >= 2 {
+            return "too_many_long_tokens=\(longTokenCount)"
+        }
+
+        var frequencies: [Substring: Int] = [:]
+        for token in words where token.count >= 4 {
+            frequencies[token, default: 0] += 1
+        }
+        if let repeated = frequencies.first(where: { $0.value >= 8 }) {
+            return "repeated_token=\(repeated.key)"
+        }
+
+        let lower = trimmed.lowercased()
+        let suspiciousMarkers = ["<footer", "<header", "{%", "_increment", "_magic", "extends"]
+        let markerHits = suspiciousMarkers.reduce(0) { partial, marker in
+            partial + (lower.contains(marker) ? 1 : 0)
+        }
+        if markerHits >= 2 {
+            return "suspicious_markup_markers=\(markerHits)"
+        }
+
+        return nil
     }
 
     private nonisolated static func loadAudioSamples(from url: URL, targetSampleRate: Double) throws -> [Float] {
@@ -782,12 +1143,9 @@ final class DictationEngine {
         var result = text
 
         // ── 1. Filler word removal ────────────────────────────────────────────
-        for filler in fillerWords(for: languageCode) {
-            result = result.replacingOccurrences(
-                of: "\\b\(NSRegularExpression.escapedPattern(for: filler))\\b",
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
+        for regex in fillerRemovalRegexes(for: languageCode) {
+            let range = NSRange(result.startIndex..., in: result)
+            result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: "")
         }
         result = result
             .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
@@ -848,35 +1206,14 @@ final class DictationEngine {
     /// so that `capitalizeSentences` can capitalize mid-text sentences naturally.
     /// Called by both casual (`applyLightPunctuation`) and formal tone paths.
     private func insertTransitionSentenceBoundaries(in text: String, languageCode: String) -> String {
-        let starters: [String]
-        switch languageCode {
-        case "fr":
-            starters = ["ensuite", "puis", "cependant", "néanmoins", "toutefois",
-                        "par conséquent", "donc", "ainsi", "de plus", "par ailleurs",
-                        "en revanche", "en fait", "d'ailleurs"]
-        case "es":
-            starters = ["luego", "después", "sin embargo", "no obstante",
-                        "por lo tanto", "así que", "además"]
-        case "de":
-            starters = ["dann", "jedoch", "außerdem", "deshalb", "danach"]
-        default:
-            starters = ["then", "however", "therefore", "moreover", "furthermore",
-                        "subsequently", "additionally", "besides", "nonetheless"]
-        }
-
         var result = text
-        for starter in starters {
-            let escaped = NSRegularExpression.escapedPattern(for: starter)
-            // Match: word (possibly with comma) + spaces + starter keyword
-            // Only when the preceding token is NOT already followed by sentence-terminal punctuation
-            let pattern = "(?i)([A-Za-zÀ-ÿ0-9_]{2,})([,]?\\s+)(\(escaped))\\b"
-            if let regex = try? NSRegularExpression(pattern: pattern) {
-                let range = NSRange(result.startIndex..., in: result)
-                result = regex.stringByReplacingMatches(
-                    in: result, range: range,
-                    withTemplate: "$1. \(starter.prefix(1).uppercased())\(starter.dropFirst())"
-                )
-            }
+        for rule in transitionBoundaryRules(for: languageCode) {
+            let range = NSRange(result.startIndex..., in: result)
+            result = rule.regex.stringByReplacingMatches(
+                in: result,
+                range: range,
+                withTemplate: rule.replacement
+            )
         }
         return result
     }
@@ -902,19 +1239,12 @@ final class DictationEngine {
     /// Capitalises programming language names that appear as plain words in the output.
     private func capitalizeProperNouns(in text: String) -> String {
         var result = text
-        let nouns: [(String, String)] = [
-            ("\\bpython\\b",     "Python"),
-            ("\\bswift\\b",      "Swift"),
-            ("\\bjavascript\\b", "JavaScript"),
-            ("\\btypescript\\b", "TypeScript"),
-            ("\\bkotlin\\b",     "Kotlin"),
-            ("\\brust\\b",       "Rust"),
-            ("\\bgolang\\b",     "Go"),
-        ]
-        for (pattern, replacement) in nouns {
-            result = result.replacingOccurrences(
-                of: pattern, with: replacement,
-                options: [.regularExpression, .caseInsensitive]
+        for rule in properNounRules {
+            let range = NSRange(result.startIndex..., in: result)
+            result = rule.regex.stringByReplacingMatches(
+                in: result,
+                range: range,
+                withTemplate: rule.replacement
             )
         }
         return result
@@ -924,6 +1254,68 @@ final class DictationEngine {
     /// Converts common dictated punctuation keywords into symbols and normalizes spacing.
     private func applyFormalPunctuation(to text: String, languageCode: String) -> String {
         var result = text
+
+        for item in formalPunctuationRules(for: languageCode) {
+            let range = NSRange(result.startIndex..., in: result)
+            result = item.regex.stringByReplacingMatches(
+                in: result,
+                range: range,
+                withTemplate: item.replacement
+            )
+        }
+
+        // Remove spaces before punctuation.
+        if let spaceBeforePunctuationRegex {
+            let range = NSRange(result.startIndex..., in: result)
+            result = spaceBeforePunctuationRegex.stringByReplacingMatches(
+                in: result,
+                range: range,
+                withTemplate: "$1"
+            )
+        }
+        // Ensure one space after punctuation when followed by text.
+        if let missingSpaceAfterPunctuationRegex {
+            let range = NSRange(result.startIndex..., in: result)
+            result = missingSpaceAfterPunctuationRegex.stringByReplacingMatches(
+                in: result,
+                range: range,
+                withTemplate: "$1 $2"
+            )
+        }
+        // Normalize spaces around opening parenthesis and em dash.
+        if let spaceAfterOpenParenRegex {
+            let range = NSRange(result.startIndex..., in: result)
+            result = spaceAfterOpenParenRegex.stringByReplacingMatches(
+                in: result,
+                range: range,
+                withTemplate: "("
+            )
+        }
+        if let dashSpacingRegex {
+            let range = NSRange(result.startIndex..., in: result)
+            result = dashSpacingRegex.stringByReplacingMatches(
+                in: result,
+                range: range,
+                withTemplate: " — "
+            )
+        }
+
+        result = result
+            .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // If the user did not dictate final punctuation, close sentence with a period.
+        if let last = result.last, !".!?".contains(last) {
+            result += "."
+        }
+
+        return result
+    }
+
+    private func formalPunctuationRules(for languageCode: String) -> [(regex: NSRegularExpression, replacement: String)] {
+        if let cached = formalPunctuationRuleCache[languageCode] {
+            return cached
+        }
 
         let replacements = formalPunctuationReplacements(for: languageCode) + [
             // French keywords
@@ -950,48 +1342,64 @@ final class DictationEngine {
             ("\\bclose\\s+parenthesis\\b", ")")
         ]
 
-        for item in replacements {
-            result = result.replacingOccurrences(
-                of: item.pattern,
-                with: item.replacement,
-                options: [.regularExpression, .caseInsensitive]
-            )
+        let compiled = replacements.compactMap { pattern, replacement -> (regex: NSRegularExpression, replacement: String)? in
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                return nil
+            }
+            return (regex, replacement)
+        }
+        formalPunctuationRuleCache[languageCode] = compiled
+        return compiled
+    }
+
+    private func fillerRemovalRegexes(for languageCode: String) -> [NSRegularExpression] {
+        if let cached = fillerRegexCache[languageCode] {
+            return cached
+        }
+        let compiled = fillerWords(for: languageCode).compactMap { filler -> NSRegularExpression? in
+            let escaped = NSRegularExpression.escapedPattern(for: filler)
+            return try? NSRegularExpression(pattern: "\\b\(escaped)\\b", options: [.caseInsensitive])
+        }
+        fillerRegexCache[languageCode] = compiled
+        return compiled
+    }
+
+    private func transitionBoundaryRules(for languageCode: String) -> [TransitionBoundaryRule] {
+        if let cached = transitionRuleCache[languageCode] {
+            return cached
         }
 
-        // Remove spaces before punctuation.
-        result = result.replacingOccurrences(
-            of: "\\s+([,;:.!?\\)])",
-            with: "$1",
-            options: .regularExpression
-        )
-        // Ensure one space after punctuation when followed by text.
-        result = result.replacingOccurrences(
-            of: "([,;:.!?])([^\\s])",
-            with: "$1 $2",
-            options: .regularExpression
-        )
-        // Normalize spaces around opening parenthesis and em dash.
-        result = result.replacingOccurrences(
-            of: "\\(\\s+",
-            with: "(",
-            options: .regularExpression
-        )
-        result = result.replacingOccurrences(
-            of: "\\s*—\\s*",
-            with: " — ",
-            options: .regularExpression
-        )
-
-        result = result
-            .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // If the user did not dictate final punctuation, close sentence with a period.
-        if let last = result.last, !".!?".contains(last) {
-            result += "."
+        let rules = transitionStarters(for: languageCode).compactMap { starter -> TransitionBoundaryRule? in
+            let escaped = NSRegularExpression.escapedPattern(for: starter)
+            // Match: word (possibly with comma) + spaces + starter keyword
+            // Only when the preceding token is NOT already followed by sentence-terminal punctuation
+            let pattern = "(?i)([A-Za-zÀ-ÿ0-9_]{2,})([,]?\\s+)(\(escaped))\\b"
+            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                return nil
+            }
+            let replacement = "$1. \(starter.prefix(1).uppercased())\(starter.dropFirst())"
+            return TransitionBoundaryRule(regex: regex, replacement: replacement)
         }
 
-        return result
+        transitionRuleCache[languageCode] = rules
+        return rules
+    }
+
+    private func transitionStarters(for languageCode: String) -> [String] {
+        switch languageCode {
+        case "fr":
+            return ["ensuite", "puis", "cependant", "néanmoins", "toutefois",
+                    "par conséquent", "donc", "ainsi", "de plus", "par ailleurs",
+                    "en revanche", "en fait", "d'ailleurs"]
+        case "es":
+            return ["luego", "después", "sin embargo", "no obstante",
+                    "por lo tanto", "así que", "además"]
+        case "de":
+            return ["dann", "jedoch", "außerdem", "deshalb", "danach"]
+        default:
+            return ["then", "however", "therefore", "moreover", "furthermore",
+                    "subsequently", "additionally", "besides", "nonetheless"]
+        }
     }
 
     private func fillerWords(for languageCode: String) -> [String] {
@@ -1484,18 +1892,32 @@ final class DictationEngine {
         Self.pipelineLogger.notice("[Insert] preparing secure text injection; textLength=\(text.count) target=\(self.targetApp?.bundleIdentifier ?? "nil", privacy: .public)")
 
         if let app = targetApp, !app.isTerminated {
-            let activated = app.activate(options: [.activateIgnoringOtherApps])
+            let activated = app.activate()
             Self.pipelineLogger.notice("[Insert] activate target app result=\(activated ? "success" : "failed", privacy: .public)")
 
             var didBecomeFrontmost = false
-            for _ in 0..<12 {
+            for _ in 0..<20 {
                 if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
                     didBecomeFrontmost = true
                     break
                 }
-                try? await Task.sleep(for: .milliseconds(35))
+                try? await Task.sleep(for: .milliseconds(40))
             }
             Self.pipelineLogger.notice("[Insert] target frontmost=\(didBecomeFrontmost ? "yes" : "no", privacy: .public)")
+            if !didBecomeFrontmost {
+                copyTextToClipboard(text)
+                AppState.shared.error = L10n.ui(
+                    for: AppState.shared.selectedLanguage.id,
+                    fr: "Impossible de revenir à l'application cible. Le texte a été copié dans le presse-papiers.",
+                    en: "Could not focus the target app. The text was copied to the clipboard.",
+                    es: "No se pudo enfocar la app de destino. El texto se copió al portapapeles.",
+                    zh: "无法切回目标应用，文本已复制到剪贴板。",
+                    ja: "対象アプリに戻れなかったため、テキストをクリップボードにコピーしました。",
+                    ru: "Не удалось вернуть фокус целевому приложению. Текст скопирован в буфер обмена."
+                )
+                Self.pipelineLogger.error("[Insert] aborting simulated typing: target app did not become frontmost")
+                return
+            }
             try? await Task.sleep(for: .milliseconds(140))
         }
 
@@ -1842,7 +2264,7 @@ final class DictationEngine {
 
     private nonisolated static func axElement(from value: AnyObject) -> AXUIElement? {
         guard CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
-        return (value as! AXUIElement)
+        return unsafeBitCast(value, to: AXUIElement.self)
     }
 
     private nonisolated static func detectWordReplacement(from oldText: String, to newText: String) -> DictionarySuggestion? {
@@ -1938,6 +2360,16 @@ final class DictationEngine {
         let range = NSRange(text.startIndex..., in: text)
         return regex.firstMatch(in: text, range: range) != nil
     }
+
+#if DEBUG
+    nonisolated static func _test_detectWordReplacement(from oldText: String, to newText: String) -> DictionarySuggestion? {
+        detectWordReplacement(from: oldText, to: newText)
+    }
+
+    nonisolated static func _test_containsLearningToken(_ token: String, in text: String) -> Bool {
+        containsLearningToken(token, in: text)
+    }
+#endif
 
     private func simulateTyping(_ text: String) {
         guard let src = CGEventSource(stateID: .hidSystemState) else { return }

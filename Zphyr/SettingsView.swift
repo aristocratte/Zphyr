@@ -261,6 +261,9 @@ struct GeneralSettingsContent: View {
             }
 
         }
+        .onAppear {
+            state.refreshPerformanceProfile()
+        }
     }
 }
 
@@ -270,6 +273,48 @@ struct SystemSettingsContent: View {
     @Bindable private var state = AppState.shared
 
     private var lang: String { AppState.shared.uiDisplayLanguage.rawValue }
+    private var asrDescriptor: ASRBackendDescriptor { DictationEngine.shared.currentASRDescriptor }
+    private var asrRequiresInstall: Bool { asrDescriptor.requiresModelInstall }
+    private var performanceProfile: PerformanceProfile { state.performanceProfile }
+
+    private var asrBackendBinding: Binding<ASRBackendKind> {
+        Binding(
+            get: { state.preferredASRBackend },
+            set: { newValue in
+                state.preferredASRBackend = PerformanceRouter.shared.effectiveASRBackend(
+                    preferred: newValue,
+                    profile: state.performanceProfile
+                )
+                DictationEngine.shared.refreshASRBackendSelection()
+                Task { await DictationEngine.shared.loadModel() }
+            }
+        )
+    }
+
+    private var formattingModeBinding: Binding<FormattingMode> {
+        Binding(
+            get: { state.formattingMode },
+            set: { newValue in
+                state.formattingMode = PerformanceRouter.shared.effectiveFormattingMode(
+                    preferred: newValue,
+                    profile: state.performanceProfile
+                )
+            }
+        )
+    }
+
+    private var asrInstallURL: URL? {
+        guard asrRequiresInstall else { return nil }
+        let fm = FileManager.default
+        if let explicitPath = state.modelInstallPath, fm.fileExists(atPath: explicitPath) {
+            return URL(fileURLWithPath: explicitPath)
+        }
+        return Qwen3ASREngine.resolveInstallURL()
+    }
+
+    private var formatterInstallURL: URL? {
+        AdvancedLLMFormatter.resolveInstallURL()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -277,18 +322,43 @@ struct SystemSettingsContent: View {
                 .font(.system(size: 20, weight: .bold))
                 .foregroundColor(Color(hex: "#1A1A1A"))
 
+            SettingsCard {
+                SettingsRow(
+                    icon: "memorychip",
+                    iconColor: Color(hex: "#FF9500"),
+                    title: t("Profil matériel", "Hardware profile", "Perfil de hardware", "硬件配置", "ハードウェアプロファイル", "Профиль железа"),
+                    subtitle: "\(performanceProfile.displayLabel(for: lang)) · \(performanceProfile.physicalMemoryGB) GB RAM",
+                    showDivider: false
+                ) {
+                    Text(performanceProfile.tier.displayName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(performanceProfile.tier == .pro ? Color(hex: "#22D3B8") : Color(hex: "#888880"))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            (performanceProfile.tier == .pro ? Color(hex: "#22D3B8") : Color(hex: "#888880"))
+                                .opacity(0.12)
+                        )
+                        .cornerRadius(7)
+                }
+            }
+
             // Code formatting mode
             SettingsCard {
                 SettingsRow(
                     icon: "textformat.alt",
                     iconColor: Color(hex: "#AF52DE"),
                     title: t("Mode de formatage", "Formatting mode", "Modo de formateo", "格式化模式", "フォーマットモード", "Режим форматирования"),
-                    subtitle: state.formattingMode.subtitle(for: lang),
+                    subtitle: state.isProModeUnlocked
+                        ? state.formattingMode.subtitle(for: lang)
+                        : t("Mode Éco forcé par le profil matériel (Regex déterministe).", "Eco mode enforced by hardware profile (deterministic regex).", "Modo Eco forzado por el perfil de hardware (regex determinista).", "由硬件配置强制使用节能模式（确定性正则）。", "ハードウェア構成によりエコモード固定（決定的 Regex）。", "Эко-режим принудительно включён профилем железа (детерминированные regex)."),
                     showDivider: state.formattingMode == .advanced
                 ) {
-                    Picker("", selection: $state.formattingMode) {
+                    Picker("", selection: formattingModeBinding) {
                         ForEach(FormattingMode.allCases) { mode in
-                            Text(mode.displayName(for: lang)).tag(mode)
+                            Text(mode.displayName(for: lang))
+                                .tag(mode)
+                                .disabled(mode == .advanced && !state.isProModeUnlocked)
                         }
                     }
                     .pickerStyle(.menu)
@@ -322,10 +392,33 @@ struct SystemSettingsContent: View {
 
             // Model status card
             SettingsCard {
-                SettingsRow(icon: "cpu", iconColor: Color(hex: "#007AFF"),
-                            title: t("Modèle Whisper", "Whisper model", "Modelo Whisper", "Whisper 模型", "Whisper モデル", "Модель Whisper"),
-                            subtitle: "openai/whisper-large-v3-turbo · 632 MB",
-                            showDivider: false) {
+                SettingsRow(
+                    icon: "cpu",
+                    iconColor: Color(hex: "#007AFF"),
+                    title: t("Backend ASR", "ASR backend", "Backend ASR", "ASR 后端", "ASR バックエンド", "ASR-бэкенд"),
+                    subtitle: t("Choisissez le moteur de transcription local.", "Choose your local transcription engine.", "Elige tu motor de transcripción local.", "选择本地转写引擎。", "ローカル文字起こしエンジンを選択。", "Выберите локальный движок транскрибации."),
+                    showDivider: true
+                ) {
+                    Picker("", selection: asrBackendBinding) {
+                        Text("Apple Speech Analyzer")
+                            .tag(ASRBackendKind.appleSpeechAnalyzer)
+                        Text("Qwen3-ASR (MLX)")
+                            .tag(ASRBackendKind.qwenMLX)
+                            .disabled(!state.isQwenASRUnlocked)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 190)
+                }
+
+                SettingsRow(
+                    icon: "waveform",
+                    iconColor: Color(hex: "#22D3B8"),
+                    title: t("Backend actif", "Active backend", "Backend activo", "当前后端", "アクティブバックエンド", "Активный бэкенд"),
+                    subtitle: asrRequiresInstall
+                        ? "\(asrDescriptor.displayName) · \(asrModelDiskSize)"
+                        : "\(asrDescriptor.displayName) · \(t("Intégré au système", "Built into the system", "Integrado en el sistema", "系统内置", "システム内蔵", "Встроен в систему"))",
+                    showDivider: false
+                ) {
                     modelStatusBadge
                 }
             }
@@ -372,7 +465,7 @@ struct SystemSettingsContent: View {
                             Text(t("Langues de dictée", "Dictation languages", "Idiomas de dictado", "听写语言", "音声入力言語", "Языки диктовки"))
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(Color(hex: "#1A1A1A"))
-                            Text(t("Sélectionnez vos langues parlées — Whisper les reconnaîtra toutes.", "Select your spoken languages — Whisper will recognize all of them.", "Selecciona tus idiomas hablados — Whisper los reconocerá todos.", "选择你会说的语言，Whisper 将全部识别。", "話す言語をすべて選択 — Whisper がすべて認識します。", "Выберите языки — Whisper распознает все."))
+                            Text(t("Sélectionnez vos langues parlées pour la dictée locale.", "Select your spoken languages for local dictation.", "Selecciona tus idiomas hablados para el dictado local.", "选择本地听写的语音语言。", "ローカル音声入力で使う言語を選択してください。", "Выберите языки для локальной диктовки."))
                                 .font(.system(size: 11))
                                 .foregroundColor(Color(hex: "#AAAAAA"))
                         }
@@ -418,27 +511,55 @@ struct SystemSettingsContent: View {
                 }
             }
 
-            // Model management (path + uninstall + reinstall)
-            if state.modelStatus.isReady || state.modelInstallPath != nil {
-                SettingsCard {
-                    SettingsRow(icon: "folder.fill", iconColor: Color(hex: "#FF9500"),
-                                title: t("Emplacement du modèle", "Model location", "Ubicación del modelo", "模型位置", "モデルの場所", "Расположение модели"),
-                                subtitle: state.modelInstallPath.flatMap {
-                                    URL(fileURLWithPath: $0).deletingLastPathComponent().path
-                                } ?? "—") {
-                        Button {
-                            if let path = state.modelInstallPath {
-                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
-                            }
-                        } label: {
-                            Label(t("Ouvrir", "Open", "Abrir", "打开", "開く", "Открыть"),
-                                  systemImage: "folder.badge.gearshape")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(Color(hex: "#FF9500"))
+            // Install paths for both local models
+            SettingsCard {
+                SettingsRow(
+                    icon: "folder.fill",
+                    iconColor: Color(hex: "#FF9500"),
+                    title: t("Chemin backend ASR", "ASR backend path", "Ruta backend ASR", "ASR 后端路径", "ASR バックエンドのパス", "Путь ASR-бэкенда"),
+                    subtitle: asrRequiresInstall
+                        ? (asrInstallURL?.path ?? t("Non installé", "Not installed", "No instalado", "未安装", "未インストール", "Не установлен"))
+                        : t("Backend système intégré (aucun dossier modèle).", "System backend (no model folder).", "Backend del sistema (sin carpeta de modelo).", "系统后端（无模型目录）。", "システムバックエンド（モデルフォルダなし）。", "Системный бэкенд (без папки модели).")
+                ) {
+                    Button {
+                        if let asrInstallURL {
+                            NSWorkspace.shared.activateFileViewerSelecting([asrInstallURL])
                         }
-                        .buttonStyle(.plain)
-                        .disabled(state.modelInstallPath == nil)
+                    } label: {
+                        Label(t("Ouvrir", "Open", "Abrir", "打开", "開く", "Открыть"),
+                              systemImage: "folder.badge.gearshape")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(Color(hex: "#FF9500"))
                     }
+                    .buttonStyle(.plain)
+                    .disabled(asrInstallURL == nil || !asrRequiresInstall)
+                }
+
+                SettingsRow(
+                    icon: "folder.fill",
+                    iconColor: Color(hex: "#22D3B8"),
+                    title: t("Chemin Qwen3-1.7B (formatage)", "Qwen3-1.7B path (formatting)", "Ruta Qwen3-1.7B (formato)", "Qwen3-1.7B 路径（格式化）", "Qwen3-1.7B パス（整形）", "Путь Qwen3-1.7B (форматирование)"),
+                    subtitle: formatterInstallURL?.path ?? t("Non installé", "Not installed", "No instalado", "未安装", "未インストール", "Не установлен"),
+                    showDivider: false
+                ) {
+                    Button {
+                        if let formatterInstallURL {
+                            NSWorkspace.shared.activateFileViewerSelecting([formatterInstallURL])
+                        }
+                    } label: {
+                        Label(t("Ouvrir", "Open", "Abrir", "打开", "開く", "Открыть"),
+                              systemImage: "folder.badge.gearshape")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(Color(hex: "#22D3B8"))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(formatterInstallURL == nil)
+                }
+            }
+
+            // ASR model management (uninstall + reinstall)
+            if asrRequiresInstall && (state.modelStatus.isReady || asrInstallURL != nil) {
+                SettingsCard {
                     SettingsRow(icon: "trash", iconColor: Color(hex: "#FF3B30"),
                                 title: t("Désinstaller le modèle", "Uninstall model", "Desinstalar modelo", "卸载模型", "モデルを削除", "Удалить модель"),
                                 subtitle: t("Supprime les fichiers du modèle du disque", "Removes model files from disk", "Elimina los archivos del modelo del disco", "从磁盘删除模型文件", "モデルファイルをディスクから削除", "Удаляет файлы модели с диска")) {
@@ -510,34 +631,63 @@ struct SystemSettingsContent: View {
                 }
             }
         }
+        .onAppear {
+            state.refreshPerformanceProfile()
+        }
     }
 
     private var localDataSize: String {
-        let keys = [TranscriptionStore.storageKey, "zphyr.dictionary.entries"]
+        let baseKeys = [TranscriptionStore.storageKey, "zphyr.dictionary.entries"]
+        let keys = baseKeys + baseKeys.map { "\($0).enc" }
         let totalBytes = keys.compactMap { UserDefaults.standard.data(forKey: $0)?.count }.reduce(0, +)
         return ByteCountFormatter.string(fromByteCount: Int64(totalBytes), countStyle: .file)
     }
 
+    private var asrModelDiskSize: String {
+        if !asrRequiresInstall {
+            return t("N/A", "N/A", "N/A", "不适用", "N/A", "Н/Д")
+        }
+        guard let url = asrInstallURL else { return asrDescriptor.modelSizeLabel ?? "~" }
+        let fm = FileManager.default
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]
+        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: Array(keys),
+                                              options: [.skipsHiddenFiles], errorHandler: nil) else { return "~2.46 GB" }
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            guard let vals = try? fileURL.resourceValues(forKeys: keys), vals.isRegularFile == true else { continue }
+            total += Int64(vals.totalFileAllocatedSize ?? vals.fileAllocatedSize ?? vals.fileSize ?? 0)
+        }
+        guard total > 0 else { return "~2.46 GB" }
+        return ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
+    }
+
     @ViewBuilder
     private var modelStatusBadge: some View {
-        switch state.modelStatus {
-        case .ready:
-            Label(t("Prêt", "Ready", "Listo", "就绪", "準備完了", "Готово"), systemImage: "checkmark.circle.fill")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(Color(hex: "#34C759"))
-                .labelStyle(.titleAndIcon)
-        case .notDownloaded:
-            Button(t("Télécharger", "Download", "Descargar", "下载", "ダウンロード", "Скачать")) { Task { await DictationEngine.shared.loadModel() } }
-                .buttonStyle(.plain)
+        if !asrRequiresInstall {
+            Label(t("Système", "System", "Sistema", "系统", "システム", "Система"), systemImage: "apple.logo")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(Color(hex: "#007AFF"))
-        case .failed:
-            Label(t("Erreur", "Error", "Error", "错误", "エラー", "Ошибка"), systemImage: "exclamationmark.circle.fill")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(Color(hex: "#FF3B30"))
                 .labelStyle(.titleAndIcon)
-        default:
-            ProgressView().scaleEffect(0.7)
+        } else {
+            switch state.modelStatus {
+            case .ready:
+                Label(t("Prêt", "Ready", "Listo", "就绪", "準備完了", "Готово"), systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Color(hex: "#34C759"))
+                    .labelStyle(.titleAndIcon)
+            case .notDownloaded:
+                Button(t("Télécharger", "Download", "Descargar", "下载", "ダウンロード", "Скачать")) { Task { await DictationEngine.shared.loadModel() } }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Color(hex: "#007AFF"))
+            case .failed:
+                Label(t("Erreur", "Error", "Error", "错误", "エラー", "Ошибка"), systemImage: "exclamationmark.circle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Color(hex: "#FF3B30"))
+                    .labelStyle(.titleAndIcon)
+            default:
+                ProgressView().scaleEffect(0.7)
+            }
         }
     }
 }
@@ -664,12 +814,12 @@ struct PrivacySettingsContent: View {
                     Text(t("100% Local & Privé", "100% local & private", "100% local y privado", "100% 本地与私密", "100% ローカル & プライベート", "100% локально и приватно"))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(Color(hex: "#1A1A1A"))
-                    Text(t("Toute la transcription (Whisper) s'exécute sur votre Mac. Aucune donnée audio ne quitte votre appareil.",
-                           "All transcription (Whisper) runs on your Mac. No audio data leaves your device.",
-                           "Toda la transcripción (Whisper) se ejecuta en tu Mac. Ningún audio sale de tu dispositivo.",
-                           "所有转写（Whisper）都在你的 Mac 上运行，音频不会离开设备。",
-                           "すべての文字起こし（Whisper）は Mac 上で実行され、音声データは外部に送信されません。",
-                           "Вся транскрибация (Whisper) выполняется на вашем Mac. Аудиоданные не покидают устройство."))
+                    Text(t("Toute la transcription (Qwen3-ASR) s'exécute sur votre Mac. Aucune donnée audio ne quitte votre appareil.",
+                           "All transcription (Qwen3-ASR) runs on your Mac. No audio data leaves your device.",
+                           "Toda la transcripción (Qwen3-ASR) se ejecuta en tu Mac. Ningún audio sale de tu dispositivo.",
+                           "所有转写（Qwen3-ASR）都在你的 Mac 上运行，音频不会离开设备。",
+                           "すべての文字起こし（Qwen3-ASR）は Mac 上で実行され、音声データは外部に送信されません。",
+                           "Вся транскрибация (Qwen3-ASR) выполняется на вашем Mac. Аудиоданные не покидают устройство."))
                         .font(.system(size: 12))
                         .foregroundColor(Color(hex: "#666660"))
                         .lineSpacing(2)
@@ -914,6 +1064,11 @@ private struct QwenModelCard: View {
     @State private var formatter = AdvancedLLMFormatter.shared
     private var lang: String { AppState.shared.uiDisplayLanguage.rawValue }
 
+    /// Single source of truth: model files exist on disk.
+    private var isModelOnDisk: Bool {
+        AdvancedLLMFormatter.resolveInstallURL() != nil
+    }
+
     var body: some View {
         SettingsCard {
             if formatter.isInstalling {
@@ -928,7 +1083,7 @@ private struct QwenModelCard: View {
                                 .foregroundColor(Color(hex: "#22D3B8"))
                         }
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Qwen3.5-0.8B-4bit")
+                            Text("Qwen3-1.7B-4bit")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(Color(hex: "#1A1A1A"))
                             HStack(spacing: 5) {
@@ -974,28 +1129,34 @@ private struct QwenModelCard: View {
                         .padding(.horizontal, 16)
                         .padding(.bottom, 14)
                 }
-            } else if AppState.shared.advancedModeInstalled {
+            } else if isModelOnDisk {
                 SettingsRow(
                     icon: "brain.head.profile",
                     iconColor: Color(hex: "#22D3B8"),
-                    title: "Qwen3.5-0.8B-4bit",
+                    title: "Qwen3-1.7B-4bit",
                     subtitle: L10n.ui(for: lang, fr: "Installé · IA locale prête", en: "Installed · local AI ready", es: "Instalado · IA local lista", zh: "已安装 · 本地 AI 就绪", ja: "インストール済み · ローカル AI 準備完了", ru: "Установлен · локальный ИИ готов"),
                     showDivider: false
                 ) {
                     Button(L10n.ui(for: lang, fr: "Supprimer", en: "Remove", es: "Eliminar", zh: "删除", ja: "削除", ru: "Удалить")) {
                         AdvancedLLMFormatter.shared.unload()
                         AppState.shared.advancedModeInstalled = false
+                        AdvancedLLMFormatter.removeModelFromDisk()
                     }
                     .buttonStyle(.plain)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(Color(hex: "#FF3B30"))
                 }
+                .onAppear {
+                    if !AppState.shared.advancedModeInstalled {
+                        AppState.shared.advancedModeInstalled = true
+                    }
+                }
             } else {
                 SettingsRow(
                     icon: formatter.installError != nil ? "exclamationmark.triangle.fill" : "arrow.down.circle.fill",
                     iconColor: formatter.installError != nil ? Color(hex: "#FF9500") : Color(hex: "#AF52DE"),
-                    title: "Qwen3.5-0.8B-4bit",
-                    subtitle: formatter.installError ?? L10n.ui(for: lang, fr: "~625 Mo · IA locale sur Apple Silicon", en: "~625 MB · Local AI on Apple Silicon", es: "~625 MB · IA local en Apple Silicon", zh: "~625 MB · Apple Silicon 本地 AI", ja: "~625 MB · Apple Silicon ローカル AI", ru: "~625 МБ · локальный ИИ на Apple Silicon"),
+                    title: "Qwen3-1.7B-4bit",
+                    subtitle: formatter.installError ?? L10n.ui(for: lang, fr: "~1,1 Go · IA locale sur Apple Silicon", en: "~1.1 GB · Local AI on Apple Silicon", es: "~1,1 GB · IA local en Apple Silicon", zh: "~1.1 GB · Apple Silicon 本地 AI", ja: "~1.1 GB · Apple Silicon ローカル AI", ru: "~1,1 ГБ · локальный ИИ на Apple Silicon"),
                     showDivider: false
                 ) {
                     if formatter.installError != nil {

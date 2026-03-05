@@ -1,42 +1,71 @@
 # Zphyr
 
-Zphyr is a macOS voice dictation app focused on developer workflows.
-It records audio locally, transcribes with WhisperKit, post-processes the text, and injects it back into the active app.
+Zphyr is a macOS voice dictation app built for developer workflows.
+It captures audio locally, runs on-device ASR, post-processes the transcript, and inserts the final text into the active app.
 
-The project is SwiftUI-first and currently built as a native macOS app (`.xcodeproj`).
+The app is SwiftUI-first and shipped as a native macOS project (`.xcodeproj`).
 
 ## Highlights
 
-- 100% local transcription pipeline (no external LLM calls in the dictation flow)
-- Whisper model download + loading flow with onboarding/preflight UI
-- Hold-to-dictate global shortcut (customizable key)
+- Local-first voice pipeline (no cloud transcription in the dictation flow)
+- Pluggable ASR backend architecture (`Apple Speech Analyzer`, `Qwen3-ASR (MLX)`)
+- Hardware-aware routing with performance tiers (`Eco`, `Balanced`, `Pro`)
+- Hold-to-dictate global shortcut (default: right `Option`)
+- Real-time dictation and offline audio file transcription
 - Context-aware post-processing:
-- Writing tone per app context (personal/work/email/other)
-- Optional formal punctuation + paragraph formatting
-- Filler-word cleanup by language
-- Contextual link snippets (LinkedIn, social, contact email)
-- Custom dictionary with spoken aliases to improve recognition
-- Dictionary-learning suggestions after manual corrections
+  - deterministic formatter for explicit code triggers
+  - optional advanced local formatter (Qwen3-1.7B) with integrity fallback
+  - filler-word cleanup, TODO extraction, spoken-list formatting
+  - contextual snippets (LinkedIn, social, contact email)
+- Custom dictionary + learning suggestions from user corrections
+- Menu bar popover with model disk usage, RAM/CPU telemetry, and quick actions
 - Multi-language UI and dictation language support
+
+## ASR Backends
+
+- `Apple Speech Analyzer`
+  - local runtime backend
+  - no model download required
+  - used as fallback when needed
+- `Qwen3-ASR (MLX 8-bit)`
+  - model: `aufklarer/Qwen3-ASR-1.7B-MLX-8bit` (~2.46 GB)
+  - install/load/pause/resume/cancel flows handled in-app
+  - runs fully on device after installation
+- `WhisperKit`
+  - currently a stub backend in this build (not integrated yet)
+
+## Performance Tiers
+
+Zphyr auto-detects machine profile from physical memory:
+
+- `Eco` (`<= 8 GB`)
+  - forces lightweight path (Apple backend + deterministic formatting)
+- `Balanced` (`8-15 GB`)
+  - local ASR backend is configurable
+- `Pro` (`>= 16 GB`)
+  - unlocks advanced local formatting mode
 
 ## Tech Stack
 
 - Swift 5
 - SwiftUI + Observation
-- AppKit/Accessibility APIs for global keyboard events and text insertion
-- AVFoundation for audio capture
-- [WhisperKit](https://github.com/argmaxinc/WhisperKit) for on-device transcription
+- AppKit + Accessibility APIs (global key capture + text insertion)
+- AVFoundation (live audio + file decoding)
+- Speech framework (Apple ASR backend)
+- [MLX Swift](https://github.com/ml-explore/mlx-swift) + `mlx-swift-lm` + `swift-transformers` (on-device Qwen inference)
 
 ## Requirements
 
-- macOS (project currently set to deployment target `15.0` in Xcode build settings)
+- macOS deployment target: `15.0` (as set in Xcode project)
 - Xcode with Swift Package Manager support
 - Microphone permission
-- Accessibility permission (required for auto-insert into other apps)
+- Accessibility permission (required for automatic insertion into other apps)
+- Internet connection for first-time model download(s)
+- Apple Silicon recommended for MLX-based local models
 
 ## Getting Started
 
-1. Clone this repository:
+1. Clone the repository:
 ```bash
 git clone https://github.com/aristocratte/Zphyr.git
 cd Zphyr
@@ -47,42 +76,56 @@ cd Zphyr
 open Zphyr.xcodeproj
 ```
 
-3. Build and run the `Zphyr` target in Xcode.
+3. Build and run target `Zphyr` in Xcode.
 
 4. On first launch:
-- Complete onboarding
-- Grant microphone permission
-- Optionally grant Accessibility (needed for automatic text injection)
-- Let the app download/load the Whisper model
+  - complete onboarding/preflight
+  - grant microphone permission
+  - optionally grant Accessibility
+  - install/load local models as prompted
 
-## How To Use
+## Usage
 
-1. Keep your cursor in any target app or editor.
-2. Hold the configured trigger key (default: right `Option` key).
+### Live Dictation
+
+1. Place cursor in target app/editor.
+2. Hold the trigger key.
 3. Speak.
-4. Release the key to transcribe.
-5. Zphyr injects the processed text into the previously focused app (or falls back to clipboard-based insertion when relevant settings/permissions apply).
+4. Release key to transcribe and insert text.
 
-## Main Project Structure
+If auto-insert is unavailable, Zphyr falls back to clipboard insertion.
 
-- `Zphyr/ZphyrApp.swift`: app entry point, menu bar item, window lifecycle
-- `Zphyr/ContentView.swift`: top-level flow routing (Onboarding → Preflight → Main)
-- `Zphyr/PreflightView.swift`: immersive setup slides + model readiness
-- `Zphyr/MainView.swift`: app shell + sidebar + settings overlay
-- `Zphyr/DictationEngine.swift`: core pipeline (audio → Whisper → post-process → insert)
-- `Zphyr/AppState.swift`: shared observable state + permissions/model/dictation status
-- `Zphyr/ShortcutManager.swift`: global/local hold-to-dictate shortcut listener
-- `Zphyr/ContextFetcher.swift`: extracts focused-app tokens for prompt context
-- `DictionaryView.swift`: custom dictionary storage and management UI
+### Audio File Transcription
+
+1. Open the `Audio` section.
+2. Import an audio file.
+3. Select language.
+4. Run local transcription.
+5. Copy or export result as `.txt`.
+
+## Project Structure
+
+- `Zphyr/ZphyrApp.swift`: app lifecycle, window behavior, menu bar popover
+- `Zphyr/ContentView.swift`: top-level routing (Onboarding -> Preflight -> Main)
+- `Zphyr/PreflightView.swift`: setup flow, permissions, model onboarding
+- `Zphyr/MainView.swift`: primary shell + feature sections (Home, Dictionary, Audio, Snippets, Style)
+- `Zphyr/DictationEngine.swift`: core pipeline (capture -> backend ASR -> formatting -> insertion)
+- `Zphyr/ASRBackend*.swift`: ASR abstraction, lifecycle, backend factory
+- `Zphyr/AppleSpeechAnalyzerBackend.swift`: Apple ASR implementation
+- `Zphyr/QwenMLXBackend.swift`: Qwen3-ASR backend implementation
+- `Zphyr/PerformanceRouter.swift`: memory-tier routing logic
+- `Zphyr/TextFormatter.swift`, `EcoTextFormatter.swift`, `ProTextFormatter.swift`: formatting strategy layer
+- `Zphyr/TextIntegrityVerifier.swift`: guards advanced formatter output
+- `DictionaryView.swift`: custom dictionary UI
 
 ## Testing
 
-Basic test targets are present:
+Targets:
 
 - `ZphyrTests`
 - `ZphyrUITests`
 
-Run from Xcode (`Product > Test`) or from command line:
+Run tests from Xcode (`Product > Test`) or CLI:
 
 ```bash
 xcodebuild test \
@@ -91,7 +134,8 @@ xcodebuild test \
   -destination 'platform=macOS'
 ```
 
-## Notes
+## Privacy
 
-- The app is currently optimized for a developer-centric dictation workflow on macOS.
-- Advanced formatting/snippet behavior is language-dependent in parts of the pipeline.
+- Audio processing and transcription are local.
+- No external LLM API is called during the dictation pipeline.
+- Data stays on device except explicit model downloads.

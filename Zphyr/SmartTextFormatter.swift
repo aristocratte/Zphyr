@@ -13,6 +13,11 @@
 import Foundation
 
 final class SmartTextFormatter {
+    private let repetitionRegex = try? NSRegularExpression(
+        pattern: #"(?i)\b(\w{2,})(?:\s+\1){1,3}\b"#
+    )
+    private var todoRegexCache: [String: [NSRegularExpression]] = [:]
+    private var listRegexCache: [String: NSRegularExpression] = [:]
 
     // MARK: - Result
 
@@ -47,9 +52,7 @@ final class SmartTextFormatter {
     /// Removes a word that is immediately repeated 1–3 times.
     /// e.g. "voilà voilà voilà" → "voilà", "ok ok" → "ok"
     func removeRepetitions(in text: String) -> String {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"(?i)\b(\w{2,})(?:\s+\1){1,3}\b"#
-        ) else { return text }
+        guard let regex = repetitionRegex else { return text }
         let range = NSRange(text.startIndex..., in: text)
         return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "$1")
     }
@@ -102,12 +105,10 @@ final class SmartTextFormatter {
     }
 
     func extractTodos(from text: String, languageCode: String) -> (todos: [String], cleaned: String) {
-        let patterns = todoPatterns(for: languageCode)
         var todos: [String] = []
         var result = text
 
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+        for regex in todoRegexes(for: languageCode) {
             let matches = regex.matches(
                 in: result,
                 range: NSRange(result.startIndex..., in: result)
@@ -185,17 +186,7 @@ final class SmartTextFormatter {
     }
 
     func detectAndFormatList(in text: String, languageCode: String) -> String? {
-        let sets = markerSets(for: languageCode)
-        let allMarkers = (sets.first + sets.middle + sets.last)
-            .sorted { $0.count > $1.count }   // longest first avoids partial overlaps
-
-        let escaped = allMarkers
-            .filter { $0.count >= 4 }
-            .map { NSRegularExpression.escapedPattern(for: $0) }
-        guard !escaped.isEmpty else { return nil }
-
-        let pattern = "(?i)(?:(?:^|[,.]?)\\s+|^)(" + escaped.joined(separator: "|") + ")\\s+"
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        guard let regex = listRegex(for: languageCode) else { return nil }
 
         let nsText = text as NSString
         let fullRange = NSRange(location: 0, length: nsText.length)
@@ -238,5 +229,35 @@ final class SmartTextFormatter {
 
     static func todoBlock(from todos: [String]) -> String {
         todos.map { "- [ ] \($0)" }.joined(separator: "\n")
+    }
+
+    private func todoRegexes(for languageCode: String) -> [NSRegularExpression] {
+        if let cached = todoRegexCache[languageCode] {
+            return cached
+        }
+        let compiled = todoPatterns(for: languageCode).compactMap { pattern in
+            try? NSRegularExpression(pattern: pattern)
+        }
+        todoRegexCache[languageCode] = compiled
+        return compiled
+    }
+
+    private func listRegex(for languageCode: String) -> NSRegularExpression? {
+        if let cached = listRegexCache[languageCode] {
+            return cached
+        }
+        let sets = markerSets(for: languageCode)
+        let allMarkers = (sets.first + sets.middle + sets.last)
+            .sorted { $0.count > $1.count }   // longest first avoids partial overlaps
+
+        let escaped = allMarkers
+            .filter { $0.count >= 4 }
+            .map { NSRegularExpression.escapedPattern(for: $0) }
+        guard !escaped.isEmpty else { return nil }
+
+        let pattern = "(?i)(?:(?:^|[,.]?)\\s+|^)(" + escaped.joined(separator: "|") + ")\\s+"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        listRegexCache[languageCode] = regex
+        return regex
     }
 }

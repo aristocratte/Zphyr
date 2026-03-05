@@ -39,14 +39,21 @@ final class CodeFormatter {
 
     // Matches: <style> <words…>  optionally followed by a preposition/article
     // Handles French and English stop-words so the identifier boundary is clean.
-    private let triggerRegex = try! NSRegularExpression(
+    private let triggerRegex = try? NSRegularExpression(
         pattern: #"\b(camel|snake|pascal|screaming|kebab)\s+([a-zA-ZÀ-ÿ0-9\s]+?)(?=\s+(?:en|dans|pour|avec|sur|with|in|to|for|at|of|the|a|de|du|la|le|les|un|une|et|ou)\b|[,;.!?]|$)"#,
         options: [.caseInsensitive]
     )
+    private let advancedRegex: NSRegularExpression? = {
+        let keywordList = "variable|var|fonction|function|méthode|method|clase|función|método|tipo|parámetro|funktion|klasse|methode|konstante|переменная|функция|метод|класс|константа|параметр|classe|class|const|let|constante|type|param|paramètre|parameter"
+        let stopWordList = "en|dans|pour|avec|sur|with|in|to|for|at|of|the|a|de|du|la|le|les|un|une|et|ou|puis|ensuite|ici|là|python|swift|javascript|typescript|rust|golang|kotlin|go|js|ts|py"
+        let pattern = #"\b(?:"# + keywordList + #")\s+([a-zA-ZÀ-ÿ0-9](?:\s+[a-zA-ZÀ-ÿ0-9]){1,4})(?=\s+(?:"# + stopWordList + #")\b|[,;.!?]|$)"#
+        return try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+    }()
 
     /// Scans `text` for trigger keywords and replaces matched spans with the formatted identifier.
     /// Everything outside a trigger span is returned unchanged.
     func formatTranscribedText(_ text: String, defaultStyle: CodeStyle = .camel) -> String {
+        guard let triggerRegex else { return text }
         var result = text
         let nsText = text as NSString
         let range = NSRange(location: 0, length: nsText.length)
@@ -80,13 +87,7 @@ final class CodeFormatter {
 
         // Regex: technical keyword followed by 2–5 words that form the identifier
         // Stops before stop-words, punctuation, or end of string
-        let keywordList = "variable|var|fonction|function|méthode|method|clase|función|método|tipo|parámetro|funktion|klasse|methode|konstante|переменная|функция|метод|класс|константа|параметр|classe|class|const|let|constante|type|param|paramètre|parameter"
-        let stopWordList = "en|dans|pour|avec|sur|with|in|to|for|at|of|the|a|de|du|la|le|les|un|une|et|ou|puis|ensuite|ici|là|python|swift|javascript|typescript|rust|golang|kotlin|go|js|ts|py"
-
-        guard let advancedRegex = try? NSRegularExpression(
-            pattern: #"\b(?:"# + keywordList + #")\s+([a-zA-ZÀ-ÿ0-9](?:\s+[a-zA-ZÀ-ÿ0-9]){1,4})(?=\s+(?:"# + stopWordList + #")\b|[,;.!?]|$)"#,
-            options: [.caseInsensitive]
-        ) else { return text }
+        guard let advancedRegex else { return text }
 
         var result = text
         let nsText = text as NSString

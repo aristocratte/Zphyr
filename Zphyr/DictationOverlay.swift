@@ -306,9 +306,9 @@ private struct DotBar: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 2)
-            .fill(Color.white.opacity(0.7 + Double(display) * 0.3))
-            .frame(width: 3.5, height: max(4, display * 22))
-            .animation(.linear(duration: 0.08), value: display)
+            .fill(Color.white.opacity(0.6 + Double(display) * 0.4))
+            .frame(width: 3.5, height: max(4, display * 30))
+            .animation(.linear(duration: 0.07), value: display)
             .onAppear { display = level }
             .onChange(of: level) { _, v in display = v }
     }
@@ -324,10 +324,15 @@ private struct DotBar: View {
             DictationOverlayView()
                 .frame(width: 180)
                 .padding(.bottom, 40)
-                .onAppear {
-                    AppState.shared.dictationState = .listening
-                    Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { _ in
-                        AppState.shared.audioLevels = (0..<28).map { _ in .random(in: 0.1...1.0) }
+                .task {
+                    await MainActor.run {
+                        AppState.shared.dictationState = .listening
+                    }
+                    while !Task.isCancelled {
+                        await MainActor.run {
+                            AppState.shared.audioLevels = (0..<28).map { _ in .random(in: 0.1...1.0) }
+                        }
+                        try? await Task.sleep(for: .milliseconds(80))
                     }
                 }
         }

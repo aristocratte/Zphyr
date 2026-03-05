@@ -70,7 +70,7 @@ struct OnboardingAdvancedModeView: View {
                 AdvFeatureRow(icon: "arrow.down.circle",
                               color: Color(hex: "#34C759"),
                               title: "Téléchargement unique",
-                              subtitle: "Qwen3.5-0.8B-4bit · ~625 Mo · stocké en cache local")
+                              subtitle: "Qwen3-1.7B-4bit · ~1,1 Go · stocké en cache local")
             }
             .padding(20)
             .background(zSurface)
@@ -88,7 +88,7 @@ struct OnboardingAdvancedModeView: View {
                     HStack(spacing: 10) {
                         Image(systemName: "arrow.down.circle.fill")
                             .font(.system(size: 16, weight: .semibold))
-                        Text("Installer maintenant (~625 Mo)")
+                        Text("Installer maintenant (~1,1 Go)")
                             .font(.system(size: 15, weight: .semibold))
                     }
                     .foregroundColor(.white)
