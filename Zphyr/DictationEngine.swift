@@ -69,6 +69,29 @@ private final class AudioSampleBuffer: @unchecked Sendable {
     }
 }
 
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Bool
+
+    init(_ initialValue: Bool = false) {
+        value = initialValue
+    }
+
+    func reset(to newValue: Bool = false) {
+        lock.lock()
+        value = newValue
+        lock.unlock()
+    }
+
+    func setIfNeeded() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !value else { return false }
+        value = true
+        return true
+    }
+}
+
 // MARK: - Supported Languages
 struct WhisperLanguage: Identifiable, Hashable {
     // Kept as `WhisperLanguage` for API compatibility across the app.
@@ -124,6 +147,14 @@ final class DictationEngine {
     private nonisolated static let learningLogger = Logger(subsystem: "com.zphyr.app", category: "DictionaryLearning")
     private nonisolated static let modelLogger = Logger(subsystem: "com.zphyr.app", category: "ModelLoad")
     private nonisolated static let pipelineLogger = Logger(subsystem: "com.zphyr.app", category: "DictationPipeline")
+    private nonisolated static func debugPreview(_ text: String, limit: Int = 320) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        guard normalized.count > limit else { return normalized }
+        let remaining = normalized.count - limit
+        return "\(normalized.prefix(limit))…(+\(remaining) chars)"
+    }
 
     private enum AudioFileLoadError: Error {
         case invalidBuffer
@@ -149,7 +180,7 @@ final class DictationEngine {
     private var targetApp: NSRunningApplication?
     private var correctionMonitorTask: Task<Void, Never>?
     private var modelLoadTask: Task<Void, Never>?
-    private var didHitAudioCaptureLimit = false
+    private let audioCaptureLimitFlag = LockedFlag()
     private var lastTranscriptionBackendName: String = "unknown"
     private var asrBackend: any ASRService
     private let ecoTextFormatter = EcoTextFormatter()
@@ -515,7 +546,7 @@ final class DictationEngine {
         // Pre-allocate enough for long dictations to avoid repeated reallocations on the realtime audio thread.
         let preallocatedSamples = min(maxDictationSamples, Int(whisperSampleRate * 120))
         audioSampleBuffer.reserveCapacity(preallocatedSamples)
-        didHitAudioCaptureLimit = false
+        audioCaptureLimitFlag.reset()
         state.dictationState = .listening
         overlayController.show()
         guard startAudioCapture() else {
@@ -544,11 +575,17 @@ final class DictationEngine {
 
         let asrStartedAt = CFAbsoluteTimeGetCurrent()
         let rawText = await runASRTranscription()
+        Self.pipelineLogger.notice(
+            "[Dictation] ASR raw preview=\"\(Self.debugPreview(rawText), privacy: .public)\""
+        )
         let asrDurationMs = Int((CFAbsoluteTimeGetCurrent() - asrStartedAt) * 1_000)
 
         let postProcessStartedAt = CFAbsoluteTimeGetCurrent()
         let postProcessResult = postProcess(rawText)
         let normalizedText = postProcessResult.text
+        Self.pipelineLogger.notice(
+            "[Dictation] post-process preview=\"\(Self.debugPreview(normalizedText), privacy: .public)\""
+        )
         let postProcessDurationMs = Int((CFAbsoluteTimeGetCurrent() - postProcessStartedAt) * 1_000)
 
         let formatterStartedAt = CFAbsoluteTimeGetCurrent()
@@ -559,6 +596,9 @@ final class DictationEngine {
         )
         let formatterDurationMs = Int((CFAbsoluteTimeGetCurrent() - formatterStartedAt) * 1_000)
         finalText = capitalizeProperNouns(in: finalText)
+        Self.pipelineLogger.notice(
+            "[Dictation] final formatted preview=\"\(Self.debugPreview(finalText), privacy: .public)\""
+        )
         Self.pipelineLogger.notice("[Dictation] transcription lengths raw=\(rawText.count) final=\(finalText.count)")
         Self.pipelineLogger.notice(
             "[Dictation] stage timings asr=\(asrDurationMs, privacy: .public)ms post=\(postProcessDurationMs, privacy: .public)ms format=\(formatterDurationMs, privacy: .public)ms"
@@ -617,13 +657,20 @@ final class DictationEngine {
         normalizedText: String,
         listBlocksCount: Int
     ) async -> String {
-        guard !normalizedText.isEmpty else { return normalizedText }
+        guard !normalizedText.isEmpty else {
+            Self.pipelineLogger.notice("[Formatting] skipped: normalized text is empty")
+            return normalizedText
+        }
 
         let state = AppState.shared
         state.refreshPerformanceProfile()
         let effectiveMode = PerformanceRouter.shared.effectiveFormattingMode(
             preferred: state.formattingMode,
             profile: state.performanceProfile
+        )
+        let llmRuntimeLoaded = AdvancedLLMFormatter.shared.isModelLoaded
+        Self.pipelineLogger.notice(
+            "[Formatting] mode selection preferred=\(state.formattingMode.rawValue, privacy: .public) effective=\(effectiveMode.rawValue, privacy: .public) proUnlocked=\(state.isProModeUnlocked, privacy: .public) advancedInstalled=\(state.advancedModeInstalled, privacy: .public) llmLoaded=\(llmRuntimeLoaded, privacy: .public) tier=\(state.performanceProfile.tier.rawValue, privacy: .public)"
         )
         let context = TextFormatterContext(
             rawASRText: rawASRText,
@@ -640,10 +687,18 @@ final class DictationEngine {
             Self.pipelineLogger.notice("[Formatting] ✅ using PRO formatter (LLM) — mode=\(effectiveMode.rawValue, privacy: .public) proUnlocked=true tier=\(state.performanceProfile.tier.rawValue, privacy: .public)")
         } else {
             formatter = ecoTextFormatter
-            Self.pipelineLogger.notice("[Formatting] ⚠️ using ECO formatter (regex only) — preferredMode=\(state.formattingMode.rawValue, privacy: .public) effectiveMode=\(effectiveMode.rawValue, privacy: .public) proUnlocked=\(state.isProModeUnlocked, privacy: .public) tier=\(state.performanceProfile.tier.rawValue, privacy: .public) advancedInstalled=\(state.advancedModeInstalled, privacy: .public)")
+            var reasons: [String] = []
+            if effectiveMode != .advanced { reasons.append("effectiveMode=\(effectiveMode.rawValue)") }
+            if !state.isProModeUnlocked { reasons.append("proUnlocked=false") }
+            if !state.advancedModeInstalled { reasons.append("advancedInstalled=false") }
+            let reasonText = reasons.isEmpty ? "none" : reasons.joined(separator: ",")
+            Self.pipelineLogger.notice("[Formatting] ⚠️ using ECO formatter (regex only) — preferredMode=\(state.formattingMode.rawValue, privacy: .public) effectiveMode=\(effectiveMode.rawValue, privacy: .public) proUnlocked=\(state.isProModeUnlocked, privacy: .public) tier=\(state.performanceProfile.tier.rawValue, privacy: .public) advancedInstalled=\(state.advancedModeInstalled, privacy: .public) reason=\(reasonText, privacy: .public)")
         }
         Self.pipelineLogger.notice(
             "[Formatting] input rawLen=\(rawASRText.count, privacy: .public) postLen=\(normalizedText.count, privacy: .public) listBlocksCount=\(listBlocksCount, privacy: .public) backend=\(self.lastTranscriptionBackendName, privacy: .public)"
+        )
+        Self.pipelineLogger.notice(
+            "[Formatting] input rawPreview=\"\(Self.debugPreview(rawASRText), privacy: .public)\" postPreview=\"\(Self.debugPreview(normalizedText), privacy: .public)\""
         )
 
         let result = await formatter.format(context)
@@ -660,6 +715,9 @@ final class DictationEngine {
                 "[Dictation] integrity fallback triggered; rejected tokens=\(result.rejectedIntroducedTokens.joined(separator: ","), privacy: .public)"
             )
         }
+        Self.pipelineLogger.notice(
+            "[Formatting] output preview=\"\(Self.debugPreview(result.text), privacy: .public)\""
+        )
         return result.text
     }
 
@@ -721,6 +779,10 @@ final class DictationEngine {
         }
 
         let resamplingRatio = whisperSampleRate / hwFormat.sampleRate
+        let maxSamples = maxDictationSamples
+        let maxDurationSeconds = maxDictationDurationSeconds
+        let sampleBuffer = audioSampleBuffer
+        let captureLimitFlag = audioCaptureLimitFlag
         let reusableCapacity = AVAudioFrameCount(Double(4096) * resamplingRatio + 8)
         guard let reusableOutBuffer = AVAudioPCMBuffer(pcmFormat: whisperFormat, frameCapacity: reusableCapacity) else {
             AppState.shared.error = L10n.ui(
@@ -738,8 +800,7 @@ final class DictationEngine {
         // Tap on the hardware format, convert each buffer to 16kHz
         var lastHUDLevelPushAt = CFAbsoluteTimeGetCurrent()
         var hudLevels = [Float](repeating: 0.1, count: 28)
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] hwBuffer, _ in
-            guard let self else { return }
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [sampleBuffer, captureLimitFlag] hwBuffer, _ in
             autoreleasepool {
                 // Compute how many output frames correspond to this input buffer
                 let inputFrames = AVAudioFrameCount(hwBuffer.frameLength)
@@ -769,13 +830,12 @@ final class DictationEngine {
                 let frameCount = Int(outBuffer.frameLength)
                 guard frameCount > 0 else { return }
                 let samplePointer = UnsafeBufferPointer(start: channelData, count: frameCount)
-                let appendStatus = self.audioSampleBuffer.append(samplePointer, maxSamples: self.maxDictationSamples)
-                if appendStatus != .appended && !self.didHitAudioCaptureLimit {
-                    self.didHitAudioCaptureLimit = true
+                let appendStatus = sampleBuffer.append(samplePointer, maxSamples: maxSamples)
+                if appendStatus != .appended && captureLimitFlag.setIfNeeded() {
                     if appendStatus == .truncated {
-                        Self.pipelineLogger.warning("[Dictation] audio capture reached max duration (\(Int(self.maxDictationDurationSeconds), privacy: .public)s); truncating additional samples")
+                        Self.pipelineLogger.warning("[Dictation] audio capture reached max duration (\(Int(maxDurationSeconds), privacy: .public)s); truncating additional samples")
                     } else {
-                        Self.pipelineLogger.warning("[Dictation] audio capture reached max duration (\(Int(self.maxDictationDurationSeconds), privacy: .public)s); dropping additional samples")
+                        Self.pipelineLogger.warning("[Dictation] audio capture reached max duration (\(Int(maxDurationSeconds), privacy: .public)s); dropping additional samples")
                     }
                 }
 
@@ -1912,22 +1972,12 @@ final class DictationEngine {
     private func applyDictionaryPronunciationMappings(to text: String) -> String {
         var result = text
 
-        let mappings = DictionaryStore.shared.entries
-            .compactMap { entry -> (spoken: String, written: String)? in
-                let spoken = entry.spokenAs.trimmingCharacters(in: .whitespacesAndNewlines)
-                let written = entry.word.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !spoken.isEmpty, !written.isEmpty else { return nil }
-                return (spoken: spoken, written: written)
-            }
-            .sorted { $0.spoken.count > $1.spoken.count }
-
-        for mapping in mappings {
-            let escaped = NSRegularExpression.escapedPattern(for: mapping.spoken)
-            let pattern = "\\b\(escaped)\\b"
-            result = result.replacingOccurrences(
-                of: pattern,
-                with: mapping.written,
-                options: [.regularExpression, .caseInsensitive]
+        for rule in DictionaryStore.shared.pronunciationReplacementRules {
+            let range = NSRange(result.startIndex..., in: result)
+            result = rule.regex.stringByReplacingMatches(
+                in: result,
+                range: range,
+                withTemplate: rule.replacementTemplate
             )
         }
 

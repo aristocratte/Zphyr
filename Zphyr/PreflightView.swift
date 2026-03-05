@@ -124,6 +124,17 @@ struct PreflightView: View {
     @State private var permissionPollTask: Task<Void, Never>? = nil
     @State private var featTask: Task<Void, Never>? = nil
     @State private var advancedModeInstallTask: Task<Void, Never>? = nil
+    @State private var welcomeRevealTask: Task<Void, Never>? = nil
+    @State private var modelAutoAdvanceTask: Task<Void, Never>? = nil
+    @State private var advancedModeAutoAdvanceTask: Task<Void, Never>? = nil
+    @State private var modelRevealTask: Task<Void, Never>? = nil
+    @State private var demoRevealTask: Task<Void, Never>? = nil
+    @State private var languageRevealTask: Task<Void, Never>? = nil
+    @State private var shortcutRevealTask: Task<Void, Never>? = nil
+    @State private var speedRevealTask: Task<Void, Never>? = nil
+    @State private var speedCursorTask: Task<Void, Never>? = nil
+    @State private var speedTypingTask: Task<Void, Never>? = nil
+    @State private var speedVoiceTask: Task<Void, Never>? = nil
     @State private var showModelTest = false
 
     private var modelStatus: ModelStatus    { AppState.shared.modelStatus }
@@ -187,17 +198,23 @@ struct PreflightView: View {
             startWelcomeReveal()
         }
         .onChange(of: modelStatus) { _, newStatus in
+            modelAutoAdvanceTask?.cancel()
+            modelAutoAdvanceTask = nil
             if newStatus.isReady && currentSlide == .model {
-                Task {
+                modelAutoAdvanceTask = Task {
                     try? await Task.sleep(for: .milliseconds(1100))
+                    guard !Task.isCancelled, currentSlide == .model else { return }
                     advance()
                 }
             }
         }
         .onChange(of: AppState.shared.advancedModeInstalled) { _, installed in
+            advancedModeAutoAdvanceTask?.cancel()
+            advancedModeAutoAdvanceTask = nil
             if installed && currentSlide == .advancedMode {
-                Task {
+                advancedModeAutoAdvanceTask = Task {
                     try? await Task.sleep(for: .milliseconds(1200))
+                    guard !Task.isCancelled, currentSlide == .advancedMode else { return }
                     advance()
                 }
             }
@@ -206,6 +223,9 @@ struct PreflightView: View {
         .onChange(of: currentSlide) { _, newSlide in
             permissionPollTask?.cancel()
             featTask?.cancel()
+            cancelWelcomeRevealTask()
+            cancelSpeedTasks()
+            cancelSlideRevealTasks()
 
             if newSlide == .permissions {
                 permissionPollTask = Task {
@@ -218,12 +238,15 @@ struct PreflightView: View {
             }
             if newSlide == .model && !modelStatus.isReady {
                 modelReveal = 0
-                Task {
+                modelRevealTask = Task {
                     try? await Task.sleep(for: .milliseconds(100))
+                    guard !Task.isCancelled, currentSlide == .model else { return }
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { modelReveal = 1 }
                     try? await Task.sleep(for: .milliseconds(200))
+                    guard !Task.isCancelled, currentSlide == .model else { return }
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { modelReveal = 2 }
                     try? await Task.sleep(for: .milliseconds(180))
+                    guard !Task.isCancelled, currentSlide == .model else { return }
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { modelReveal = 3 }
                 }
                 Task { await startLoadModelIfNeeded() }
@@ -257,37 +280,47 @@ struct PreflightView: View {
             if newSlide == .demos {
                 profileReveal = 0
                 profileConfigReveal = false
-                Task {
+                demoRevealTask = Task {
                     try? await Task.sleep(for: .milliseconds(120))
+                    guard !Task.isCancelled, currentSlide == .demos else { return }
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { profileReveal = 1 }
                     try? await Task.sleep(for: .milliseconds(200))
+                    guard !Task.isCancelled, currentSlide == .demos else { return }
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { profileReveal = 2 }
                 }
             }
             if newSlide == .language {
                 langReveal = 0
-                Task {
+                languageRevealTask = Task {
                     try? await Task.sleep(for: .milliseconds(100))
+                    guard !Task.isCancelled, currentSlide == .language else { return }
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { langReveal = 1 }
                     try? await Task.sleep(for: .milliseconds(180))
+                    guard !Task.isCancelled, currentSlide == .language else { return }
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { langReveal = 2 }
                     try? await Task.sleep(for: .milliseconds(180))
+                    guard !Task.isCancelled, currentSlide == .language else { return }
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { langReveal = 3 }
                 }
             }
             if newSlide == .shortcut {
                 shortcutReveal = 0
-                Task {
+                shortcutRevealTask = Task {
                     try? await Task.sleep(for: .milliseconds(100))
+                    guard !Task.isCancelled, currentSlide == .shortcut else { return }
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { shortcutReveal = 1 }
                     try? await Task.sleep(for: .milliseconds(160))
+                    guard !Task.isCancelled, currentSlide == .shortcut else { return }
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { shortcutReveal = 2 }
                     try? await Task.sleep(for: .milliseconds(160))
+                    guard !Task.isCancelled, currentSlide == .shortcut else { return }
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { shortcutReveal = 3 }
                     // Key press demo animation
                     try? await Task.sleep(for: .milliseconds(300))
+                    guard !Task.isCancelled, currentSlide == .shortcut else { return }
                     withAnimation(.spring(response: 0.18, dampingFraction: 0.7)) { shortcutKeyPressed = true }
                     try? await Task.sleep(for: .milliseconds(260))
+                    guard !Task.isCancelled, currentSlide == .shortcut else { return }
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { shortcutKeyPressed = false }
                 }
             }
@@ -295,6 +328,13 @@ struct PreflightView: View {
         .onDisappear {
             permissionPollTask?.cancel()
             featTask?.cancel()
+            cancelWelcomeRevealTask()
+            cancelSpeedTasks()
+            cancelSlideRevealTasks()
+            modelAutoAdvanceTask?.cancel()
+            modelAutoAdvanceTask = nil
+            advancedModeAutoAdvanceTask?.cancel()
+            advancedModeAutoAdvanceTask = nil
             advancedModeInstallTask?.cancel()
             advancedModeInstallTask = nil
         }
@@ -762,6 +802,33 @@ struct PreflightView: View {
         await DictationEngine.shared.loadModel()
     }
 
+    private func cancelWelcomeRevealTask() {
+        welcomeRevealTask?.cancel()
+        welcomeRevealTask = nil
+    }
+
+    private func cancelSlideRevealTasks() {
+        modelRevealTask?.cancel()
+        modelRevealTask = nil
+        demoRevealTask?.cancel()
+        demoRevealTask = nil
+        languageRevealTask?.cancel()
+        languageRevealTask = nil
+        shortcutRevealTask?.cancel()
+        shortcutRevealTask = nil
+    }
+
+    private func cancelSpeedTasks() {
+        speedRevealTask?.cancel()
+        speedRevealTask = nil
+        speedCursorTask?.cancel()
+        speedCursorTask = nil
+        speedTypingTask?.cancel()
+        speedTypingTask = nil
+        speedVoiceTask?.cancel()
+        speedVoiceTask = nil
+    }
+
     // MARK: - Animations
 
     private func startBackgroundAnimations() {
@@ -797,33 +864,39 @@ struct PreflightView: View {
     }
 
     private func startWelcomeReveal() {
-        Task {
+        cancelWelcomeRevealTask()
+        welcomeRevealTask = Task {
             try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled, currentSlide == .welcome else { return }
             withAnimation(.spring(response: 0.55, dampingFraction: 0.78)) { welcomeReveal = 1 }
             try? await Task.sleep(for: .milliseconds(130))
+            guard !Task.isCancelled, currentSlide == .welcome else { return }
             withAnimation(.spring(response: 0.55, dampingFraction: 0.78)) { welcomeReveal = 2 }
             try? await Task.sleep(for: .milliseconds(110))
+            guard !Task.isCancelled, currentSlide == .welcome else { return }
             withAnimation(.spring(response: 0.55, dampingFraction: 0.78)) { welcomeReveal = 3 }
             try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled, currentSlide == .welcome else { return }
             withAnimation(.spring(response: 0.55, dampingFraction: 0.78)) { welcomeReveal = 4 }
             try? await Task.sleep(for: .milliseconds(110))
+            guard !Task.isCancelled, currentSlide == .welcome else { return }
             withAnimation(.spring(response: 0.55, dampingFraction: 0.78)) { welcomeReveal = 5 }
 
             // App compatibility rotator appears after ~1s
             try? await Task.sleep(for: .milliseconds(1000))
-            guard currentSlide == .welcome else { return }
+            guard !Task.isCancelled, currentSlide == .welcome else { return }
             withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) { welcomeReveal = 6 }
 
             // Cycling loop — true two-face 3D flip every 2s
-            while currentSlide == .welcome {
+            while !Task.isCancelled, currentSlide == .welcome {
                 try? await Task.sleep(for: .milliseconds(2000))
-                guard currentSlide == .welcome else { return }
+                guard !Task.isCancelled, currentSlide == .welcome else { return }
                 let nextIdx = (appRotatorIndex + 1) % pfCompatApps.count
                 appRotatorPrevIndex = appRotatorIndex
                 appRotatorIndex = nextIdx
                 withAnimation(.easeInOut(duration: 0.38)) { appRotatorFlip = 88 }
                 try? await Task.sleep(for: .milliseconds(420))
-                guard currentSlide == .welcome else { return }
+                guard !Task.isCancelled, currentSlide == .welcome else { return }
                 // Snap back: both faces hidden at 88° so no flash
                 appRotatorFlip = 0
                 appRotatorPrevIndex = appRotatorIndex
@@ -841,6 +914,7 @@ struct PreflightView: View {
     }
 
     private func startSpeedAnimations() {
+        cancelSpeedTasks()
         keyboardText = ""
         keyboardDone = false
         keyboardErrorStart = nil
@@ -850,28 +924,31 @@ struct PreflightView: View {
         speedReveal = 0
 
         // Staggered slide-in reveal
-        Task { @MainActor in
+        speedRevealTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled, currentSlide == .speed else { return }
             withAnimation(.spring(response: 0.52, dampingFraction: 0.82)) { speedReveal = 1 }
             try? await Task.sleep(for: .milliseconds(140))
+            guard !Task.isCancelled, currentSlide == .speed else { return }
             withAnimation(.spring(response: 0.52, dampingFraction: 0.82)) { speedReveal = 2 }
             try? await Task.sleep(for: .milliseconds(130))
+            guard !Task.isCancelled, currentSlide == .speed else { return }
             withAnimation(.spring(response: 0.52, dampingFraction: 0.82)) { speedReveal = 3 }
         }
 
         // Cursor blink loop
-        Task { @MainActor in
-            while currentSlide == .speed {
+        speedCursorTask = Task { @MainActor in
+            while !Task.isCancelled, currentSlide == .speed {
                 try? await Task.sleep(for: .milliseconds(520))
-                guard currentSlide == .speed else { return }
+                guard !Task.isCancelled, currentSlide == .speed else { return }
                 speedCursorBlink.toggle()
             }
         }
 
         // Keyboard typing — starts after 1s, finishes ~12s later
-        Task { @MainActor in
+        speedTypingTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(1000))
-            guard currentSlide == .speed else { return }
+            guard !Task.isCancelled, currentSlide == .speed else { return }
 
             let script: [SpeedTypeOp] = {
                 var ops: [SpeedTypeOp] = []
@@ -921,7 +998,7 @@ struct PreflightView: View {
             }()
 
             for op in script {
-                guard currentSlide == .speed else { return }
+                guard !Task.isCancelled, currentSlide == .speed else { return }
                 switch op {
                 case .char(let ch):
                     keyboardText.append(ch)
@@ -938,14 +1015,14 @@ struct PreflightView: View {
                     keyboardErrorStart = nil
                 }
             }
-            guard currentSlide == .speed else { return }
+            guard !Task.isCancelled, currentSlide == .speed else { return }
             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { keyboardDone = true }
         }
 
         // Voice dictation — starts after 1s, finishes ~3.5s later
-        Task { @MainActor in
+        speedVoiceTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(1000))
-            guard currentSlide == .speed else { return }
+            guard !Task.isCancelled, currentSlide == .speed else { return }
 
             let voiceSequence: [(String, Int)] = [
                 (t("Vous voyez que",
@@ -988,11 +1065,11 @@ struct PreflightView: View {
 
             for (text, waitMs) in voiceSequence {
                 if waitMs > 0 { try? await Task.sleep(for: .milliseconds(waitMs)) }
-                guard currentSlide == .speed else { return }
+                guard !Task.isCancelled, currentSlide == .speed else { return }
                 withAnimation { voiceChunks.append(VoiceChunk(words: text)) }
             }
             try? await Task.sleep(for: .milliseconds(420))
-            guard currentSlide == .speed else { return }
+            guard !Task.isCancelled, currentSlide == .speed else { return }
             withAnimation(.spring(response: 0.4, dampingFraction: 0.75)) { voiceDone = true }
         }
     }

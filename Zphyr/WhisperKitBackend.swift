@@ -43,7 +43,7 @@ final class WhisperKitBackend: ASRService {
     // MARK: - Install path resolution
 
     /// Discovers the local model cache directory on disk.
-    static func resolveInstallURL() -> URL? {
+    nonisolated static func resolveInstallURL() -> URL? {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
         // WhisperKit uses HuggingFace Hub cache via swift-transformers

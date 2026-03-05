@@ -30,11 +30,17 @@ struct DictionaryEntry: Identifiable, Codable, Equatable {
 @Observable
 @MainActor
 final class DictionaryStore {
+    struct PronunciationReplacementRule {
+        let regex: NSRegularExpression
+        let replacementTemplate: String
+    }
+
     static let shared = DictionaryStore()
     private nonisolated static let logger = Logger(subsystem: "com.zphyr.app", category: "DictionaryStore")
 
     static let storageKey = "zphyr.dictionary.entries"
     var entries: [DictionaryEntry] = []
+    private var cachedPronunciationRules: [PronunciationReplacementRule]?
 
     private init() {
         load()
@@ -42,6 +48,7 @@ final class DictionaryStore {
 
     func add(_ entry: DictionaryEntry) {
         entries.append(entry)
+        invalidateCaches()
         save()
     }
 
@@ -55,6 +62,7 @@ final class DictionaryStore {
             if existing.spokenAs.isEmpty && !cleanedSpoken.isEmpty {
                 existing.spokenAs = cleanedSpoken
                 entries[idx] = existing
+                invalidateCaches()
                 save()
                 Self.logger.notice("[DictionaryStore] merged spokenAs for word=\(cleanedWord, privacy: .private(mask: .hash)), spokenAs=\(cleanedSpoken, privacy: .private(mask: .hash))")
             }
@@ -63,24 +71,28 @@ final class DictionaryStore {
 
         let entry = DictionaryEntry(word: cleanedWord, spokenAs: cleanedSpoken)
         entries.append(entry)
+        invalidateCaches()
         save()
         Self.logger.notice("[DictionaryStore] added word=\(cleanedWord, privacy: .private(mask: .hash)), spokenAs=\(cleanedSpoken, privacy: .private(mask: .hash))")
     }
 
     func remove(at offsets: IndexSet) {
         entries.remove(atOffsets: offsets)
+        invalidateCaches()
         save()
     }
 
     func update(_ entry: DictionaryEntry) {
         if let idx = entries.firstIndex(where: { $0.id == entry.id }) {
             entries[idx] = entry
+            invalidateCaches()
             save()
         }
     }
 
     func clearAll() {
         entries = []
+        invalidateCaches()
         SecureLocalDataStore.removeValue(forKey: Self.storageKey)
     }
 
@@ -110,6 +122,34 @@ final class DictionaryStore {
         }
     }
 
+    var pronunciationReplacementRules: [PronunciationReplacementRule] {
+        if let cachedPronunciationRules {
+            return cachedPronunciationRules
+        }
+
+        let compiled = entries
+            .compactMap { entry -> PronunciationReplacementRule? in
+                let spoken = entry.spokenAs.trimmingCharacters(in: .whitespacesAndNewlines)
+                let written = entry.word.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !spoken.isEmpty, !written.isEmpty else { return nil }
+                let escaped = NSRegularExpression.escapedPattern(for: spoken)
+                let pattern = "\\b\(escaped)\\b"
+                guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                    return nil
+                }
+                return PronunciationReplacementRule(
+                    regex: regex,
+                    replacementTemplate: Self.escapedReplacementTemplate(written)
+                )
+            }
+            .sorted { lhs, rhs in
+                lhs.regex.pattern.count > rhs.regex.pattern.count
+            }
+
+        cachedPronunciationRules = compiled
+        return compiled
+    }
+
     /// Returns true when the dictionary already knows this spoken -> written mapping.
     func containsMapping(mistakenWord: String, correctedWord: String) -> Bool {
         let mistaken = mistakenWord.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -136,9 +176,21 @@ final class DictionaryStore {
         guard let data = SecureLocalDataStore.load(forKey: Self.storageKey),
               let decoded = try? JSONDecoder().decode([DictionaryEntry].self, from: data) else {
             entries = []
+            invalidateCaches()
             return
         }
         entries = decoded
+        invalidateCaches()
+    }
+
+    private func invalidateCaches() {
+        cachedPronunciationRules = nil
+    }
+
+    private static func escapedReplacementTemplate(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "$", with: "\\$")
     }
 }
 

@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var cachedPrimaryModelDiskBytes: Int64 = 0
     private var cachedFormatterModelDiskBytes: Int64 = 0
     private var lastProcessCPUSample: ProcessCPUSample?
+    private var popoverRefreshTask: Task<Void, Never>?
 
     private struct ProcessCPUSample {
         let timestamp: TimeInterval
@@ -247,11 +248,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func refreshStatusPopover(recomputeDiskUsage: Bool) {
         if recomputeDiskUsage {
-            cachedPrimaryModelInstallURL = resolveWhisperInstallURL()
-            cachedPrimaryModelDiskBytes = resolveWhisperDiskUsageBytes()
-            cachedFormatterModelDiskBytes = resolveQwenDiskUsageBytes()
+            let explicitModelPath = AppState.shared.modelInstallPath
+            popoverRefreshTask?.cancel()
+            applyStatusPopoverSnapshot()
+            popoverRefreshTask = Task { [weak self] in
+                guard let self else { return }
+                defer { self.popoverRefreshTask = nil }
+                let diskUsage = await Task.detached(priority: .utility) {
+                    let installURL = Self.resolveWhisperInstallURL(explicitPath: explicitModelPath)
+                    let primaryDiskBytes = installURL.map { Self.directoryAllocatedSize(at: $0) } ?? 0
+                    let formatterDiskBytes = Self.resolveQwenDiskUsageBytes()
+                    return (installURL, primaryDiskBytes, formatterDiskBytes)
+                }.value
+                guard !Task.isCancelled else { return }
+                self.cachedPrimaryModelInstallURL = diskUsage.0
+                self.cachedPrimaryModelDiskBytes = diskUsage.1
+                self.cachedFormatterModelDiskBytes = diskUsage.2
+                self.applyStatusPopoverSnapshot()
+            }
+            return
         }
 
+        applyStatusPopoverSnapshot()
+    }
+
+    private func applyStatusPopoverSnapshot() {
         let appHasVisibleWindow = NSApp.windows.contains(where: \.isVisible)
         let state = AppState.shared
         let primaryInstalled = cachedPrimaryModelInstallURL != nil || state.modelStatus.isReady
@@ -291,7 +312,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func openPrimaryModelFolderFromPopover() {
-        guard let modelURL = cachedPrimaryModelInstallURL ?? resolveWhisperInstallURL() else { return }
+        let explicitModelPath = AppState.shared.modelInstallPath
+        guard let modelURL = cachedPrimaryModelInstallURL ?? Self.resolveWhisperInstallURL(explicitPath: explicitModelPath) else { return }
         statusPopover.performClose(nil)
         NSWorkspace.shared.activateFileViewerSelecting([modelURL])
     }
@@ -328,26 +350,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         return max(0, (cpuDelta / elapsed) * 100.0)
     }
 
-    private func resolveWhisperInstallURL() -> URL? {
+    nonisolated private static func resolveWhisperInstallURL(explicitPath: String?) -> URL? {
         let fileManager = FileManager.default
 
-        if let explicitPath = AppState.shared.modelInstallPath, fileManager.fileExists(atPath: explicitPath) {
+        if let explicitPath, fileManager.fileExists(atPath: explicitPath) {
             return URL(fileURLWithPath: explicitPath)
         }
 
         return WhisperKitBackend.resolveInstallURL()
     }
 
-    private func resolveWhisperDiskUsageBytes() -> Int64 {
-        guard let whisperURL = resolveWhisperInstallURL() else { return 0 }
-        return directoryAllocatedSize(at: whisperURL)
-    }
-
-    private func resolveQwenDiskUsageBytes() -> Int64 {
+    nonisolated private static func resolveQwenDiskUsageBytes() -> Int64 {
         qwenInstallDirectories().reduce(0) { $0 + directoryAllocatedSize(at: $1) }
     }
 
-    private func qwenInstallDirectories() -> [URL] {
+    nonisolated private static func qwenInstallDirectories() -> [URL] {
         let fileManager = FileManager.default
         let home = fileManager.homeDirectoryForCurrentUser
 
@@ -390,7 +407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         return results
     }
 
-    private func directoryAllocatedSize(at url: URL) -> Int64 {
+    nonisolated private static func directoryAllocatedSize(at url: URL) -> Int64 {
         let fileManager = FileManager.default
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileAllocatedSizeKey, .totalFileAllocatedSizeKey, .fileSizeKey]
 

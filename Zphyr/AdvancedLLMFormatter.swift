@@ -130,6 +130,7 @@ final class AdvancedLLMFormatter {
     private var container: ModelContainer?
     private var installTask: Task<Void, Never>?
     private let log = Logger(subsystem: "com.zphyr.app", category: "AdvancedLLM")
+    var isModelLoaded: Bool { container != nil }
 
     // Speed tracking
     private var lastFraction: Double = 0
@@ -266,13 +267,22 @@ final class AdvancedLLMFormatter {
     /// Formats code identifiers in `text` using the local LLM.
     /// Returns `nil` on any failure — callers must fall back to `CodeFormatter`.
     func format(_ text: String, style: CodeStyle, constraints: LLMFormattingConstraints) async -> String? {
+        if container == nil, AppState.shared.advancedModeInstalled {
+            log.notice("[AdvancedLLM] container missing while advancedModeInstalled=true; trying lazy load from disk cache")
+            await loadIfInstalled()
+        }
+
         guard let container else {
-            log.notice("[AdvancedLLM] skipped: model not loaded (container is nil)")
+            log.notice(
+                "[AdvancedLLM] skipped: model not loaded (container=nil advancedModeInstalled=\(AppState.shared.advancedModeInstalled, privacy: .public))"
+            )
             return nil
         }
 
         let inputWords = text.split(whereSeparator: \.isWhitespace).count
-        log.notice("[AdvancedLLM] generating… input=\(inputWords, privacy: .public) words style=\(String(describing: style), privacy: .public)")
+        log.notice(
+            "[AdvancedLLM] generating… input=\(inputWords, privacy: .public) words style=\(String(describing: style), privacy: .public) preview=\"\(Self.debugPreview(text), privacy: .public)\""
+        )
         let startTime = CFAbsoluteTimeGetCurrent()
 
         // Default style hint appended at end so the LLM has a fallback when
@@ -332,7 +342,9 @@ final class AdvancedLLMFormatter {
             let result = output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
             let outputWords = result.split(whereSeparator: \.isWhitespace).count
-            log.notice("[AdvancedLLM] generated in \(String(format: "%.2f", elapsed), privacy: .public)s output=\(outputWords, privacy: .public) words")
+            log.notice(
+                "[AdvancedLLM] generated in \(String(format: "%.2f", elapsed), privacy: .public)s output=\(outputWords, privacy: .public) words preview=\"\(Self.debugPreview(result), privacy: .public)\""
+            )
             guard !result.isEmpty else {
                 log.notice("[AdvancedLLM] empty result after trimming")
                 return nil
@@ -439,6 +451,15 @@ final class AdvancedLLMFormatter {
         let pattern = #"(.{2,6})\1{3,}"#
         return text.range(of: pattern, options: .regularExpression) != nil
     }
+
+    private static func debugPreview(_ text: String, limit: Int = 320) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        guard normalized.count > limit else { return normalized }
+        let remaining = normalized.count - limit
+        return "\(normalized.prefix(limit))…(+\(remaining) chars)"
+    }
 }
 
 #else
@@ -458,13 +479,18 @@ final class AdvancedLLMFormatter {
     var installError: String?    = "⚠️ Ajoutez mlx-swift-lm dans Xcode (Branch: main, produits: MLXLLM + MLXLMCommon)."
     var downloadSpeed: String    = ""
     var downloadedMB: String     = ""
+    var isModelLoaded: Bool      = false
+    private let log = Logger(subsystem: "com.zphyr.app", category: "AdvancedLLMStub")
     private init() {}
     func installModel()    async {}
     func cancelInstall()         {}
     func loadIfInstalled() async {}
     func unload()                {}
     static func removeModelFromDisk() {}
-    func format(_ text: String, style: CodeStyle, constraints: LLMFormattingConstraints) async -> String? { nil }
+    func format(_ text: String, style: CodeStyle, constraints: LLMFormattingConstraints) async -> String? {
+        log.error("[AdvancedLLMStub] format called but MLXLLM is unavailable; returning nil")
+        return nil
+    }
 }
 
 #endif
