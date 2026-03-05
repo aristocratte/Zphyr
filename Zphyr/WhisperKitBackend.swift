@@ -10,7 +10,7 @@ final class WhisperKitBackend: ASRService {
 
     static let shared = WhisperKitBackend()
 
-    static let modelVariant   = "openai_whisper-large-v3-turbo"
+    static let modelVariant   = "openai_whisper-large-v3-v20240930_turbo_632MB"
     static let modelSizeBytes: Double = 600 * 1_024 * 1_024  // ~600 MB
 
     let descriptor = ASRBackendDescriptor(
