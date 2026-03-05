@@ -309,7 +309,7 @@ struct SystemSettingsContent: View {
         if let explicitPath = state.modelInstallPath, fm.fileExists(atPath: explicitPath) {
             return URL(fileURLWithPath: explicitPath)
         }
-        return Qwen3ASREngine.resolveInstallURL()
+        return WhisperKitBackend.resolveInstallURL()
     }
 
     private var formatterInstallURL: URL? {
@@ -402,9 +402,9 @@ struct SystemSettingsContent: View {
                     Picker("", selection: asrBackendBinding) {
                         Text("Apple Speech Analyzer")
                             .tag(ASRBackendKind.appleSpeechAnalyzer)
-                        Text("Qwen3-ASR (MLX)")
-                            .tag(ASRBackendKind.qwenMLX)
-                            .disabled(!state.isQwenASRUnlocked)
+                        Text("Whisper Large v3 Turbo")
+                            .tag(ASRBackendKind.whisperKit)
+                            .disabled(!state.isWhisperASRUnlocked)
                     }
                     .pickerStyle(.menu)
                     .frame(width: 190)
@@ -814,12 +814,12 @@ struct PrivacySettingsContent: View {
                     Text(t("100% Local & Privé", "100% local & private", "100% local y privado", "100% 本地与私密", "100% ローカル & プライベート", "100% локально и приватно"))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(Color(hex: "#1A1A1A"))
-                    Text(t("Toute la transcription (Qwen3-ASR) s'exécute sur votre Mac. Aucune donnée audio ne quitte votre appareil.",
-                           "All transcription (Qwen3-ASR) runs on your Mac. No audio data leaves your device.",
-                           "Toda la transcripción (Qwen3-ASR) se ejecuta en tu Mac. Ningún audio sale de tu dispositivo.",
-                           "所有转写（Qwen3-ASR）都在你的 Mac 上运行，音频不会离开设备。",
-                           "すべての文字起こし（Qwen3-ASR）は Mac 上で実行され、音声データは外部に送信されません。",
-                           "Вся транскрибация (Qwen3-ASR) выполняется на вашем Mac. Аудиоданные не покидают устройство."))
+                    Text(t("Toute la transcription (Whisper) s'exécute sur votre Mac. Aucune donnée audio ne quitte votre appareil.",
+                           "All transcription (Whisper) runs on your Mac. No audio data leaves your device.",
+                           "Toda la transcripción (Whisper) se ejecuta en tu Mac. Ningún audio sale de tu dispositivo.",
+                           "所有转写（Whisper）都在你的 Mac 上运行，音频不会离开设备。",
+                           "すべての文字起こし（Whisper）は Mac 上で実行され、音声データは外部に送信されません。",
+                           "Вся транскрибация (Whisper) выполняется на вашем Mac. Аудиоданные не покидают устройство."))
                         .font(.system(size: 12))
                         .foregroundColor(Color(hex: "#666660"))
                         .lineSpacing(2)

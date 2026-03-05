@@ -284,7 +284,7 @@ struct OnboardingView: View {
                         Text(t("Langue", "Language", "Idioma", "语言", "言語", "Язык"))
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(Color(hex: "#1A1A1A"))
-                        Text(t("Qwen3-ASR-1.7B · 30 langues",
+                        Text(t("Whisper v3 Turbo · 30+ langues",
                                "Local ASR · multilingual",
                                "ASR local · multilingüe",
                                "本地 ASR · 多语言",

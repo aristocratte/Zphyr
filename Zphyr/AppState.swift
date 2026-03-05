@@ -221,8 +221,9 @@ final class AppState {
         }
     }
     var activeASRBackend: ASRBackendKind = .appleSpeechAnalyzer
-    var qwen3asrInstalled: Bool = UserDefaults.standard.bool(forKey: "zphyr.qwen3asrInstalled") {
-        didSet { UserDefaults.standard.set(qwen3asrInstalled, forKey: "zphyr.qwen3asrInstalled") }
+    var qwen3asrInstalled: Bool = false  // deprecated — kept for migration
+    var whisperInstalled: Bool = UserDefaults.standard.bool(forKey: "zphyr.whisperInstalled") {
+        didSet { UserDefaults.standard.set(whisperInstalled, forKey: "zphyr.whisperInstalled") }
     }
 
     // Dictation
@@ -366,8 +367,8 @@ final class AppState {
         performanceProfile.allowsProMode
     }
 
-    var isQwenASRUnlocked: Bool {
-        performanceProfile.allowsQwenASR
+    var isWhisperASRUnlocked: Bool {
+        performanceProfile.allowsWhisperASR
     }
 
     private init() {

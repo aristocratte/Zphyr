@@ -3,7 +3,6 @@ import Foundation
 enum ASRBackendKind: String, CaseIterable, Codable, Sendable {
     case appleSpeechAnalyzer
     case whisperKit
-    case qwenMLX
 }
 
 struct ASRBackendDescriptor: Sendable, Equatable {

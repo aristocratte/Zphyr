@@ -82,7 +82,7 @@ struct WhisperLanguage: Identifiable, Hashable {
 
 extension WhisperLanguage {
     static let all: [WhisperLanguage] = [
-        // Qwen3-ASR supported languages (30)
+        // Whisper Large v3 Turbo supported languages
         WhisperLanguage(id: "zh", name: "中文（普通话）",       flag: "🇨🇳", tier: .excellent),
         WhisperLanguage(id: "en", name: "English",           flag: "🇺🇸", tier: .excellent),
         WhisperLanguage(id: "ar", name: "العربية",            flag: "🇸🇦", tier: .excellent),
@@ -150,10 +150,11 @@ final class DictationEngine {
     private var correctionMonitorTask: Task<Void, Never>?
     private var modelLoadTask: Task<Void, Never>?
     private var didHitAudioCaptureLimit = false
+    private var lastTranscriptionBackendName: String = "unknown"
     private var asrBackend: any ASRService
     private let ecoTextFormatter = EcoTextFormatter()
     private let proTextFormatter = ProTextFormatter()
-    private let qwenTranscriptionTimeoutSeconds: Double = 8.0
+    private let whisperBaseTranscriptionTimeoutSeconds: Double = 20.0
     private var fillerRegexCache: [String: [NSRegularExpression]] = [:]
     private var transitionRuleCache: [String: [TransitionBoundaryRule]] = [:]
     private var formalPunctuationRuleCache: [String: [(regex: NSRegularExpression, replacement: String)]] = [:]
@@ -185,6 +186,17 @@ final class DictationEngine {
     private struct TransitionBoundaryRule {
         let regex: NSRegularExpression
         let replacement: String
+    }
+
+    private struct PostProcessResult {
+        let text: String
+        let listBlocksCount: Int
+    }
+
+    struct TranscriptionCandidate {
+        let text: String
+        let backendDisplayName: String
+        let qualityIssue: String?
     }
 
     private init() {
@@ -535,11 +547,16 @@ final class DictationEngine {
         let asrDurationMs = Int((CFAbsoluteTimeGetCurrent() - asrStartedAt) * 1_000)
 
         let postProcessStartedAt = CFAbsoluteTimeGetCurrent()
-        let normalizedText = postProcess(rawText)
+        let postProcessResult = postProcess(rawText)
+        let normalizedText = postProcessResult.text
         let postProcessDurationMs = Int((CFAbsoluteTimeGetCurrent() - postProcessStartedAt) * 1_000)
 
         let formatterStartedAt = CFAbsoluteTimeGetCurrent()
-        var finalText = await applyFormattingPipeline(rawASRText: rawText, normalizedText: normalizedText)
+        var finalText = await applyFormattingPipeline(
+            rawASRText: rawText,
+            normalizedText: normalizedText,
+            listBlocksCount: postProcessResult.listBlocksCount
+        )
         let formatterDurationMs = Int((CFAbsoluteTimeGetCurrent() - formatterStartedAt) * 1_000)
         finalText = capitalizeProperNouns(in: finalText)
         Self.pipelineLogger.notice("[Dictation] transcription lengths raw=\(rawText.count) final=\(finalText.count)")
@@ -595,7 +612,11 @@ final class DictationEngine {
 
     // MARK: - Text Formatter Pipeline
 
-    private func applyFormattingPipeline(rawASRText: String, normalizedText: String) async -> String {
+    private func applyFormattingPipeline(
+        rawASRText: String,
+        normalizedText: String,
+        listBlocksCount: Int
+    ) async -> String {
         guard !normalizedText.isEmpty else { return normalizedText }
 
         let state = AppState.shared
@@ -621,6 +642,9 @@ final class DictationEngine {
             formatter = ecoTextFormatter
             Self.pipelineLogger.notice("[Formatting] using ECO formatter (mode=\(effectiveMode.rawValue, privacy: .public) proUnlocked=\(state.isProModeUnlocked, privacy: .public))")
         }
+        Self.pipelineLogger.notice(
+            "[Formatting] input rawLen=\(rawASRText.count, privacy: .public) postLen=\(normalizedText.count, privacy: .public) listBlocksCount=\(listBlocksCount, privacy: .public) backend=\(self.lastTranscriptionBackendName, privacy: .public)"
+        )
 
         let result = await formatter.format(context)
         if result.usedDeterministicFallback {
@@ -628,9 +652,12 @@ final class DictationEngine {
         } else {
             Self.pipelineLogger.notice("[Formatting] result: LLM text accepted")
         }
+        Self.pipelineLogger.notice(
+            "[Formatting] metrics llmInLen=\(result.llmInputLength ?? -1, privacy: .public) llmOutLen=\(result.llmOutputLength ?? -1, privacy: .public) recall=\(result.llmRecall ?? -1, privacy: .public)"
+        )
         if result.usedDeterministicFallback, !result.rejectedIntroducedTokens.isEmpty {
             Self.pipelineLogger.warning(
-                "[Dictation] integrity fallback triggered; introduced tokens=\(result.rejectedIntroducedTokens.joined(separator: ","), privacy: .public)"
+                "[Dictation] integrity fallback triggered; rejected tokens=\(result.rejectedIntroducedTokens.joined(separator: ","), privacy: .public)"
             )
         }
         return result.text
@@ -875,6 +902,7 @@ final class DictationEngine {
         let durationMs = Int(Double(processedAudio.count) / 16.0)
         let primaryBackendName = asrBackend.descriptor.displayName
         let primaryLoaded = asrBackend.isLoaded
+        lastTranscriptionBackendName = primaryBackendName
         Self.pipelineLogger.notice("[Dictation] transcribeAudioSamples: samples=\(processedAudio.count, privacy: .public) (~\(durationMs, privacy: .public)ms) lang=\(lang ?? "auto", privacy: .public) backend=\(primaryBackendName, privacy: .public) loaded=\(primaryLoaded, privacy: .public)")
 
         guard !processedAudio.isEmpty else {
@@ -887,6 +915,7 @@ final class DictationEngine {
         Self.pipelineLogger.notice("[Dictation] decoding candidates=\(orderedNames, privacy: .public)")
 
         var lastFailure: Error?
+        var successfulCandidates: [TranscriptionCandidate] = []
         for (index, backend) in candidates.enumerated() {
             let descriptor = backend.descriptor
 
@@ -895,7 +924,10 @@ final class DictationEngine {
                 continue
             }
 
-            let timeout = descriptor.kind == .qwenMLX ? qwenTranscriptionTimeoutSeconds : 15.0
+            let timeout = dynamicTranscriptionTimeout(
+                for: descriptor.kind,
+                durationMs: durationMs
+            )
             Self.pipelineLogger.notice("[Dictation] decoding attempt=\(index + 1, privacy: .public) backend=\(descriptor.displayName, privacy: .public) timeout=\(timeout, privacy: .public)s")
 
             do {
@@ -907,8 +939,12 @@ final class DictationEngine {
                 let result = raw.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !result.isEmpty else { throw ASRBackendError.emptyResult }
 
-                if let qualityIssue = Self.transcriptionQualityIssue(result, durationMs: durationMs) {
-                    throw TranscriptionAttemptError.lowQuality(qualityIssue)
+                let qualityIssue = Self.transcriptionQualityIssue(result, durationMs: durationMs)
+                if let qualityIssue {
+                    Self.pipelineLogger.warning("[Dictation] candidate quality warning backend=\(descriptor.displayName, privacy: .public) issue=\(qualityIssue, privacy: .public)")
+                }
+                if Self.isCatastrophicTranscription(result) {
+                    throw TranscriptionAttemptError.lowQuality("catastrophic_markup_corruption")
                 }
 
                 if descriptor.kind != self.asrBackend.descriptor.kind {
@@ -916,11 +952,25 @@ final class DictationEngine {
                     Self.pipelineLogger.notice("[Dictation] fallback backend succeeded primary=\(primaryName, privacy: .public) used=\(descriptor.displayName, privacy: .public)")
                 }
                 Self.pipelineLogger.notice("[Dictation] backend result chars=\(result.count, privacy: .public)")
-                return result
+                successfulCandidates.append(
+                    TranscriptionCandidate(
+                        text: result,
+                        backendDisplayName: descriptor.displayName,
+                        qualityIssue: qualityIssue
+                    )
+                )
             } catch {
                 lastFailure = error
                 Self.pipelineLogger.error("[Dictation] decoding failed attempt=\(index + 1, privacy: .public) backend=\(descriptor.displayName, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             }
+        }
+
+        if let selected = Self.rankTranscriptionCandidates(successfulCandidates) {
+            lastTranscriptionBackendName = selected.backendDisplayName
+            Self.pipelineLogger.notice(
+                "[Dictation] selected candidate backend=\(selected.backendDisplayName, privacy: .public) score=\(Self.completenessScore(for: selected.text), privacy: .public) issue=\(selected.qualityIssue ?? "none", privacy: .public)"
+            )
+            return selected.text
         }
 
         await MainActor.run {
@@ -957,12 +1007,12 @@ final class DictationEngine {
     }
 
     private func transcriptionCandidatesForCurrentRequest() -> [any ASRService] {
-        guard asrBackend.descriptor.kind == .qwenMLX, AppleSpeechAnalyzerBackend.isRuntimeSupported else {
+        guard asrBackend.descriptor.kind == .whisperKit, AppleSpeechAnalyzerBackend.isRuntimeSupported else {
             return [asrBackend]
         }
 
-        // Qwen fallback strategy: prioritize Apple Speech when available,
-        // then keep Qwen as backup.
+        // Whisper fallback strategy: prioritize Apple Speech when available,
+        // then keep Whisper as backup.
         return [AppleSpeechAnalyzerBackend(), asrBackend]
     }
 
@@ -988,24 +1038,29 @@ final class DictationEngine {
         }
     }
 
+    private func dynamicTranscriptionTimeout(
+        for kind: ASRBackendKind,
+        durationMs: Int
+    ) -> Double {
+        let audioSeconds = max(0.5, Double(durationMs) / 1_000.0)
+        switch kind {
+        case .whisperKit:
+            // Whisper can be slower on long dictations; keep enough headroom to avoid truncation by timeout.
+            return min(120.0, max(whisperBaseTranscriptionTimeoutSeconds, audioSeconds * 2.2 + 8.0))
+        case .appleSpeechAnalyzer:
+            return min(60.0, max(15.0, audioSeconds * 1.4 + 6.0))
+        }
+    }
+
     private nonisolated static func transcriptionQualityIssue(_ text: String, durationMs: Int) -> String? {
+        _ = durationMs
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "empty_result" }
 
-        let durationSeconds = max(Double(durationMs) / 1_000.0, 0.25)
-        let charsPerSecond = Double(trimmed.count) / durationSeconds
-        if charsPerSecond > 45.0 {
-            return "chars_per_second=\(Int(charsPerSecond.rounded()))"
-        }
-
         let words = trimmed.split(whereSeparator: { $0.isWhitespace })
-        let wordsPerSecond = Double(words.count) / durationSeconds
-        if wordsPerSecond > 8.0 {
-            return "words_per_second=\(Int(wordsPerSecond.rounded()))"
-        }
 
         let longTokenCount = words.filter { $0.count >= 48 }.count
-        if longTokenCount >= 2 {
+        if longTokenCount >= 4 {
             return "too_many_long_tokens=\(longTokenCount)"
         }
 
@@ -1013,7 +1068,7 @@ final class DictationEngine {
         for token in words where token.count >= 4 {
             frequencies[token, default: 0] += 1
         }
-        if let repeated = frequencies.first(where: { $0.value >= 8 }) {
+        if let repeated = frequencies.first(where: { $0.value >= 14 }) {
             return "repeated_token=\(repeated.key)"
         }
 
@@ -1022,11 +1077,119 @@ final class DictationEngine {
         let markerHits = suspiciousMarkers.reduce(0) { partial, marker in
             partial + (lower.contains(marker) ? 1 : 0)
         }
-        if markerHits >= 2 {
+        if markerHits >= 1 {
             return "suspicious_markup_markers=\(markerHits)"
         }
 
         return nil
+    }
+
+    private nonisolated static func isCatastrophicTranscription(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        let catastrophicMarkers = ["<footer", "<header", "{%", "</", "_increment", "_magic", "extends"]
+        let markerHits = catastrophicMarkers.reduce(0) { partial, marker in
+            partial + (lowered.contains(marker) ? 1 : 0)
+        }
+        if markerHits >= 3 { return true }
+
+        let words = lowered.split(whereSeparator: { $0.isWhitespace })
+        guard !words.isEmpty else { return true }
+        let hugeTokens = words.filter { $0.count >= 72 }
+        if hugeTokens.count >= 2 { return true }
+
+        // Foreign script pollution: if >15% of characters are from scripts
+        // that don't match the user's selected languages, the ASR hallucinated.
+        let expectedScripts = Self.expectedScriptsForSelectedLanguages()
+        var foreignCount = 0
+        var totalLetters = 0
+        for scalar in text.unicodeScalars {
+            guard scalar.properties.isAlphabetic else { continue }
+            totalLetters += 1
+            if !Self.scalarBelongsToScripts(scalar, scripts: expectedScripts) {
+                foreignCount += 1
+            }
+        }
+        if totalLetters > 4, Double(foreignCount) / Double(totalLetters) > 0.15 {
+            return true
+        }
+
+        // Degenerate repetition: same 2-6 char pattern repeated 4+ times
+        if text.range(of: #"(.{2,6})\1{3,}"#, options: .regularExpression) != nil {
+            return true
+        }
+
+        return false
+    }
+
+    /// Returns the set of expected Unicode script tags for the user's selected languages.
+    private nonisolated static func expectedScriptsForSelectedLanguages() -> Set<String> {
+        let langs = MainActor.assumeIsolated { AppState.shared.selectedLanguages.map(\.id) }
+        var scripts: Set<String> = ["latin"] // Latin is always expected (URLs, tech terms)
+        for lang in langs {
+            switch lang.lowercased().prefix(2) {
+            case "fr", "en", "es", "de", "it", "pt", "nl", "ro", "sv", "da", "no", "pl", "cs", "fi":
+                scripts.insert("latin")
+            case "zh", "yue":
+                scripts.formUnion(["cjk", "latin"])
+            case "ja":
+                scripts.formUnion(["cjk", "hiragana", "katakana", "latin"])
+            case "ko":
+                scripts.formUnion(["hangul", "latin"])
+            case "ru", "uk", "bg":
+                scripts.formUnion(["cyrillic", "latin"])
+            case "ar", "he":
+                scripts.formUnion(["arabic", "hebrew", "latin"])
+            case "th":
+                scripts.formUnion(["thai", "latin"])
+            case "hi":
+                scripts.formUnion(["devanagari", "latin"])
+            default:
+                scripts.insert("latin")
+            }
+        }
+        return scripts
+    }
+
+    /// Checks whether a Unicode scalar belongs to any of the expected script categories.
+    private nonisolated static func scalarBelongsToScripts(_ scalar: Unicode.Scalar, scripts: Set<String>) -> Bool {
+        let v = scalar.value
+        if v < 0x0080 { return scripts.contains("latin") }
+        if (0x0080...0x024F).contains(v) || (0x1E00...0x1EFF).contains(v) { return scripts.contains("latin") }
+        if (0x0400...0x052F).contains(v) { return scripts.contains("cyrillic") }
+        if (0x0600...0x06FF).contains(v) || (0x0750...0x077F).contains(v) { return scripts.contains("arabic") }
+        if (0x0590...0x05FF).contains(v) { return scripts.contains("hebrew") }
+        if (0x0E00...0x0E7F).contains(v) { return scripts.contains("thai") }
+        if (0x0900...0x097F).contains(v) { return scripts.contains("devanagari") }
+        if (0x3040...0x309F).contains(v) { return scripts.contains("hiragana") }
+        if (0x30A0...0x30FF).contains(v) { return scripts.contains("katakana") }
+        if (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v)
+            || (0x3000...0x303F).contains(v) || (0xFF00...0xFFEF).contains(v) { return scripts.contains("cjk") }
+        if (0xAC00...0xD7AF).contains(v) || (0x1100...0x11FF).contains(v) { return scripts.contains("hangul") }
+        // Unknown script: allow (conservative)
+        return true
+    }
+
+    nonisolated static func completenessScore(for text: String) -> Int {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return Int.min }
+
+        let words = trimmed.split(whereSeparator: { $0.isWhitespace }).count
+        let sentenceDelimiters = trimmed.filter { ".!?".contains($0) }.count
+        let punctuationBonus = min(20, sentenceDelimiters * 2)
+        return trimmed.count * 2 + words * 5 + punctuationBonus
+    }
+
+    nonisolated static func rankTranscriptionCandidates(
+        _ candidates: [TranscriptionCandidate]
+    ) -> TranscriptionCandidate? {
+        candidates.max { lhs, rhs in
+            let leftScore = completenessScore(for: lhs.text) - (lhs.qualityIssue == nil ? 0 : 120)
+            let rightScore = completenessScore(for: rhs.text) - (rhs.qualityIssue == nil ? 0 : 120)
+            if leftScore == rightScore {
+                return lhs.text.count < rhs.text.count
+            }
+            return leftScore < rightScore
+        }
     }
 
     private nonisolated static func loadAudioSamples(from url: URL, targetSampleRate: Double) throws -> [Float] {
@@ -1134,45 +1297,133 @@ final class DictationEngine {
 
     private let smartFormatter = SmartTextFormatter()
 
-    /// Full post-processing pipeline:
-    ///   filler removal → repetition cleanup → list/todo detection → tone formatting → dictionary/snippets
-    private func postProcess(_ text: String) -> String {
-        guard !text.isEmpty else { return text }
+    /// Full post-processing pipeline (non-destructive):
+    ///   filler removal → structural list annotation/rendering → style formatting.
+    private func postProcess(_ text: String) -> PostProcessResult {
+        guard !text.isEmpty else {
+            return PostProcessResult(text: text, listBlocksCount: 0)
+        }
         let languageCode = AppState.shared.selectedLanguage.id
 
-        var result = text
-
-        // ── 1. Filler word removal ────────────────────────────────────────────
+        // ── Phase A: non-destructive cleanup ───────────────────────────────────
+        var cleaned = text
         for regex in fillerRemovalRegexes(for: languageCode) {
-            let range = NSRange(result.startIndex..., in: result)
-            result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: "")
+            let range = NSRange(cleaned.startIndex..., in: cleaned)
+            cleaned = regex.stringByReplacingMatches(in: cleaned, range: range, withTemplate: "")
         }
-        result = result
+        cleaned = cleaned
             .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // ── 2. Smart formatting (repetitions, list, todos) ────────────────────
-        let sf = smartFormatter.run(result, languageCode: languageCode)
-        result = sf.text
-        result = result
+        let smart = smartFormatter.run(cleaned, languageCode: languageCode)
+        cleaned = smart.cleanedText
             .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // ── 3. Dictionary mappings & snippet macros ───────────────────────────
+        // ── Phase B: structural annotation → mixed text + inline lists ────────
+        var result = Self.renderDetectedListBlocksInline(cleaned, blocks: smart.detectedListBlocks)
+
+        // Keep contextual substitutions after list rendering (ranges are based on cleaned text).
         result = applyDictionaryPronunciationMappings(to: result)
         result = applyContextualLinkSnippets(to: result, bundleID: activeBundleIdentifier())
 
-        // ── 4. If a list was detected, minimal formatting then done ───────────
-        if sf.isList {
-            var finalList = result
-            if !sf.todos.isEmpty {
-                finalList = SmartTextFormatter.todoBlock(from: sf.todos) + "\n\n" + finalList
+        // ── Phase C: tone formatting with list-line preservation ───────────────
+        let tone = activeTone()
+        result = applyToneFormattingPreservingLists(result, tone: tone, languageCode: languageCode)
+        result = normalizeWhitespacePreservingParagraphs(in: result)
+
+        return PostProcessResult(
+            text: result,
+            listBlocksCount: smart.detectedListBlocks.count
+        )
+    }
+
+    nonisolated static func renderDetectedListBlocksInline(
+        _ text: String,
+        blocks: [SmartTextFormatter.DetectedListBlock]
+    ) -> String {
+        guard !blocks.isEmpty else { return text }
+        var result = text
+        let sorted = blocks.sorted { $0.sourceStart > $1.sourceStart }
+
+        for block in sorted {
+            let nsResult = result as NSString
+            let location = block.sourceStart
+            let length = block.sourceEnd - block.sourceStart
+            guard location >= 0, length > 0, location + length <= nsResult.length else { continue }
+
+            let replacementLines = block.items.compactMap { item -> String? in
+                let normalized = item
+                    .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalized.isEmpty else { return nil }
+                return "- " + normalized
             }
-            return normalizeWhitespacePreservingParagraphs(in: finalList)
+            guard !replacementLines.isEmpty else { continue }
+
+            var replacement = replacementLines.joined(separator: "\n")
+            if location > 0 {
+                let previousChar = nsResult.substring(with: NSRange(location: location - 1, length: 1))
+                if previousChar != "\n" {
+                    replacement = "\n" + replacement
+                }
+            }
+            if location + length < nsResult.length {
+                let nextChar = nsResult.substring(with: NSRange(location: location + length, length: 1))
+                if nextChar != "\n" {
+                    replacement += "\n"
+                }
+            }
+
+            let range = NSRange(location: location, length: length)
+            result = nsResult.replacingCharacters(in: range, with: replacement)
+        }
+        return result
+    }
+
+    private func applyToneFormattingPreservingLists(
+        _ text: String,
+        tone: WritingTone,
+        languageCode: String
+    ) -> String {
+        guard !text.isEmpty else { return text }
+
+        let lines = text.components(separatedBy: "\n")
+        var chunks: [(isList: Bool, lines: [String])] = []
+        chunks.reserveCapacity(max(1, lines.count / 2))
+
+        for line in lines {
+            let isList = isListLine(line)
+            if var last = chunks.last, last.isList == isList {
+                last.lines.append(line)
+                chunks[chunks.count - 1] = last
+            } else {
+                chunks.append((isList: isList, lines: [line]))
+            }
         }
 
-        // ── 5. Tone-based formatting ──────────────────────────────────────────
-        let tone = activeTone()
+        let transformed: [String] = chunks.map { chunk in
+            if chunk.isList {
+                return chunk.lines
+                    .map(normalizeListLine)
+                    .joined(separator: "\n")
+            }
+            let prose = chunk.lines.joined(separator: "\n")
+            return applyToneFormattingToProse(prose, tone: tone, languageCode: languageCode)
+        }
+
+        return transformed.joined(separator: "\n")
+    }
+
+    private func applyToneFormattingToProse(
+        _ text: String,
+        tone: WritingTone,
+        languageCode: String
+    ) -> String {
+        var result = text
+            .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !result.isEmpty else { return result }
 
         switch tone {
         case .formal:
@@ -1182,9 +1433,10 @@ final class DictationEngine {
             result = applyAutomaticFormalParagraphFormatting(to: result, languageCode: languageCode)
 
         case .casual:
-            // Inject sentence boundaries before known transition words, then capitalize
             result = applyLightPunctuation(to: result, languageCode: languageCode)
             result = capitalizeSentences(in: result)
+            // Keep casual tone but still split dense dictation into readable paragraphs.
+            result = applyAutomaticFormalParagraphFormatting(to: result, languageCode: languageCode)
 
         case .veryCasual:
             result = result.lowercased()
@@ -1192,14 +1444,38 @@ final class DictationEngine {
             result = result.replacingOccurrences(of: "[!;:]", with: "", options: .regularExpression)
         }
 
-        // ── 6. Prepend TODO checklist if any tasks were extracted ─────────────
-        if !sf.todos.isEmpty {
-            let block = SmartTextFormatter.todoBlock(from: sf.todos)
-            result = result.isEmpty ? block : block + "\n\n" + result
-        }
-
-        result = normalizeWhitespacePreservingParagraphs(in: result)
         return result
+    }
+
+    private func isListLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ")
+    }
+
+    private func normalizeListLine(_ line: String) -> String {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return "" }
+        let payload: String
+        if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+            payload = String(trimmed.dropFirst(2))
+        } else {
+            payload = trimmed
+        }
+        let normalized = payload
+            .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: " -"))
+        guard !normalized.isEmpty else { return "" }
+        return "- " + normalized.prefix(1).uppercased() + normalized.dropFirst()
+    }
+
+    // MARK: - Internal Test Hooks
+
+    func debugPostProcessForTesting(_ text: String) -> String {
+        postProcess(text).text
+    }
+
+    func debugApplyToneForTesting(_ text: String, tone: WritingTone, languageCode: String) -> String {
+        applyToneFormattingToProse(text, tone: tone, languageCode: languageCode)
     }
 
     /// Shared helper: inserts ". Transition" before known sentence-starting transition words

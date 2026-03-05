@@ -2111,12 +2111,12 @@ struct PreflightView: View {
         switch modelStatus {
         case .notDownloaded:
             return t(
-                "Qwen3-ASR s'installe une seule fois (~2,46 GB). Il s'exécute ensuite 100% en local.",
-                "Qwen3-ASR installs once (~2.46 GB). It then runs 100% locally.",
-                "Qwen3-ASR se instala una sola vez (~2,46 GB). Funciona 100% localmente.",
-                "Qwen3-ASR 仅需安装一次（约 2.46 GB），之后 100% 本地运行。",
-                "Qwen3-ASR は一度だけインストール（約 2.46 GB）。以後 100% ローカルで動作。",
-                "Qwen3-ASR устанавливается один раз (~2,46 ГБ). Далее работает 100% локально."
+                "Whisper s'installe une seule fois (~600 Mo). Il s'exécute ensuite 100% en local.",
+                "Whisper installs once (~600 MB). It then runs 100% locally.",
+                "Whisper se instala una sola vez (~600 MB). Funciona 100% localmente.",
+                "Whisper 仅需安装一次（约 600 MB），之后 100% 本地运行。",
+                "Whisper は一度だけインストール（約 600 MB）。以後 100% ローカルで動作。",
+                "Whisper устанавливается один раз (~600 МБ). Далее работает 100% локально."
             )
         case .downloading:
             if isPreparingModelDownload {
@@ -2130,12 +2130,12 @@ struct PreflightView: View {
                 )
             }
             return t(
-                "Qwen3-ASR s'installe une seule fois (~2,46 GB). Il s'exécute ensuite 100% en local.",
-                "Qwen3-ASR installs once (~2.46 GB). It then runs 100% locally.",
-                "Qwen3-ASR se instala una sola vez (~2,46 GB). Funciona 100% localmente.",
-                "Qwen3-ASR 仅需安装一次（约 2.46 GB），之后 100% 本地运行。",
-                "Qwen3-ASR は一度だけインストール（約 2.46 GB）。以後 100% ローカルで動作。",
-                "Qwen3-ASR устанавливается один раз (~2,46 ГБ). Далее работает 100% локально."
+                "Whisper s'installe une seule fois (~600 Mo). Il s'exécute ensuite 100% en local.",
+                "Whisper installs once (~600 MB). It then runs 100% locally.",
+                "Whisper se instala una sola vez (~600 MB). Funciona 100% localmente.",
+                "Whisper 仅需安装一次（约 600 MB），之后 100% 本地运行。",
+                "Whisper は一度だけインストール（約 600 MB）。以後 100% ローカルで動作。",
+                "Whisper устанавливается один раз (~600 МБ). Далее работает 100% локально."
             )
         case .loading:
             return t(
@@ -2148,12 +2148,12 @@ struct PreflightView: View {
             )
         case .ready:
             return t(
-                "Qwen3-ASR tourne entièrement sur ton Mac, sans aucun serveur.",
-                "Qwen3-ASR runs entirely on your Mac, with no server involved.",
-                "Qwen3-ASR funciona completamente en tu Mac, sin servidor.",
-                "Qwen3-ASR 完全在你的 Mac 上本地运行，无需服务器。",
-                "Qwen3-ASR はサーバー不要でMac上で完全に動作します。",
-                "Qwen3-ASR работает полностью на вашем Mac без серверов."
+                "Whisper tourne entièrement sur ton Mac, sans aucun serveur.",
+                "Whisper runs entirely on your Mac, with no server involved.",
+                "Whisper funciona completamente en tu Mac, sin servidor.",
+                "Whisper 完全在你的 Mac 上本地运行，无需服务器。",
+                "Whisper はサーバー不要でMac上で完全に動作します。",
+                "Whisper работает полностью на вашем Mac без серверов."
             )
         case .failed(let msg):
             let prefix = t("Vérifiez votre connexion et réessayez.",
@@ -3968,7 +3968,7 @@ private struct BentoLocalCard: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(Color.zText)
 
-                    Text("Qwen3-ASR tourne directement sur l'Apple Silicon Neural Engine. Aucune requête réseau. Aucune donnée ne quitte jamais ton Mac.")
+                    Text("Whisper tourne directement sur l'Apple Silicon Neural Engine. Aucune requête réseau. Aucune donnée ne quitte jamais ton Mac.")
                         .font(.system(size: 12))
                         .foregroundColor(Color.zTextSub)
                         .lineSpacing(2.5)
@@ -4133,7 +4133,7 @@ private struct BentoCodeCard: View {
         ("func", false), ("transcribe", true), ("(", false),
         ("audioURL", true), (":", false), ("URL", true), (")", false), ("{", false),
         ("let", false), ("result", true), ("=", false), ("await", false),
-        ("qwenASR", true), (".", false), ("run", true), ("(", false), ("audioURL", true), (")", false),
+        ("whisper", true), (".", false), ("run", true), ("(", false), ("audioURL", true), (")", false),
     ]
     @State private var highlighted: Int = 0
 
@@ -4245,7 +4245,7 @@ private struct BentoLangCard: View {
                     Text("30 langues")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(Color.zText)
-                    Text("Toutes les langues Qwen3-ASR, précision maximale.")
+                    Text("Toutes les langues Whisper, précision maximale.")
                         .font(.system(size: 11))
                         .foregroundColor(Color.zTextSub)
                         .lineSpacing(2)

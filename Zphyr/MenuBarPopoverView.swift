@@ -71,7 +71,7 @@ struct MenuBarPopoverView: View {
 
     private var donutSlices: [DonutSlice] {
         let values: [(label: String, value: Int64, color: Color)] = [
-            ("Qwen3-ASR", max(0, store.snapshot.primaryModelDiskBytes), Color(hex: "#0A84FF")),
+            ("Whisper", max(0, store.snapshot.primaryModelDiskBytes), Color(hex: "#0A84FF")),
             ("Qwen formatage", max(0, store.snapshot.formatterModelDiskBytes), Color(hex: "#22D3B8"))
         ]
         let total = Double(values.reduce(0) { $0 + $1.value })
@@ -198,7 +198,7 @@ struct MenuBarPopoverView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     legendRow(
                         color: Color(hex: "#0A84FF"),
-                        title: "Qwen3-ASR",
+                        title: "Whisper v3 Turbo",
                         value: formatInstalledSize(
                             bytes: store.snapshot.primaryModelDiskBytes,
                             installed: store.snapshot.primaryModelInstalled

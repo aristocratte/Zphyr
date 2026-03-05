@@ -12,9 +12,19 @@ struct TextFormatterResult: Sendable {
     let text: String
     let usedDeterministicFallback: Bool
     let rejectedIntroducedTokens: [String]
+    let llmInputLength: Int?
+    let llmOutputLength: Int?
+    let llmRecall: Double?
 
     static func deterministic(_ text: String) -> TextFormatterResult {
-        TextFormatterResult(text: text, usedDeterministicFallback: false, rejectedIntroducedTokens: [])
+        TextFormatterResult(
+            text: text,
+            usedDeterministicFallback: false,
+            rejectedIntroducedTokens: [],
+            llmInputLength: nil,
+            llmOutputLength: nil,
+            llmRecall: nil
+        )
     }
 }
 

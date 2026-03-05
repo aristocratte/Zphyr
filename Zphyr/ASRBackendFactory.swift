@@ -4,11 +4,9 @@ enum ASRBackendFactory {
     static func resolveEffectiveKind(preferred: ASRBackendKind) -> ASRBackendKind {
         switch preferred {
         case .appleSpeechAnalyzer:
-            return AppleSpeechAnalyzerBackend.isRuntimeSupported ? .appleSpeechAnalyzer : .qwenMLX
+            return AppleSpeechAnalyzerBackend.isRuntimeSupported ? .appleSpeechAnalyzer : .whisperKit
         case .whisperKit:
             return .whisperKit
-        case .qwenMLX:
-            return .qwenMLX
         }
     }
 
@@ -18,9 +16,7 @@ enum ASRBackendFactory {
         case .appleSpeechAnalyzer:
             return AppleSpeechAnalyzerBackend()
         case .whisperKit:
-            return WhisperKitBackend()
-        case .qwenMLX:
-            return QwenMLXBackend()
+            return WhisperKitBackend.shared
         }
     }
 }

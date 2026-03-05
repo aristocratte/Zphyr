@@ -39,4 +39,35 @@ struct ZphyrTests {
         #expect(defaults.data(forKey: "\(storageKey).enc") != nil)
     }
 
+    @Test func dictionaryLearningDetectsSingleWordReplacement() {
+        let suggestion = DictationEngine._test_detectWordReplacement(
+            from: "Le modèle quen est rapide.",
+            to: "Le modèle qwen est rapide."
+        )
+        #expect(suggestion?.mistakenWord == "quen")
+        #expect(suggestion?.correctedWord == "qwen")
+    }
+
+    @Test func dictionaryLearningDetectsInWordCharacterCorrection() {
+        let suggestion = DictationEngine._test_detectWordReplacement(
+            from: "Version en cours: qun3.",
+            to: "Version en cours: qwen3."
+        )
+        #expect(suggestion?.mistakenWord == "qun3")
+        #expect(suggestion?.correctedWord == "qwen3")
+    }
+
+    @Test func dictionaryLearningRejectsMultiWordEdits() {
+        let suggestion = DictationEngine._test_detectWordReplacement(
+            from: "Bonjour monde",
+            to: "Bonjour beau monde"
+        )
+        #expect(suggestion == nil)
+    }
+
+    @Test func dictionaryLearningTokenBoundaryMatch() {
+        #expect(DictationEngine._test_containsLearningToken("quen", in: "Le mot quen a été dicté."))
+        #expect(!DictationEngine._test_containsLearningToken("quen", in: "Le mot quentin a été dicté."))
+    }
+
 }

@@ -49,6 +49,10 @@ final class CodeFormatter {
         let pattern = #"\b(?:"# + keywordList + #")\s+([a-zA-ZÀ-ÿ0-9](?:\s+[a-zA-ZÀ-ÿ0-9]){1,4})(?=\s+(?:"# + stopWordList + #")\b|[,;.!?]|$)"#
         return try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
     }()
+    private let strongCodeIntentRegex = try? NSRegularExpression(
+        pattern: #"\b(variable|var|fonction|function|méthode|method|class|classe|constante|constant|param(?:ètre|eter)?)\b"#,
+        options: [.caseInsensitive]
+    )
 
     /// Scans `text` for trigger keywords and replaces matched spans with the formatted identifier.
     /// Everything outside a trigger span is returned unchanged.
@@ -69,6 +73,11 @@ final class CodeFormatter {
             if let swiftRange = Range(match.range, in: result) {
                 result.replaceSubrange(swiftRange, with: formatted)
             }
+        }
+        if matches.isEmpty, hasStrongCodeIntent(in: result) {
+            // In explicit-trigger mode, keep conservative behavior but still
+            // format obvious "variable/function/class ..." phrases.
+            result = formatAdvanced(result, defaultStyle: defaultStyle)
         }
         return result
     }
@@ -144,5 +153,11 @@ final class CodeFormatter {
         case .kebab:
             return parts.joined(separator: "-")
         }
+    }
+
+    private func hasStrongCodeIntent(in text: String) -> Bool {
+        guard let strongCodeIntentRegex else { return false }
+        let range = NSRange(text.startIndex..., in: text)
+        return strongCodeIntentRegex.firstMatch(in: text, range: range) != nil
     }
 }

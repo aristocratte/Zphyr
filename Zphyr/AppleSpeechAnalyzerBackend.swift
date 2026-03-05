@@ -119,16 +119,36 @@ final class AppleSpeechAnalyzerBackend: ASRService {
         _ = analyzer // keep alive while iterating results
 
         var candidate = ""
+        var assembledSegments: [String] = []
         for try await result in transcriber.results {
             let fragment = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !fragment.isEmpty else { continue }
-            candidate = fragment
+            if fragment.count > candidate.count {
+                // Keep longest hypothesis (many APIs emit cumulative text here).
+                candidate = fragment
+            }
+            // Also keep deduplicated segment stream for engines that emit incremental chunks.
+            if !assembledSegments.contains(fragment) {
+                assembledSegments.append(fragment)
+            }
             if result.isFinal {
                 break
             }
         }
 
-        let final = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        var final = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        if final.isEmpty, !assembledSegments.isEmpty {
+            final = assembledSegments.joined(separator: " ")
+                .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if !assembledSegments.isEmpty {
+            let joined = assembledSegments.joined(separator: " ")
+                .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if joined.count > final.count {
+                final = joined
+            }
+        }
         guard !final.isEmpty else { throw ASRBackendError.emptyResult }
         return final
     }

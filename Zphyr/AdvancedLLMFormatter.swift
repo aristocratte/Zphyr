@@ -356,7 +356,22 @@ final class AdvancedLLMFormatter {
             // likely making things up. Reject and let the regex fallback run.
             let tolerance   = max(4, inputWords / 5)   // allow up to +20 % or +4 words
             if outputWords > inputWords + tolerance {
-                log.warning("[AdvancedLLM] hallucination guard triggered (in=\(inputWords) out=\(outputWords)), using regex fallback")
+                log.warning("[AdvancedLLM] hallucination guard: word count (in=\(inputWords) out=\(outputWords))")
+                return nil
+            }
+
+            // ── Foreign script guard ─────────────────────────────────────────
+            // Detect characters from scripts absent in the input (e.g. Thai,
+            // CJK, Cyrillic injected when input is Latin).
+            if Self.containsForeignScripts(input: text, output: result) {
+                log.warning("[AdvancedLLM] hallucination guard: foreign scripts detected")
+                return nil
+            }
+
+            // ── Repetition guard ─────────────────────────────────────────────
+            // Detect degenerate repeated token sequences (e.g. "à¹ĭà¹ĭà¹ĭà¹ĭ")
+            if Self.containsExcessiveRepetition(result) {
+                log.warning("[AdvancedLLM] hallucination guard: excessive repetition")
                 return nil
             }
 
@@ -394,6 +409,48 @@ final class AdvancedLLMFormatter {
                 .split(whereSeparator: { $0.isWhitespace })
                 .map(String.init)
         )
+    }
+
+    // MARK: - Hallucination detection helpers
+
+    /// Returns the set of broad script categories present in a string.
+    private static func scriptSet(_ text: String) -> Set<String> {
+        var scripts = Set<String>()
+        for scalar in text.unicodeScalars {
+            let v = scalar.value
+            if v < 0x0080 { scripts.insert("Latin"); continue }
+            // Latin Extended
+            if (0x0080...0x024F).contains(v) || (0x1E00...0x1EFF).contains(v) { scripts.insert("Latin"); continue }
+            // Cyrillic
+            if (0x0400...0x04FF).contains(v) || (0x0500...0x052F).contains(v) { scripts.insert("Cyrillic"); continue }
+            // Arabic
+            if (0x0600...0x06FF).contains(v) || (0x0750...0x077F).contains(v) { scripts.insert("Arabic"); continue }
+            // Thai
+            if (0x0E00...0x0E7F).contains(v) { scripts.insert("Thai"); continue }
+            // CJK
+            if (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v)
+                || (0x3000...0x30FF).contains(v) || (0x31F0...0x31FF).contains(v)
+                || (0xFF00...0xFFEF).contains(v) { scripts.insert("CJK"); continue }
+            // Hangul
+            if (0xAC00...0xD7AF).contains(v) || (0x1100...0x11FF).contains(v) { scripts.insert("Hangul"); continue }
+            // Devanagari
+            if (0x0900...0x097F).contains(v) { scripts.insert("Devanagari"); continue }
+        }
+        return scripts
+    }
+
+    /// Detects foreign scripts in output that were not present in input.
+    private static func containsForeignScripts(input: String, output: String) -> Bool {
+        let inputScripts = scriptSet(input)
+        let outputScripts = scriptSet(output)
+        let foreignScripts = outputScripts.subtracting(inputScripts)
+        return !foreignScripts.isEmpty
+    }
+
+    /// Detects degenerate repetition (same 2–6 char sequence repeated 4+ times).
+    private static func containsExcessiveRepetition(_ text: String) -> Bool {
+        let pattern = #"(.{2,6})\1{3,}"#
+        return text.range(of: pattern, options: .regularExpression) != nil
     }
 }
 

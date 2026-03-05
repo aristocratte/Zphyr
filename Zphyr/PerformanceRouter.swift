@@ -26,7 +26,7 @@ struct PerformanceProfile: Sendable, Equatable {
         tier == .pro
     }
 
-    var allowsQwenASR: Bool {
+    var allowsWhisperASR: Bool {
         tier != .eco
     }
 
@@ -97,9 +97,6 @@ final class PerformanceRouter {
         let profile = profile ?? currentProfile()
         if let forced = profile.forcedASRBackendInTier {
             return forced
-        }
-        if !profile.allowsQwenASR, preferred == .qwenMLX {
-            return profile.fallbackASRBackend
         }
         return preferred
     }

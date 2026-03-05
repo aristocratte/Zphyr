@@ -335,26 +335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return URL(fileURLWithPath: explicitPath)
         }
 
-        let root = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/huggingface/hub/models--aufklarer--Qwen3-ASR-1.7B-MLX-8bit/snapshots")
-        guard fileManager.fileExists(atPath: root.path),
-              let candidates = try? fileManager.contentsOfDirectory(
-                at: root,
-                includingPropertiesForKeys: [.contentModificationDateKey],
-                options: [.skipsHiddenFiles]
-              ) else {
-            return nil
-        }
-
-        if let mainSnapshot = candidates.first(where: { $0.lastPathComponent == "main" }) {
-            return mainSnapshot
-        }
-
-        return candidates.max(by: {
-            let lhsDate = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let rhsDate = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            return lhsDate < rhsDate
-        })
+        return WhisperKitBackend.resolveInstallURL()
     }
 
     private func resolveWhisperDiskUsageBytes() -> Int64 {

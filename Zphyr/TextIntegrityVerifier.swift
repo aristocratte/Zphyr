@@ -3,7 +3,8 @@ import Foundation
 struct TextIntegrityVerifier {
     enum ValidationResult: Sendable {
         case valid
-        case invalid(introducedTokens: [String])
+        case invalidIntroducedTokens([String])
+        case invalidDroppedContent(recall: Double, missingTokens: [String])
     }
 
     private let allowedInsertedTokens: Set<String>
@@ -13,19 +14,54 @@ struct TextIntegrityVerifier {
     }
 
     func validate(rawASRText: String, formattedText: String) -> ValidationResult {
-        let sourceTokens = Set(tokenize(rawASRText))
-        let candidateTokens = Set(tokenize(formattedText))
+        validate(rawASRText: rawASRText, formattedText: formattedText, minRecall: 0.0)
+    }
+
+    func validate(rawASRText: String, formattedText: String, minRecall: Double) -> ValidationResult {
+        let sourceTokenList = tokenize(rawASRText)
+        let candidateTokenList = tokenize(formattedText)
+
+        let sourceTokens = Set(sourceTokenList)
+        let candidateTokens = Set(candidateTokenList)
 
         guard !candidateTokens.isEmpty else {
-            return .invalid(introducedTokens: ["<empty>"])
+            return .invalidIntroducedTokens(["<empty>"])
         }
 
         let introduced = candidateTokens
             .subtracting(sourceTokens)
             .subtracting(allowedInsertedTokens)
             .sorted()
+        if !introduced.isEmpty {
+            return .invalidIntroducedTokens(introduced)
+        }
 
-        return introduced.isEmpty ? .valid : .invalid(introducedTokens: introduced)
+        if sourceTokenList.isEmpty {
+            return .valid
+        }
+
+        let clampedMinRecall = max(0.0, min(1.0, minRecall))
+        if clampedMinRecall <= 0 {
+            return .valid
+        }
+
+        let sourceCounts = tokenCounts(sourceTokenList)
+        let candidateCounts = tokenCounts(candidateTokenList)
+
+        let matchedCount = sourceCounts.reduce(0) { partial, entry in
+            let candidateCount = candidateCounts[entry.key, default: 0]
+            return partial + min(entry.value, candidateCount)
+        }
+        let recall = Double(matchedCount) / Double(sourceTokenList.count)
+        guard recall >= clampedMinRecall else {
+            let missingTokens = sourceCounts.compactMap { token, sourceCount -> String? in
+                let candidateCount = candidateCounts[token, default: 0]
+                return candidateCount < sourceCount ? token : nil
+            }.sorted()
+            return .invalidDroppedContent(recall: recall, missingTokens: missingTokens)
+        }
+
+        return .valid
     }
 
     private func tokenize(_ text: String) -> [String] {
@@ -42,6 +78,15 @@ struct TextIntegrityVerifier {
         return normalized
             .split(whereSeparator: { $0.isWhitespace })
             .map(String.init)
+    }
+
+    private func tokenCounts(_ tokens: [String]) -> [String: Int] {
+        var counts: [String: Int] = [:]
+        counts.reserveCapacity(tokens.count)
+        for token in tokens {
+            counts[token, default: 0] += 1
+        }
+        return counts
     }
 
     static let defaultAllowedInsertedTokens: Set<String> = [
