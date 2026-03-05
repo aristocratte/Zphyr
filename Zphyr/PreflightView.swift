@@ -2929,53 +2929,6 @@ private struct PFFeaturePill: View {
     }
 }
 
-// MARK: Feature Card (Features slide)
-
-private struct PFFeatureCard: View {
-    let icon: String
-    let color: Color
-    let title: String
-    let description: String
-    @State private var isHovered = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(color.opacity(0.15))
-                    .frame(width: 44, height: 44)
-                Image(systemName: icon)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(color)
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text(title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(Color(hex: "1A1A1A"))
-                Text(description)
-                    .font(.system(size: 12))
-                    .foregroundColor(Color(hex: "666660"))
-                    .lineSpacing(3)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color.white)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(isHovered ? color.opacity(0.35) : Color(hex: "E5E5E0"), lineWidth: 1)
-                )
-        )
-        .scaleEffect(isHovered ? 1.005 : 1.0)
-        .onHover { isHovered = $0 }
-        .animation(.spring(response: 0.22, dampingFraction: 0.8), value: isHovered)
-    }
-}
-
 // MARK: Language Cell
 
 private struct PFLanguageCell: View {
@@ -3023,105 +2976,6 @@ private struct PFLanguageCell: View {
         .onHover { isHovered = $0 }
         .animation(.spring(response: 0.22, dampingFraction: 0.8), value: isSelected)
         .animation(.spring(response: 0.2, dampingFraction: 0.8), value: isHovered)
-    }
-}
-
-// MARK: UI Language Button
-
-private struct PFUILanguageButton: View {
-    let flag: String
-    let label: String
-    let isSelected: Bool
-    let action: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Text(flag)
-                    .font(.system(size: 16))
-                Text(label)
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
-                    .foregroundColor(isSelected ? Color(hex: "1A1A1A") : Color(hex: "555550"))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 11))
-                        .foregroundColor(Color(hex: "22D3B8"))
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(
-                        isSelected
-                            ? Color(hex: "22D3B8").opacity(0.10)
-                            : (isHovered ? Color(hex: "1A1A1A").opacity(0.04) : Color.white)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(
-                                isSelected ? Color(hex: "22D3B8").opacity(0.45) : Color(hex: "E5E5E0"),
-                                lineWidth: 1
-                            )
-                    )
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
-        .animation(.spring(response: 0.22, dampingFraction: 0.8), value: isSelected)
-    }
-}
-
-// MARK: Trigger Key Button
-
-private struct PFTriggerKeyButton: View {
-    let key: TriggerKey
-    let isSelected: Bool
-    let lang: String
-    let action: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Text(key.symbol)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(isSelected ? Color(hex: "22D3B8") : Color(hex: "888880"))
-                Text(key.displayName(for: lang))
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
-                    .foregroundColor(isSelected ? Color(hex: "1A1A1A") : Color(hex: "555550"))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 11))
-                        .foregroundColor(Color(hex: "22D3B8"))
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(
-                        isSelected
-                            ? Color(hex: "22D3B8").opacity(0.10)
-                            : (isHovered ? Color(hex: "1A1A1A").opacity(0.04) : Color.white)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(
-                                isSelected ? Color(hex: "22D3B8").opacity(0.45) : Color(hex: "E5E5E0"),
-                                lineWidth: 1
-                            )
-                    )
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
-        .animation(.spring(response: 0.22, dampingFraction: 0.8), value: isSelected)
     }
 }
 
@@ -3573,29 +3427,6 @@ private struct DownloadStatItem: View {
                 .contentTransition(.numericText())
         }
         .frame(maxWidth: .infinity)
-    }
-}
-
-// MARK: Stat Chip (Model slide)
-
-private struct PFStatChip: View {
-    let icon: String
-    let text: String
-    var color: Color = Color(hex: "888880")
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon)
-                .font(.system(size: 10, weight: .medium))
-            Text(text)
-                .font(.system(size: 11, weight: .medium).monospacedDigit())
-        }
-        .foregroundColor(color)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(color.opacity(0.1))
-        .cornerRadius(8)
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(0.2), lineWidth: 1))
     }
 }
 

@@ -35,11 +35,10 @@ final class AppleSpeechAnalyzerBackend: ASRService {
         isTranscribing = true
         defer { isTranscribing = false }
 
-        let fileURL = try writeTemporaryAudioFile(audioBuffer)
-        defer { try? FileManager.default.removeItem(at: fileURL) }
-
         if #available(macOS 26.0, *) {
             do {
+                let fileURL = try writeTemporaryAudioFile(audioBuffer)
+                defer { try? FileManager.default.removeItem(at: fileURL) }
                 let text = try await transcribeWithSpeechAnalyzer(fileURL)
                 if !text.isEmpty { return text }
             } catch {
@@ -48,7 +47,7 @@ final class AppleSpeechAnalyzerBackend: ASRService {
         }
 
         if #available(macOS 15.0, *) {
-            return try await transcribeWithLegacySpeechRecognizer(fileURL)
+            return try await transcribeWithLegacySpeechRecognizer(audioBuffer)
         }
 
         throw ASRBackendError.unsupported("Apple Speech backend is not available on this macOS version.")
@@ -153,18 +152,20 @@ final class AppleSpeechAnalyzerBackend: ASRService {
         return final
     }
 
-    private func transcribeWithLegacySpeechRecognizer(_ audioURL: URL) async throws -> String {
+    private func transcribeWithLegacySpeechRecognizer(_ audioSamples: [Float]) async throws -> String {
         try await ensureLegacySpeechAuthorization()
 
         guard let recognizer = resolvedLegacySpeechRecognizer() else {
             throw ASRBackendError.unsupported("No SFSpeechRecognizer available for the current language settings.")
         }
 
-        let request = SFSpeechURLRecognitionRequest(url: audioURL)
+        let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = false
         if #available(macOS 13.0, *) {
             request.requiresOnDeviceRecognition = true
         }
+        request.append(try makePCMBuffer(from: audioSamples))
+        request.endAudio()
 
         let text = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             var settled = false
@@ -195,6 +196,30 @@ final class AppleSpeechAnalyzerBackend: ASRService {
         }
 
         return text
+    }
+
+    private func makePCMBuffer(from samples: [Float]) throws -> AVAudioPCMBuffer {
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        )
+        guard let format else { throw ASRBackendError.invalidAudioBuffer }
+        let frameCount = AVAudioFrameCount(samples.count)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            throw ASRBackendError.invalidAudioBuffer
+        }
+        buffer.frameLength = frameCount
+        guard let channelData = buffer.floatChannelData?[0] else {
+            throw ASRBackendError.invalidAudioBuffer
+        }
+        samples.withUnsafeBufferPointer { source in
+            if let base = source.baseAddress {
+                channelData.update(from: base, count: source.count)
+            }
+        }
+        return buffer
     }
 
     private func ensureLegacySpeechAuthorization() async throws {

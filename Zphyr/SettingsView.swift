@@ -271,11 +271,15 @@ struct GeneralSettingsContent: View {
 
 struct SystemSettingsContent: View {
     @Bindable private var state = AppState.shared
+    @State private var asrModelDiskSizeCache: String = "~"
 
     private var lang: String { AppState.shared.uiDisplayLanguage.rawValue }
     private var asrDescriptor: ASRBackendDescriptor { DictationEngine.shared.currentASRDescriptor }
     private var asrRequiresInstall: Bool { asrDescriptor.requiresModelInstall }
     private var performanceProfile: PerformanceProfile { state.performanceProfile }
+    private var asrModelDiskSizeRefreshToken: String {
+        "\(asrDescriptor.kind.rawValue)|\(asrInstallURL?.path ?? "none")|\(state.modelStatus.isReady)"
+    }
 
     private var asrBackendBinding: Binding<ASRBackendKind> {
         Binding(
@@ -415,7 +419,7 @@ struct SystemSettingsContent: View {
                     iconColor: Color(hex: "#22D3B8"),
                     title: t("Backend actif", "Active backend", "Backend activo", "当前后端", "アクティブバックエンド", "Активный бэкенд"),
                     subtitle: asrRequiresInstall
-                        ? "\(asrDescriptor.displayName) · \(asrModelDiskSize)"
+                        ? "\(asrDescriptor.displayName) · \(asrModelDiskSizeCache)"
                         : "\(asrDescriptor.displayName) · \(t("Intégré au système", "Built into the system", "Integrado en el sistema", "系统内置", "システム内蔵", "Встроен в систему"))",
                     showDivider: false
                 ) {
@@ -634,6 +638,9 @@ struct SystemSettingsContent: View {
         .onAppear {
             state.refreshPerformanceProfile()
         }
+        .task(id: asrModelDiskSizeRefreshToken) {
+            await refreshASRModelDiskSizeCache()
+        }
     }
 
     private var localDataSize: String {
@@ -643,11 +650,21 @@ struct SystemSettingsContent: View {
         return ByteCountFormatter.string(fromByteCount: Int64(totalBytes), countStyle: .file)
     }
 
-    private var asrModelDiskSize: String {
-        if !asrRequiresInstall {
-            return t("N/A", "N/A", "N/A", "不适用", "N/A", "Н/Д")
+    private func refreshASRModelDiskSizeCache() async {
+        guard asrRequiresInstall else {
+            asrModelDiskSizeCache = t("N/A", "N/A", "N/A", "不适用", "N/A", "Н/Д")
+            return
         }
-        guard let url = asrInstallURL else { return asrDescriptor.modelSizeLabel ?? "~" }
+        let installURL = asrInstallURL
+        let fallback = asrDescriptor.modelSizeLabel ?? "~"
+        let resolved = await Task.detached(priority: .utility) {
+            Self.computeASRModelDiskSize(installURL: installURL, fallbackLabel: fallback)
+        }.value
+        asrModelDiskSizeCache = resolved
+    }
+
+    nonisolated private static func computeASRModelDiskSize(installURL: URL?, fallbackLabel: String) -> String {
+        guard let url = installURL else { return fallbackLabel }
         let fm = FileManager.default
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]
         guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: Array(keys),

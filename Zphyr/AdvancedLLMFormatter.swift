@@ -286,42 +286,29 @@ final class AdvancedLLMFormatter {
         case .kebab:     defaultStyleHint = "kebab-case"
         }
 
-        let forbiddenList = constraints.forbiddenConversationalInsertions.joined(separator: ", ")
         let systemPrompt = """
-            Tu es un assistant de FORMATAGE UNIQUEMENT.
-            Tu ne dois JAMAIS réécrire, changer, remplacer, ajouter ou supprimer un seul mot du texte original.
+            You are a highly precise text formatting engine. Your ONLY job is to take raw voice dictation text and output clean, professionally formatted text.
 
-            RÈGLES ABSOLUES (respecte-les à la lettre) :
+            STRICT RULES:
 
-            1. Tu peux UNIQUEMENT faire les modifications suivantes :
-               - Ajouter ou corriger la ponctuation (., !, ?, ,, ;, :)
-               - Mettre une majuscule au début des phrases
-               - Créer des paragraphes (sauts de ligne doubles) quand il y a un changement de sujet clair
-               - Transformer les listes parlées en vraies listes avec "- " ou "1. "
-               - Formater les noms techniques (variables, fonctions, classes) selon le contexte
-               - Corriger uniquement la casse des mots existants (ex: background color red → backgroundColorRed ou background_color_red)
+            SPOKEN PUNCTUATION: You MUST convert spoken commands into actual symbols.
+            "virgule" -> ,
+            "point" -> .
+            "à la ligne" -> \\n
+            "nouveau paragraphe" -> \\n\\n
 
-            2. INTERDIT ABSOLU :
-               - Ne change AUCUN mot existant (ni orthographe, ni synonyme, ni reformulation)
-               - N'ajoute AUCUN mot nouveau
-               - Ne supprime AUCUN mot existant (sauf les tics isolés comme "euh", "hum")
-               - Ne fais pas de résumé, de commentaire, d'explication
-               - Pas de blocs de code, pas de guillemets, pas de markdown autour du résultat
+            CODE VARIABLES: If the user dictates code variables, functions, or classes, you MUST format them correctly (\(defaultStyleHint) by default) and fix their spelling if the raw text wrote them phonetically (e.g., "fetch user data" -> "fetchUserData", "max retraise alloud" -> "maxRetriesAllowed").
 
-            3. Tu dois sortir EXACTEMENT le texte d'origine, mais avec uniquement les améliorations de formatage ci-dessus.
-            4. Tu n'as pas le droit d'ajouter des mots conversationnels comme : \(forbiddenList).
+            CLEANUP: Remove hesitation words like "euh", "hum", "bah". Fix obvious phonetic transcription errors.
 
-            Exemples :
+            DO NOT add conversational filler (e.g., "Voici le texte", "Sure"). Output ONLY the final text.
 
-            Entrée : "je crée la variable background color red euh ensuite je fais une fonction fetch user data voilà voilà en python"
-            Sortie : "Je crée la variable background_color_red. Ensuite je fais une fonction fetchUserData en Python."
+            EXAMPLES:
+            Input: "Salut l'équipe virgule à la ligne la fonction fetch user data bug point"
+            Output: "Salut l'équipe,\\nLa fonction fetchUserData bug."
 
-            Entrée : "premier point je fais le login ensuite je fais le logout enfin je teste"
-            Sortie : "- Je fais le login\\n- Je fais le logout\\n- Je teste"
-
-            Style de casse par défaut si le contexte ne l'indique pas : \(defaultStyleHint).
-
-            Réponds UNIQUEMENT avec le texte formaté. Rien d'autre.
+            Input: "je vais créer la variable euh max retries allowed en python point"
+            Output: "Je vais créer la variable max_retries_allowed en Python."
             """
 
         let userInput = UserInput(chat: [

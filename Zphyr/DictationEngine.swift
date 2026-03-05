@@ -720,17 +720,38 @@ final class DictationEngine {
             return false
         }
 
+        let resamplingRatio = whisperSampleRate / hwFormat.sampleRate
+        let reusableCapacity = AVAudioFrameCount(Double(4096) * resamplingRatio + 8)
+        guard let reusableOutBuffer = AVAudioPCMBuffer(pcmFormat: whisperFormat, frameCapacity: reusableCapacity) else {
+            AppState.shared.error = L10n.ui(
+                for: AppState.shared.selectedLanguage.id,
+                fr: "Impossible d'initialiser le buffer audio.",
+                en: "Unable to initialize audio buffer.",
+                es: "No se pudo inicializar el búfer de audio.",
+                zh: "无法初始化音频缓冲区。",
+                ja: "オーディオバッファを初期化できませんでした。",
+                ru: "Не удалось инициализировать аудиобуфер."
+            )
+            return false
+        }
+
         // Tap on the hardware format, convert each buffer to 16kHz
         var lastHUDLevelPushAt = CFAbsoluteTimeGetCurrent()
+        var hudLevels = [Float](repeating: 0.1, count: 28)
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] hwBuffer, _ in
             guard let self else { return }
             autoreleasepool {
                 // Compute how many output frames correspond to this input buffer
                 let inputFrames = AVAudioFrameCount(hwBuffer.frameLength)
-                let ratio = self.whisperSampleRate / hwFormat.sampleRate
-                let outputFrames = AVAudioFrameCount(Double(inputFrames) * ratio + 1)
-
-                guard let outBuffer = AVAudioPCMBuffer(pcmFormat: whisperFormat, frameCapacity: outputFrames) else { return }
+                let outputFrames = AVAudioFrameCount(Double(inputFrames) * resamplingRatio + 1)
+                let outBuffer: AVAudioPCMBuffer
+                if outputFrames <= reusableOutBuffer.frameCapacity {
+                    reusableOutBuffer.frameLength = 0
+                    outBuffer = reusableOutBuffer
+                } else {
+                    guard let fallbackBuffer = AVAudioPCMBuffer(pcmFormat: whisperFormat, frameCapacity: outputFrames) else { return }
+                    outBuffer = fallbackBuffer
+                }
 
                 var conversionError: NSError?
                 var consumed = false
@@ -766,14 +787,13 @@ final class DictationEngine {
                 guard let hwChannel = hwBuffer.floatChannelData?[0] else { return }
                 let hwFrames = Int(hwBuffer.frameLength)
                 guard hwFrames > 0 else { return }
-                let bandSize = max(1, hwFrames / 28)
-                var levels: [Float] = []
-                levels.reserveCapacity(28)
-                for i in 0..<28 {
+                let bandCount = hudLevels.count
+                let bandSize = max(1, hwFrames / bandCount)
+                for i in 0..<bandCount {
                     let start = i * bandSize
                     let end = min(start + bandSize, hwFrames)
                     guard start < end else {
-                        levels.append(0.1)
+                        hudLevels[i] = 0.1
                         continue
                     }
                     let slice = UnsafeBufferPointer(start: hwChannel + start, count: end - start)
@@ -781,8 +801,9 @@ final class DictationEngine {
                     for sample in slice {
                         peak = max(peak, abs(sample))
                     }
-                    levels.append(min(1.0, sqrt(min(1.0, peak * 18))))
+                    hudLevels[i] = min(1.0, sqrt(min(1.0, peak * 18)))
                 }
+                let levels = hudLevels
                 Task { @MainActor in
                     AppState.shared.updateAudioLevels(levels)
                 }
@@ -1469,10 +1490,6 @@ final class DictationEngine {
     }
 
     // MARK: - Internal Test Hooks
-
-    func debugPostProcessForTesting(_ text: String) -> String {
-        postProcess(text).text
-    }
 
     func debugApplyToneForTesting(_ text: String, tone: WritingTone, languageCode: String) -> String {
         applyToneFormattingToProse(text, tone: tone, languageCode: languageCode)
@@ -2198,12 +2215,6 @@ final class DictationEngine {
         }
 
         Self.pipelineLogger.notice("[Insert] posting secure typing events")
-        simulateTyping(text)
-        startCorrectionLearningMonitor(originalInsertedText: text)
-    }
-
-    /// Inserts text at cursor without using the global clipboard.
-    func insertTextAtCursor(_ text: String) {
         simulateTyping(text)
         startCorrectionLearningMonitor(originalInsertedText: text)
     }

@@ -105,48 +105,6 @@ struct MainView: View {
     }
 }
 
-// MARK: - Placeholder View
-struct PlaceholderView: View {
-    let icon: String
-    let title: String
-    let subtitle: String
-
-    var body: some View {
-        VStack(spacing: 16) {
-            ZStack {
-                Circle()
-                    .fill(Color(hex: "#1A1A1A").opacity(0.05))
-                    .frame(width: 72, height: 72)
-                Image(systemName: icon)
-                    .font(.system(size: 28, weight: .medium))
-                    .foregroundColor(Color(hex: "#BBBBBB"))
-            }
-
-            VStack(spacing: 6) {
-                Text(title)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(Color(hex: "#1A1A1A"))
-                Text(subtitle)
-                    .font(.system(size: 13))
-                    .foregroundColor(Color(hex: "#AAAAAA"))
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 340)
-                    .lineSpacing(3)
-            }
-
-            Text(t("Bientôt disponible", "Coming soon", "Próximamente", "即将推出", "近日公開", "Скоро будет"))
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(Color(hex: "#888880"))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 5)
-                .background(Color(hex: "#888880").opacity(0.1))
-                .cornerRadius(20)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(hex: "#F7F7F5"))
-    }
-}
-
 // MARK: - Snippets View
 
 private enum SnippetPreviewContext: String, CaseIterable, Identifiable {

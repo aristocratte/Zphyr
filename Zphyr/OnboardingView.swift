@@ -9,7 +9,6 @@ import AVFoundation
 struct OnboardingView: View {
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @State private var currentStep = 0
-    @State private var animateWaveform = false
 
     // Step 2 – permission states (read live from AppState)
     var micGranted: Bool { AppState.shared.micPermission == .granted }

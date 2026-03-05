@@ -24,7 +24,6 @@ enum SupportedUILanguage: String {
         if normalized.hasPrefix("ru") { return .ru }
 
         // Fallback policy requested by product: keep EN/FR when a feature is not localized.
-        if normalized.hasPrefix("fr") { return .fr }
         return .en
     }
 
@@ -40,13 +39,118 @@ enum SupportedUILanguage: String {
     }
 }
 
-enum SnippetTriggerKind {
+enum SnippetTriggerKind: Hashable {
     case linkedIn
     case social
     case gmail
 }
 
 enum L10n {
+    private static let snippetTriggerTable: [SupportedUILanguage: [SnippetTriggerKind: String]] = [
+        .fr: [
+            .linkedIn: """
+ajoute-nous sur linkedin
+suivez-nous sur linkedin
+retrouve-nous sur linkedin
+""",
+            .social: """
+ajoute-nous sur notre réseau social
+ajoute-nous sur nos réseaux sociaux
+suis-nous sur notre réseau social
+""",
+            .gmail: """
+contacte-nous sur notre gmail
+écris-nous sur notre gmail
+envoie-nous un mail sur notre gmail
+"""
+        ],
+        .en: [
+            .linkedIn: """
+add us on linkedin
+follow us on linkedin
+find us on linkedin
+""",
+            .social: """
+add us on social media
+follow us on social media
+find us on social media
+""",
+            .gmail: """
+contact us on gmail
+email us on gmail
+send us an email on gmail
+"""
+        ],
+        .es: [
+            .linkedIn: """
+añádenos en linkedin
+síguenos en linkedin
+encuéntranos en linkedin
+""",
+            .social: """
+añádenos en redes sociales
+síguenos en redes sociales
+encuéntranos en redes sociales
+""",
+            .gmail: """
+contáctanos por gmail
+escríbenos por gmail
+envíanos un correo por gmail
+"""
+        ],
+        .zh: [
+            .linkedIn: """
+在领英上关注我们
+在linkedin上关注我们
+通过领英联系我们
+""",
+            .social: """
+在社交媒体上关注我们
+关注我们的社交账号
+在我们的社交网络找到我们
+""",
+            .gmail: """
+通过gmail联系我们
+给我们的gmail发邮件
+通过gmail给我们写信
+"""
+        ],
+        .ja: [
+            .linkedIn: """
+linkedinで私たちをフォローしてください
+linkedinでつながってください
+linkedinで私たちを見つけてください
+""",
+            .social: """
+SNSで私たちをフォローしてください
+私たちのSNSをチェックしてください
+SNSで私たちを見つけてください
+""",
+            .gmail: """
+gmailでご連絡ください
+gmailでメールしてください
+gmailでお問い合わせください
+"""
+        ],
+        .ru: [
+            .linkedIn: """
+добавьте нас в linkedin
+подпишитесь на нас в linkedin
+найдите нас в linkedin
+""",
+            .social: """
+добавьте нас в соцсети
+подпишитесь на нас в соцсетях
+найдите нас в наших соцсетях
+""",
+            .gmail: """
+свяжитесь с нами через gmail
+напишите нам на gmail
+отправьте нам письмо на gmail
+"""
+        ]
+    ]
+
     @MainActor
     static var uiLanguage: SupportedUILanguage {
         AppState.shared.uiDisplayLanguage
@@ -179,134 +283,11 @@ enum L10n {
     }
 
     static func defaultSnippetTriggers(for kind: SnippetTriggerKind, languageCode: String) -> String {
-        switch SupportedUILanguage.fromWhisperCode(languageCode) {
-        case .fr:
-            switch kind {
-            case .linkedIn:
-                return """
-ajoute-nous sur linkedin
-suivez-nous sur linkedin
-retrouve-nous sur linkedin
-"""
-            case .social:
-                return """
-ajoute-nous sur notre réseau social
-ajoute-nous sur nos réseaux sociaux
-suis-nous sur notre réseau social
-"""
-            case .gmail:
-                return """
-contacte-nous sur notre gmail
-écris-nous sur notre gmail
-envoie-nous un mail sur notre gmail
-"""
-            }
-        case .en:
-            switch kind {
-            case .linkedIn:
-                return """
-add us on linkedin
-follow us on linkedin
-find us on linkedin
-"""
-            case .social:
-                return """
-add us on social media
-follow us on social media
-find us on social media
-"""
-            case .gmail:
-                return """
-contact us on gmail
-email us on gmail
-send us an email on gmail
-"""
-            }
-        case .es:
-            switch kind {
-            case .linkedIn:
-                return """
-añádenos en linkedin
-síguenos en linkedin
-encuéntranos en linkedin
-"""
-            case .social:
-                return """
-añádenos en redes sociales
-síguenos en redes sociales
-encuéntranos en redes sociales
-"""
-            case .gmail:
-                return """
-contáctanos por gmail
-escríbenos por gmail
-envíanos un correo por gmail
-"""
-            }
-        case .zh:
-            switch kind {
-            case .linkedIn:
-                return """
-在领英上关注我们
-在linkedin上关注我们
-通过领英联系我们
-"""
-            case .social:
-                return """
-在社交媒体上关注我们
-关注我们的社交账号
-在我们的社交网络找到我们
-"""
-            case .gmail:
-                return """
-通过gmail联系我们
-给我们的gmail发邮件
-通过gmail给我们写信
-"""
-            }
-        case .ja:
-            switch kind {
-            case .linkedIn:
-                return """
-linkedinで私たちをフォローしてください
-linkedinでつながってください
-linkedinで私たちを見つけてください
-"""
-            case .social:
-                return """
-SNSで私たちをフォローしてください
-私たちのSNSをチェックしてください
-SNSで私たちを見つけてください
-"""
-            case .gmail:
-                return """
-gmailでご連絡ください
-gmailでメールしてください
-gmailでお問い合わせください
-"""
-            }
-        case .ru:
-            switch kind {
-            case .linkedIn:
-                return """
-добавьте нас в linkedin
-подпишитесь на нас в linkedin
-найдите нас в linkedin
-"""
-            case .social:
-                return """
-добавьте нас в соцсети
-подпишитесь на нас в соцсетях
-найдите нас в наших соцсетях
-"""
-            case .gmail:
-                return """
-свяжитесь с нами через gmail
-напишите нам на gmail
-отправьте нам письмо на gmail
-"""
-            }
+        let language = SupportedUILanguage.fromWhisperCode(languageCode)
+        if let localized = snippetTriggerTable[language]?[kind] {
+            return localized
         }
+        return snippetTriggerTable[.en]?[kind] ?? ""
     }
 }
 

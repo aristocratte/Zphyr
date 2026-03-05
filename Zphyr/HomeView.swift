@@ -62,11 +62,15 @@ final class TranscriptionStore {
         load()
     }
 
+    private static let nowFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("d MMM HH:mm")
+        return formatter
+    }()
+
     private static func formattedNow() -> String {
-        let f = DateFormatter()
-        f.locale = AppState.shared.uiLocale
-        f.setLocalizedDateFormatFromTemplate("d MMM HH:mm")
-        return f.string(from: Date())
+        nowFormatter.locale = AppState.shared.uiLocale
+        return nowFormatter.string(from: Date())
     }
 
     private func save() {
