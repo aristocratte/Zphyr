@@ -104,6 +104,22 @@ struct FormattingPipelineTests {
         }
     }
 
+    @Test func integrityVerifierTrustsLocalFormatterOutputWhenWordShapeChanges() {
+        let verifier = TextIntegrityVerifier()
+        let validation = verifier.validate(
+            rawASRText: "use effect",
+            formattedText: "useEffect",
+            mode: .trustFormatterOutput(reason: "custom mlx formatter")
+        )
+
+        switch validation {
+        case .valid:
+            #expect(Bool(true))
+        default:
+            Issue.record("Expected trustFormatterOutput to accept formatter output that changes spacing/casing.")
+        }
+    }
+
     @Test func transcriptionRankingPrefersMoreCompleteCandidate() {
         let candidates = [
             DictationEngine.TranscriptionCandidate(
@@ -126,6 +142,118 @@ struct FormattingPipelineTests {
         let input = "la variable audio URL doit rester locale"
         let output = formatter.formatTranscribedText(input, defaultStyle: .camel)
         #expect(output.contains("audioUrl"))
+    }
+
+    @Test func proFormatterSanitizesRawASRToLowercaseWithoutStandardPunctuation() {
+        let raw = "Attention ici, il manque la gestion d'erreur pour API_KEY et fetchUserData()."
+        let sanitized = ProTextFormatter.sanitizeRawASRText(raw)
+
+        #expect(sanitized == "attention ici il manque la gestion d erreur pour api_key et fetchuserdata")
+    }
+
+    @Test func proFormatterBypassesNormalizedTextForLLMInput() {
+        let context = TextFormatterContext(
+            rawASRText: "Attention ici, il manque la gestion d'erreur pour le fetch point",
+            normalizedText: "Attention ici. Il manque la gestion d'erreur pour le fetch.",
+            languageCode: "fr",
+            defaultCodeStyle: .camel,
+            preferredMode: .advanced
+        )
+
+        let llmInput = ProTextFormatter.llmInput(for: context)
+
+        #expect(llmInput == "attention ici il manque la gestion d erreur pour le fetch point")
+        #expect(llmInput != context.normalizedText)
+    }
+
+    @Test func advancedLLMFormatterUsesExactAlpacaPromptTemplate() {
+        let prompt = AdvancedLLMFormatter.alpacaPrompt(for: "attention ici il manque la gestion d erreur")
+        let expected = """
+        Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
+        Instruction:
+        Format this dictated text.
+
+        Input:
+        attention ici il manque la gestion d erreur
+
+        Response:
+        """
+
+        #expect(prompt == expected)
+    }
+
+    @Test func advancedLLMFormatterDatasetReproHarness() async {
+        let modelInstalled = await MainActor.run { () -> Bool in
+            let installed = AdvancedLLMFormatter.resolveInstallURL() != nil
+            AppState.shared.advancedModeInstalled = installed
+            return installed
+        }
+        guard modelInstalled else { return }
+
+        await AdvancedLLMFormatter.shared.loadIfInstalled()
+
+        let result = await AdvancedLLMFormatter.shared.format(
+            "attention ici virgule il manque la gestion d erreur pour le fetch point il faut ajouter un try catch point",
+            style: .camel,
+            constraints: .strict
+        )
+
+        #expect(result != nil)
+        #expect(!(result?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true))
+    }
+
+    // MARK: - TextIntegrityVerifier recall tests
+
+    @Test func integrityVerifierRejectsDroppedContentEnglish() {
+        let verifier = TextIntegrityVerifier()
+        let result = verifier.validate(
+            rawASRText: "create a function that processes user input and returns a result",
+            formattedText: "create a function",
+            minRecall: 0.8
+        )
+        if case .invalidDroppedContent(let recall, _) = result {
+            #expect(recall < 0.8)
+        } else {
+            Issue.record("Expected invalidDroppedContent but got \(result)")
+        }
+    }
+
+    @Test func integrityVerifierAcceptsHighRecall() {
+        let verifier = TextIntegrityVerifier()
+        let result = verifier.validate(
+            rawASRText: "getUserProfile from the database",
+            formattedText: "getUserProfile from the database",
+            minRecall: 0.9
+        )
+        if case .valid = result {
+            #expect(Bool(true))
+        } else {
+            Issue.record("Expected valid but got \(result)")
+        }
+    }
+
+    @Test func integrityVerifierAllowsArticleInsertion() {
+        let verifier = TextIntegrityVerifier()
+        // "the", "a", "an" are in allowedInsertedTokens
+        let result = verifier.validate(
+            rawASRText: "create user profile page",
+            formattedText: "create a user profile page"
+        )
+        if case .valid = result {
+            #expect(Bool(true))
+        } else {
+            Issue.record("Expected valid but got \(result)")
+        }
+    }
+
+    // MARK: - ASR quality checks (pure logic, no audio hardware needed)
+
+    @Test func completenessScorePrefersPunctuatedText() {
+        // DictationEngine.completenessScore is currently nonisolated static - use it here
+        // TODO: update to ASROrchestrator.completenessScore once extracted
+        let withPunctuation = DictationEngine.completenessScore(for: "Hello world. How are you?")
+        let withoutPunctuation = DictationEngine.completenessScore(for: "hello world how are you")
+        #expect(withPunctuation > withoutPunctuation)
     }
 
     @Test func toneFormattingRegressionCoverage() async {

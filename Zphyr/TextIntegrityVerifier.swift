@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 struct TextIntegrityVerifier {
     enum ValidationResult: Sendable {
@@ -7,17 +8,59 @@ struct TextIntegrityVerifier {
         case invalidDroppedContent(recall: Double, missingTokens: [String])
     }
 
-    private let allowedInsertedTokens: Set<String>
+    enum ValidationMode: Sendable {
+        case strict(minRecall: Double)
+        case trustFormatterOutput(reason: String)
 
-    init(allowedInsertedTokens: Set<String> = TextIntegrityVerifier.defaultAllowedInsertedTokens) {
+        var description: String {
+            switch self {
+            case .strict(let minRecall):
+                return "strict(minRecall=\(minRecall))"
+            case .trustFormatterOutput(let reason):
+                return "trustFormatterOutput(reason=\(reason))"
+            }
+        }
+    }
+
+    private let allowedInsertedTokens: Set<String>
+    private let allowedDroppedTokens: Set<String>
+    private static let log = Logger(subsystem: "com.zphyr.app", category: "TextIntegrityVerifier")
+
+    init(allowedInsertedTokens: Set<String> = TextIntegrityVerifier.defaultAllowedInsertedTokens,
+         allowedDroppedTokens: Set<String> = TextIntegrityVerifier.defaultAllowedDroppedTokens) {
         self.allowedInsertedTokens = allowedInsertedTokens
+        self.allowedDroppedTokens = allowedDroppedTokens
     }
 
     func validate(rawASRText: String, formattedText: String) -> ValidationResult {
-        validate(rawASRText: rawASRText, formattedText: formattedText, minRecall: 0.0)
+        validate(rawASRText: rawASRText, formattedText: formattedText, mode: .strict(minRecall: 0.0))
     }
 
     func validate(rawASRText: String, formattedText: String, minRecall: Double) -> ValidationResult {
+        validate(rawASRText: rawASRText, formattedText: formattedText, mode: .strict(minRecall: minRecall))
+    }
+
+    func validate(rawASRText: String, formattedText: String, mode: ValidationMode) -> ValidationResult {
+        switch mode {
+        case .trustFormatterOutput(let reason):
+            let trimmedOutput = formattedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedOutput.isEmpty else {
+                Self.log.warning(
+                    "[IntegrityVerifier] trusted formatter output was empty reason=\"\(reason, privacy: .public)\" rawLen=\(rawASRText.count, privacy: .public)"
+                )
+                return .invalidIntroducedTokens(["<empty>"])
+            }
+            Self.log.notice(
+                "[IntegrityVerifier] bypassing introduced-token and recall validation mode=\"\(mode.description, privacy: .public)\" rawLen=\(rawASRText.count, privacy: .public) formattedLen=\(formattedText.count, privacy: .public) rawPreview=\"\(Self.debugPreview(rawASRText), privacy: .public)\" formattedPreview=\"\(Self.debugPreview(formattedText), privacy: .public)\""
+            )
+            return .valid
+
+        case .strict(let minRecall):
+            return validateStrict(rawASRText: rawASRText, formattedText: formattedText, minRecall: minRecall)
+        }
+    }
+
+    private func validateStrict(rawASRText: String, formattedText: String, minRecall: Double) -> ValidationResult {
         let sourceTokenList = tokenize(rawASRText)
         let candidateTokenList = tokenize(formattedText)
 
@@ -25,6 +68,9 @@ struct TextIntegrityVerifier {
         let candidateTokens = Set(candidateTokenList)
 
         guard !candidateTokens.isEmpty else {
+            Self.log.warning(
+                "[IntegrityVerifier] strict validation failed with empty candidate rawLen=\(rawASRText.count, privacy: .public)"
+            )
             return .invalidIntroducedTokens(["<empty>"])
         }
 
@@ -33,10 +79,15 @@ struct TextIntegrityVerifier {
             .subtracting(allowedInsertedTokens)
             .sorted()
         if !introduced.isEmpty {
+            Self.log.warning(
+                "[IntegrityVerifier] strict validation rejected introduced tokens count=\(introduced.count, privacy: .public) sample=\"\(introduced.prefix(12).joined(separator: ","), privacy: .public)\" rawPreview=\"\(Self.debugPreview(rawASRText), privacy: .public)\" formattedPreview=\"\(Self.debugPreview(formattedText), privacy: .public)\""
+            )
             return .invalidIntroducedTokens(introduced)
         }
 
-        if sourceTokenList.isEmpty {
+        let filteredSourceTokenList = sourceTokenList.filter { !allowedDroppedTokens.contains($0) }
+
+        if filteredSourceTokenList.isEmpty {
             return .valid
         }
 
@@ -45,19 +96,22 @@ struct TextIntegrityVerifier {
             return .valid
         }
 
-        let sourceCounts = tokenCounts(sourceTokenList)
+        let sourceCounts = tokenCounts(filteredSourceTokenList)
         let candidateCounts = tokenCounts(candidateTokenList)
 
         let matchedCount = sourceCounts.reduce(0) { partial, entry in
             let candidateCount = candidateCounts[entry.key, default: 0]
             return partial + min(entry.value, candidateCount)
         }
-        let recall = Double(matchedCount) / Double(sourceTokenList.count)
+        let recall = Double(matchedCount) / Double(filteredSourceTokenList.count)
         guard recall >= clampedMinRecall else {
             let missingTokens = sourceCounts.compactMap { token, sourceCount -> String? in
                 let candidateCount = candidateCounts[token, default: 0]
                 return candidateCount < sourceCount ? token : nil
             }.sorted()
+            Self.log.warning(
+                "[IntegrityVerifier] strict validation rejected dropped content recall=\(recall, privacy: .public) threshold=\(clampedMinRecall, privacy: .public) missing=\"\(missingTokens.prefix(12).joined(separator: ","), privacy: .public)\" rawPreview=\"\(Self.debugPreview(rawASRText), privacy: .public)\" formattedPreview=\"\(Self.debugPreview(formattedText), privacy: .public)\""
+            )
             return .invalidDroppedContent(recall: recall, missingTokens: missingTokens)
         }
 
@@ -88,6 +142,22 @@ struct TextIntegrityVerifier {
         }
         return counts
     }
+
+    private static func debugPreview(_ text: String, limit: Int = 280) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        guard normalized.count > limit else { return normalized }
+        let remaining = normalized.count - limit
+        return "\(normalized.prefix(limit))…(+\(remaining) chars)"
+    }
+
+    static let defaultAllowedDroppedTokens: Set<String> = [
+        "virgule", "point", "ligne", "paragraphe", "deux", "points", "interrogation",
+        "exclamation", "tiret", "parenthèse", "guillemet", "slash", "backslash",
+        "underscore", "arobase", "dollar", "pourcent", "asterisque", "égal", "egale",
+        "plus", "moins", "ouvre", "ferme", "accolade", "crochet", "euh", "hum", "bah"
+    ]
 
     static let defaultAllowedInsertedTokens: Set<String> = [
         "a", "an", "the", "and", "or", "to", "for", "in", "on", "at", "of", "with", "from", "by",

@@ -33,6 +33,7 @@ struct LLMFormattingConstraints: Sendable {
 }
 
 #if canImport(MLXLLM)
+import MLX
 import MLXLLM
 import MLXLMCommon
 
@@ -40,6 +41,11 @@ import MLXLMCommon
 @Observable
 @MainActor
 final class AdvancedLLMFormatter {
+
+    private enum PromptPreparationPath: String {
+        case rawAlpaca = "alpaca-raw"
+        case chatTemplate = "chat-template"
+    }
 
     static let shared     = AdvancedLLMFormatter()
     static let modelId    = "arhesstide/zphyr_qwen_v1-MLX-4bit"
@@ -298,6 +304,7 @@ final class AdvancedLLMFormatter {
             "[AdvancedLLM] generating… input=\(inputWords, privacy: .public) words style=\(String(describing: style), privacy: .public) preview=\"\(Self.debugPreview(text), privacy: .public)\""
         )
         let startTime = CFAbsoluteTimeGetCurrent()
+        var promptMode = "unprepared"
 
         // Default style hint appended at end so the LLM has a fallback when
         // context doesn't specify a language/convention.
@@ -335,13 +342,24 @@ final class AdvancedLLMFormatter {
             Output: "Je vais créer la variable max_retries_allowed en Python."
             """
 
-        let userInput = UserInput(chat: [
-            .system(systemPrompt),
-            .user(text)
-        ])
-
         do {
-            let lmInput = try await container.prepare(input: userInput)
+            let prepared = try await prepareInput(
+                for: text,
+                systemPrompt: systemPrompt,
+                container: container
+            )
+            promptMode = prepared.path.rawValue
+            let lmInput = prepared.input
+#if DEBUG
+            let tokenShape = lmInput.text.tokens.shape
+            let tokenCount = tokenShape.last ?? 0
+            log.notice(
+                "[AdvancedLLM] prepared input mode=\(prepared.path.rawValue, privacy: .public) tokenShape=\(String(describing: tokenShape), privacy: .public) tokenCount=\(tokenCount, privacy: .public) hasMask=\(lmInput.text.mask != nil, privacy: .public)"
+            )
+#endif
+            log.notice(
+                "[AdvancedLLM] submit generation mode=\(promptMode, privacy: .public) maxTokens=\(constraints.maxTokens, privacy: .public) temperature=\(constraints.temperature, privacy: .public)"
+            )
             let stream  = try await container.generate(
                 input: lmInput,
                 parameters: GenerateParameters(
@@ -357,10 +375,10 @@ final class AdvancedLLMFormatter {
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
             let outputWords = result.split(whereSeparator: \.isWhitespace).count
             log.notice(
-                "[AdvancedLLM] generated in \(String(format: "%.2f", elapsed), privacy: .public)s output=\(outputWords, privacy: .public) words preview=\"\(Self.debugPreview(result), privacy: .public)\""
+                "[AdvancedLLM] generated mode=\(promptMode, privacy: .public) in \(String(format: "%.2f", elapsed), privacy: .public)s output=\(outputWords, privacy: .public) words preview=\"\(Self.debugPreview(result), privacy: .public)\""
             )
             guard !result.isEmpty else {
-                log.notice("[AdvancedLLM] empty result after trimming")
+                log.notice("[AdvancedLLM] empty result after trimming mode=\(promptMode, privacy: .public)")
                 return nil
             }
 
@@ -369,7 +387,7 @@ final class AdvancedLLMFormatter {
             // likely making things up. Reject and let the regex fallback run.
             let tolerance   = max(4, inputWords / 5)   // allow up to +20 % or +4 words
             if outputWords > inputWords + tolerance {
-                log.warning("[AdvancedLLM] hallucination guard: word count (in=\(inputWords) out=\(outputWords))")
+                log.warning("[AdvancedLLM] hallucination guard mode=\(promptMode, privacy: .public): word count (in=\(inputWords) out=\(outputWords))")
                 return nil
             }
 
@@ -377,14 +395,14 @@ final class AdvancedLLMFormatter {
             // Detect characters from scripts absent in the input (e.g. Thai,
             // CJK, Cyrillic injected when input is Latin).
             if Self.containsForeignScripts(input: text, output: result) {
-                log.warning("[AdvancedLLM] hallucination guard: foreign scripts detected")
+                log.warning("[AdvancedLLM] hallucination guard mode=\(promptMode, privacy: .public): foreign scripts detected")
                 return nil
             }
 
             // ── Repetition guard ─────────────────────────────────────────────
             // Detect degenerate repeated token sequences (e.g. "à¹ĭà¹ĭà¹ĭà¹ĭ")
             if Self.containsExcessiveRepetition(result) {
-                log.warning("[AdvancedLLM] hallucination guard: excessive repetition")
+                log.warning("[AdvancedLLM] hallucination guard mode=\(promptMode, privacy: .public): excessive repetition")
                 return nil
             }
 
@@ -394,13 +412,13 @@ final class AdvancedLLMFormatter {
                 .map { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).lowercased() }
                 .filter { candidateTokens.contains($0) && !sourceTokens.contains($0) }
             if !forbiddenInsertions.isEmpty {
-                log.warning("[AdvancedLLM] forbidden insertion guard triggered: \(forbiddenInsertions.joined(separator: ","), privacy: .public)")
+                log.warning("[AdvancedLLM] forbidden insertion guard mode=\(promptMode, privacy: .public) triggered: \(forbiddenInsertions.joined(separator: ","), privacy: .public)")
                 return nil
             }
 
             return result
         } catch {
-            log.error("[AdvancedLLM] generate failed: \(error.localizedDescription)")
+            log.error("[AdvancedLLM] generate failed mode=\(promptMode, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
@@ -410,6 +428,56 @@ final class AdvancedLLMFormatter {
     private static func formatSpeed(_ bps: Double) -> String {
         if bps >= 1_048_576 { return String(format: "%.1f MB/s", bps / 1_048_576) }
         return String(format: "%.0f KB/s", bps / 1_024)
+    }
+
+    private func prepareInput(
+        for text: String,
+        systemPrompt: String,
+        container: ModelContainer
+    ) async throws -> (input: LMInput, path: PromptPreparationPath) {
+        if await shouldUseRawAlpacaPrompt(container: container) {
+            let prompt = Self.alpacaPrompt(for: text)
+#if DEBUG
+            log.notice(
+                "[AdvancedLLM] prepare input mode=\(PromptPreparationPath.rawAlpaca.rawValue, privacy: .public) promptChars=\(prompt.count, privacy: .public) userChars=\(text.count, privacy: .public) promptPreview=\"\(Self.debugPreview(prompt), privacy: .public)\""
+            )
+#endif
+            let tokens = await container.encode(prompt)
+            return (LMInput(tokens: MLXArray(tokens)), .rawAlpaca)
+        }
+
+        let userInput = UserInput(chat: [
+            .system(systemPrompt),
+            .user(text)
+        ])
+#if DEBUG
+        log.notice(
+            "[AdvancedLLM] prepare input mode=\(PromptPreparationPath.chatTemplate.rawValue, privacy: .public) messages=2 systemChars=\(systemPrompt.count, privacy: .public) userChars=\(text.count, privacy: .public) systemPreview=\"\(Self.debugPreview(systemPrompt), privacy: .public)\" userPreview=\"\(Self.debugPreview(text), privacy: .public)\""
+        )
+#endif
+        let input = try await container.prepare(input: userInput)
+        return (input, .chatTemplate)
+    }
+
+    private func shouldUseRawAlpacaPrompt(container: ModelContainer) async -> Bool {
+        let configuration = await container.configuration
+        let normalizedName = configuration.name.lowercased()
+        return normalizedName == Self.modelId.lowercased()
+            || normalizedName.contains("zphyr_qwen_v1-mlx-4bit")
+    }
+
+    nonisolated static func alpacaPrompt(for text: String) -> String {
+        [
+            "Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.",
+            "Instruction:",
+            "Format this dictated text.",
+            "",
+            "Input:",
+            text,
+            "",
+            "Response:",
+            ""
+        ].joined(separator: "\n")
     }
 
     private func tokenSet(_ text: String) -> Set<String> {
@@ -488,6 +556,19 @@ final class AdvancedLLMFormatter {
     static let shared          = AdvancedLLMFormatter()
     static let modelId         = "arhesstide/zphyr_qwen_v1-MLX-4bit"
     static func resolveInstallURL() -> URL? { nil }
+    nonisolated static func alpacaPrompt(for text: String) -> String {
+        [
+            "Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.",
+            "Instruction:",
+            "Format this dictated text.",
+            "",
+            "Input:",
+            text,
+            "",
+            "Response:",
+            ""
+        ].joined(separator: "\n")
+    }
     var downloadProgress: Double = 0
     var isInstalling: Bool       = false
     var installError: String?    = "⚠️ Ajoutez mlx-swift-lm dans Xcode (Branch: main, produits: MLXLLM + MLXLMCommon)."

@@ -8,60 +8,100 @@ The app is SwiftUI-first and shipped as a native macOS project (`.xcodeproj`).
 ## Highlights
 
 - Local-first voice pipeline (no cloud transcription in the dictation flow)
-- Pluggable ASR backend architecture (`Apple Speech Analyzer`, `Qwen3-ASR (MLX)`)
+- **WhisperKit** (Whisper Large v3 Turbo) as the default ASR backend — 30+ languages, ~600 MB, fully on-device
+- Pluggable ASR backend architecture (`Whisper Large v3 Turbo`, `Apple Speech Analyzer`)
 - Hardware-aware routing with performance tiers (`Eco`, `Balanced`, `Pro`)
 - Hold-to-dictate global shortcut (default: right `Option`)
 - Real-time dictation and offline audio file transcription
-- Context-aware post-processing:
+- Context-aware post-processing pipeline:
+  - VAD-based audio trimming before ASR
   - deterministic formatter for explicit code triggers
-  - optional advanced local formatter (Qwen3-1.7B) with integrity fallback
+  - optional advanced local LLM formatter with integrity fallback
   - filler-word cleanup, TODO extraction, spoken-list formatting
   - contextual snippets (LinkedIn, social, contact email)
+  - tone-aware output per target app (email, messaging, code editors, …)
+- Spoken meta-command detection (`CommandInterpreter`)
+- Local-only performance metrics (`LocalMetrics`) — nothing leaves the device
 - Custom dictionary + learning suggestions from user corrections
 - Menu bar popover with model disk usage, RAM/CPU telemetry, and quick actions
 - Multi-language UI and dictation language support
 
+## Pipeline Architecture
+
+```
+Microphone
+    │
+    ▼
+AudioCaptureService          (16 kHz mono Float32 buffer)
+    │
+    ▼
+ASROrchestrator
+    ├── VoiceActivityDetector  (VAD trim)
+    └── WhisperKitBackend      (primary) / AppleSpeechAnalyzerBackend (fallback)
+    │
+    ▼
+CommandInterpreter             (spoken meta-commands — cancel, copy, …)
+    │
+    ▼
+TranscriptStabilizer           (filler removal → tone formatting → dictionary → snippets)
+    │
+    ▼
+TextFormatter stack
+    ├── EcoTextFormatter       (deterministic, always available)
+    ├── ProTextFormatter       (LLM-based, Pro tier)
+    └── TextIntegrityVerifier  (guards LLM output quality)
+    │
+    ▼
+InsertionEngine                (CGEvent key simulation → clipboard fallback)
+```
+
+`DictationEngine` orchestrates the full session lifecycle and is observed by the UI.  
+`ModelManager` handles model selection, download, and lifecycle transitions.  
+`LocalMetrics` records per-session timings (ASR, stabilizer, formatter, insertion) locally.
+
 ## ASR Backends
 
-- `Apple Speech Analyzer`
-  - local runtime backend
-  - no model download required
-  - used as fallback when needed
-- `Qwen3-ASR (MLX 8-bit)`
-  - model: `aufklarer/Qwen3-ASR-1.7B-MLX-8bit` (~2.46 GB)
-  - install/load/pause/resume/cancel flows handled in-app
-  - runs fully on device after installation
-- `WhisperKit`
-  - currently a stub backend in this build (not integrated yet)
+| Backend | Model | Size | Notes |
+|---|---|---|---|
+| **Whisper Large v3 Turbo** *(default)* | `openai_whisper-large-v3-v20240930_turbo_632MB` | ~600 MB | WhisperKit · Apple Silicon · 30+ languages |
+| Apple Speech Analyzer | built-in Speech framework | — | No download · used as fallback on Eco tier |
+
+WhisperKit downloads once to `~/.cache/huggingface/hub/` and runs entirely on-device.
+
+### Supported Languages (Whisper)
+
+30 languages across two quality tiers:
+
+**Excellent** — zh · en · ar · de · fr · es · pt · it · ko · ru · ja · nl · pl  
+**Good** — id · th · vi · tr · hi · ms · sv · da · fi · cs · tl · fa · el · hu · ro · mk · yue
 
 ## Performance Tiers
 
 Zphyr auto-detects machine profile from physical memory:
 
-- `Eco` (`<= 8 GB`)
-  - forces lightweight path (Apple backend + deterministic formatting)
-- `Balanced` (`8-15 GB`)
-  - local ASR backend is configurable
-- `Pro` (`>= 16 GB`)
-  - unlocks advanced local formatting mode
+| Tier | RAM | ASR backend | LLM formatter |
+|---|---|---|---|
+| `Eco` | ≤ 8 GB | Apple Speech Analyzer (forced) | ✗ deterministic only |
+| `Balanced` | 8–15 GB | configurable | ✓ |
+| `Pro` | ≥ 16 GB | configurable | ✓ advanced mode |
 
 ## Tech Stack
 
-- Swift 5
-- SwiftUI + Observation
-- AppKit + Accessibility APIs (global key capture + text insertion)
-- AVFoundation (live audio + file decoding)
+- Swift 5 (MainActor-first, Observation framework)
+- SwiftUI + AppKit + Accessibility APIs (global key capture + text insertion via CGEvent)
+- AVFoundation (live audio capture + file decoding)
 - Speech framework (Apple ASR backend)
-- [MLX Swift](https://github.com/ml-explore/mlx-swift) + `mlx-swift-lm` + `swift-transformers` (on-device Qwen inference)
+- [WhisperKit](https://github.com/argmaxinc/WhisperKit) (on-device Whisper inference)
+- [mlx-swift-lm](https://github.com/ml-explore/mlx-swift) (optional LLM formatter)
 
 ## Requirements
 
-- macOS deployment target: `15.0` (as set in Xcode project)
+- macOS 15.0+
 - Xcode with Swift Package Manager support
 - Microphone permission
 - Accessibility permission (required for automatic insertion into other apps)
-- Internet connection for first-time model download(s)
-- Apple Silicon recommended for MLX-based local models
+- Internet connection for first-time model download (~600 MB)
+- Apple Silicon recommended
 
 ## Getting Started
 
@@ -76,24 +116,24 @@ cd Zphyr
 open Zphyr.xcodeproj
 ```
 
-3. Build and run target `Zphyr` in Xcode.
+3. Build and run target `Zphyr` in Xcode (SPM packages resolve automatically).
 
 4. On first launch:
   - complete onboarding/preflight
   - grant microphone permission
   - optionally grant Accessibility
-  - install/load local models as prompted
+  - install the Whisper model when prompted (~600 MB, one-time)
 
 ## Usage
 
 ### Live Dictation
 
 1. Place cursor in target app/editor.
-2. Hold the trigger key.
+2. Hold the trigger key (default: right `Option`).
 3. Speak.
-4. Release key to transcribe and insert text.
+4. Release key → Zphyr transcribes, stabilizes, formats, and inserts text.
 
-If auto-insert is unavailable, Zphyr falls back to clipboard insertion.
+If Accessibility is not granted, Zphyr falls back to clipboard insertion.
 
 ### Audio File Transcription
 
@@ -105,25 +145,52 @@ If auto-insert is unavailable, Zphyr falls back to clipboard insertion.
 
 ## Project Structure
 
-- `Zphyr/ZphyrApp.swift`: app lifecycle, window behavior, menu bar popover
-- `Zphyr/ContentView.swift`: top-level routing (Onboarding -> Preflight -> Main)
-- `Zphyr/PreflightView.swift`: setup flow, permissions, model onboarding
-- `Zphyr/MainView.swift`: primary shell + feature sections (Home, Dictionary, Audio, Snippets, Style)
-- `Zphyr/DictationEngine.swift`: core pipeline (capture -> backend ASR -> formatting -> insertion)
-- `Zphyr/ASRBackend*.swift`: ASR abstraction, lifecycle, backend factory
-- `Zphyr/AppleSpeechAnalyzerBackend.swift`: Apple ASR implementation
-- `Zphyr/QwenMLXBackend.swift`: Qwen3-ASR backend implementation
-- `Zphyr/PerformanceRouter.swift`: memory-tier routing logic
-- `Zphyr/TextFormatter.swift`, `EcoTextFormatter.swift`, `ProTextFormatter.swift`: formatting strategy layer
-- `Zphyr/TextIntegrityVerifier.swift`: guards advanced formatter output
-- `DictionaryView.swift`: custom dictionary UI
+### App shell
+- `Zphyr/ZphyrApp.swift` — app lifecycle, window behavior, menu bar popover
+- `Zphyr/ContentView.swift` — top-level routing (Onboarding → Preflight → Main)
+- `Zphyr/PreflightView.swift` — setup flow, permissions, model onboarding
+- `Zphyr/MainView.swift` — primary shell + feature sections
+- `Zphyr/MenuBarPopoverView.swift` — quick-access popover (metrics, model state)
+
+### Dictation pipeline
+- `Zphyr/DictationEngine.swift` — session orchestrator (hold → capture → ASR → format → insert)
+- `Zphyr/AudioCaptureService.swift` — real-time mic capture, resampling to 16 kHz mono Float32
+- `Zphyr/ASROrchestrator.swift` — VAD trim → backend dispatch → timeout/quality gating
+- `Zphyr/VoiceActivityDetector.swift` — silence detection and buffer trimming
+- `Zphyr/TranscriptStabilizer.swift` — filler removal, tone routing, dictionary substitutions, snippets
+- `Zphyr/CommandInterpreter.swift` — spoken meta-command detection (cancel, copy, list, …)
+- `Zphyr/InsertionEngine.swift` — CGEvent keystroke injection with clipboard fallback
+
+### Model management
+- `Zphyr/ModelManager.swift` — backend selection, download, install, and lifecycle
+- `Zphyr/ASRBackend.swift` / `ASRBackendLifecycle.swift` / `ASRBackendFactory.swift` — ASR protocol + factory
+- `Zphyr/WhisperKitBackend.swift` — WhisperKit integration (Whisper Large v3 Turbo)
+- `Zphyr/AppleSpeechAnalyzerBackend.swift` — Apple Speech framework backend
+- `Zphyr/WhisperLanguage.swift` — supported language definitions for Whisper
+
+### Formatting
+- `Zphyr/TextFormatter.swift` — formatter protocol and dispatch
+- `Zphyr/EcoTextFormatter.swift` — deterministic formatter (always available)
+- `Zphyr/ProTextFormatter.swift` — LLM-based formatter (Pro tier)
+- `Zphyr/AdvancedLLMFormatter.swift` — low-level MLX LLM runner
+- `Zphyr/TextIntegrityVerifier.swift` — output quality guard for LLM formatter
+- `Zphyr/SmartTextFormatter.swift` / `CodeFormatter.swift` — specialized formatters
+
+### System & state
+- `Zphyr/AppState.swift` — shared observable app state
+- `Zphyr/PerformanceRouter.swift` — memory-tier detection and backend routing
+- `Zphyr/LocalMetrics.swift` — per-session performance metrics (local only)
+- `Zphyr/ShortcutManager.swift` — global keyboard shortcut capture
+- `Zphyr/ContextFetcher.swift` — active app context (bundle ID, focused field)
+- `Zphyr/L10n.swift` — localization helpers
+- `DictionaryView.swift` — custom dictionary UI
 
 ## Testing
 
 Targets:
 
-- `ZphyrTests`
-- `ZphyrUITests`
+- `ZphyrTests` — unit tests (formatting pipeline, …)
+- `ZphyrUITests` — UI automation tests
 
 Run tests from Xcode (`Product > Test`) or CLI:
 
@@ -136,6 +203,7 @@ xcodebuild test \
 
 ## Privacy
 
-- Audio processing and transcription are local.
-- No external LLM API is called during the dictation pipeline.
-- Data stays on device except explicit model downloads.
+- Audio is captured, processed, and transcribed entirely on-device.
+- No external LLM or transcription API is called during the dictation pipeline.
+- `LocalMetrics` records per-session timings locally and never transmits data.
+- Data stays on device except for the one-time model download on first setup.

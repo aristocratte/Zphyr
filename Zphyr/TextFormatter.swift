@@ -15,6 +15,7 @@ struct TextFormatterResult: Sendable {
     let llmInputLength: Int?
     let llmOutputLength: Int?
     let llmRecall: Double?
+    let llmValidationDecision: String?
 
     static func deterministic(_ text: String) -> TextFormatterResult {
         TextFormatterResult(
@@ -23,7 +24,8 @@ struct TextFormatterResult: Sendable {
             rejectedIntroducedTokens: [],
             llmInputLength: nil,
             llmOutputLength: nil,
-            llmRecall: nil
+            llmRecall: nil,
+            llmValidationDecision: nil
         )
     }
 }

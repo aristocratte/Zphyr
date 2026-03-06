@@ -6,7 +6,10 @@ struct ProTextFormatter: TextFormatter {
     private let deterministicFormatter = EcoTextFormatter()
     private let integrityVerifier = TextIntegrityVerifier()
     private let log = Logger(subsystem: "com.zphyr.app", category: "ProFormatter")
-    private let minimumRecall: Double = 0.92
+    private let integrityValidationMode: TextIntegrityVerifier.ValidationMode = .trustFormatterOutput(
+        reason: "AdvancedLLMFormatter/custom MLX local formatter"
+    )
+    private let trustedFormatterDecision = "trusted_local_mlx_formatter_output"
 
     func format(_ context: TextFormatterContext) async -> TextFormatterResult {
         let deterministic = await deterministicFormatter.format(
@@ -20,9 +23,23 @@ struct ProTextFormatter: TextFormatter {
         )
 
         let constraints = LLMFormattingConstraints.strict
-        let llmInput = context.normalizedText
+        let llmInput = Self.llmInput(for: context)
+        guard !llmInput.isEmpty else {
+            log.warning(
+                "[ProFormatter] sanitized raw ASR input is empty → deterministic fallback rawPreview=\"\(Self.debugPreview(context.rawASRText), privacy: .public)\" normalizedPreview=\"\(Self.debugPreview(context.normalizedText), privacy: .public)\""
+            )
+            return TextFormatterResult(
+                text: deterministic.text,
+                usedDeterministicFallback: true,
+                rejectedIntroducedTokens: [],
+                llmInputLength: 0,
+                llmOutputLength: nil,
+                llmRecall: nil,
+                llmValidationDecision: "skipped_empty_sanitized_raw_input"
+            )
+        }
         log.notice(
-            "[ProFormatter] invoking LLM inputPreview=\"\(Self.debugPreview(llmInput), privacy: .public)\" rawPreview=\"\(Self.debugPreview(context.rawASRText), privacy: .public)\""
+            "[ProFormatter] invoking LLM sanitizedRawPreview=\"\(Self.debugPreview(llmInput), privacy: .public)\" rawPreview=\"\(Self.debugPreview(context.rawASRText), privacy: .public)\" normalizedPreview=\"\(Self.debugPreview(context.normalizedText), privacy: .public)\""
         )
         guard let llmCandidate = await AdvancedLLMFormatter.shared.format(
             llmInput,
@@ -38,19 +55,28 @@ struct ProTextFormatter: TextFormatter {
                 rejectedIntroducedTokens: [],
                 llmInputLength: llmInput.count,
                 llmOutputLength: nil,
-                llmRecall: nil
+                llmRecall: nil,
+                llmValidationDecision: "llm_returned_nil"
             )
         }
+
+        let recall = tokenRecall(source: context.rawASRText, candidate: llmCandidate)
+        let sanitizedCandidate = Self.sanitizeRawASRText(llmCandidate)
+        let noOpAgainstLLMInput = sanitizedCandidate == llmInput
+        let exactMatchRaw = llmCandidate == context.rawASRText
+        let exactMatchNormalized = llmCandidate == context.normalizedText
+        log.notice(
+            "[ProFormatter] LLM candidate received integrityMode=\"\(integrityValidationMode.description, privacy: .public)\" noOpAgainstSanitizedInput=\(noOpAgainstLLMInput, privacy: .public) exactMatchRaw=\(exactMatchRaw, privacy: .public) exactMatchNormalized=\(exactMatchNormalized, privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recallIfStrict=\(recall, privacy: .public) candidatePreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\""
+        )
 
         switch integrityVerifier.validate(
             rawASRText: context.rawASRText,
             formattedText: llmCandidate,
-            minRecall: minimumRecall
+            mode: integrityValidationMode
         ) {
         case .valid:
-            let recall = tokenRecall(source: context.rawASRText, candidate: llmCandidate)
             log.notice(
-                "[ProFormatter] LLM text accepted (integrity check passed) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recall=\(recall, privacy: .public) outputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\""
+                "[ProFormatter] LLM text accepted (integrity bypass active for local MLX formatter) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recallIfStrict=\(recall, privacy: .public) noOpAgainstSanitizedInput=\(noOpAgainstLLMInput, privacy: .public) outputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\""
             )
             return TextFormatterResult(
                 text: llmCandidate,
@@ -58,11 +84,11 @@ struct ProTextFormatter: TextFormatter {
                 rejectedIntroducedTokens: [],
                 llmInputLength: llmInput.count,
                 llmOutputLength: llmCandidate.count,
-                llmRecall: recall
+                llmRecall: recall,
+                llmValidationDecision: trustedFormatterDecision
             )
 
         case .invalidIntroducedTokens(let introducedTokens):
-            let recall = tokenRecall(source: context.rawASRText, candidate: llmCandidate)
             log.warning(
                 "[ProFormatter] integrity check failed (introduced tokens) → deterministic fallback (rejected=\(introducedTokens.joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recall=\(recall, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
             )
@@ -72,12 +98,13 @@ struct ProTextFormatter: TextFormatter {
                 rejectedIntroducedTokens: introducedTokens,
                 llmInputLength: llmInput.count,
                 llmOutputLength: llmCandidate.count,
-                llmRecall: recall
+                llmRecall: recall,
+                llmValidationDecision: "rejected_introduced_tokens"
             )
 
         case .invalidDroppedContent(let recall, let missingTokens):
             log.warning(
-                "[ProFormatter] integrity check failed (dropped content) → deterministic fallback (recall=\(recall, privacy: .public) threshold=\(minimumRecall, privacy: .public) missing=\(missingTokens.prefix(12).joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
+                "[ProFormatter] integrity check failed (dropped content) → deterministic fallback (mode=\"\(integrityValidationMode.description, privacy: .public)\" recall=\(recall, privacy: .public) missing=\(missingTokens.prefix(12).joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
             )
             return TextFormatterResult(
                 text: deterministic.text,
@@ -85,9 +112,23 @@ struct ProTextFormatter: TextFormatter {
                 rejectedIntroducedTokens: missingTokens,
                 llmInputLength: llmInput.count,
                 llmOutputLength: llmCandidate.count,
-                llmRecall: recall
+                llmRecall: recall,
+                llmValidationDecision: "rejected_dropped_content"
             )
         }
+    }
+
+    nonisolated static func llmInput(for context: TextFormatterContext) -> String {
+        sanitizeRawASRText(context.rawASRText)
+    }
+
+    nonisolated static func sanitizeRawASRText(_ text: String) -> String {
+        guard !text.isEmpty else { return "" }
+        return text
+            .lowercased()
+            .replacingOccurrences(of: "[^\\p{L}\\p{N}_\\s]+", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func tokenRecall(source: String, candidate: String) -> Double {

@@ -214,7 +214,7 @@ final class AppState {
     var isDownloadPaused: Bool = false
     var preferredASRBackend: ASRBackendKind = {
         let raw = UserDefaults.standard.string(forKey: AppState.preferredASRBackendKey)
-        return ASRBackendKind(rawValue: raw ?? "") ?? .appleSpeechAnalyzer
+        return ASRBackendKind(rawValue: raw ?? "") ?? .whisperKit
     }() {
         didSet {
             UserDefaults.standard.set(preferredASRBackend.rawValue, forKey: AppState.preferredASRBackendKey)

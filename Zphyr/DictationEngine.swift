@@ -2,8 +2,19 @@
 //  DictationEngine.swift
 //  Zphyr
 //
-//  Audio capture → ASR backend transcription → post-processing → injection.
+//  Thin orchestrator: coordinates AudioCaptureService → ASROrchestrator →
+//  TranscriptStabilizer → FormatterOrchestrator → InsertionEngine.
 //  No external LLM. All processing is 100% local.
+//
+//  Extracted modules (Phase 1 refactor):
+//    AudioCaptureService.swift  — AVAudioEngine, resampling, HUD
+//    ASROrchestrator.swift      — VAD, multi-backend, quality gating
+//    TranscriptStabilizer.swift — filler removal, list detection, tone
+//    InsertionEngine.swift      — CGEvent injection, clipboard fallback
+//    ModelManager.swift         — model download/load lifecycle
+//    WhisperLanguage.swift      — language data model
+//    LocalMetrics.swift         — privacy-safe timing metrics
+//    CommandInterpreter.swift   — spoken command stub
 //
 
 import Foundation
@@ -12,132 +23,8 @@ import AppKit
 import Observation
 import os
 
-private final class AudioSampleBuffer: @unchecked Sendable {
-    private let lock = NSLock()
-    private var samples: [Float] = []
-
-    enum AppendStatus {
-        case appended
-        case truncated
-        case full
-    }
-
-    func reset() {
-        lock.lock()
-        samples.removeAll(keepingCapacity: true)
-        lock.unlock()
-    }
-
-    func reserveCapacity(_ capacity: Int) {
-        guard capacity > 0 else { return }
-        lock.lock()
-        samples.reserveCapacity(capacity)
-        lock.unlock()
-    }
-
-    func append(_ chunk: [Float], maxSamples: Int) -> AppendStatus {
-        chunk.withUnsafeBufferPointer { pointer in
-            append(pointer, maxSamples: maxSamples)
-        }
-    }
-
-    func append(_ chunk: UnsafeBufferPointer<Float>, maxSamples: Int) -> AppendStatus {
-        guard !chunk.isEmpty else { return .appended }
-        lock.lock()
-        defer { lock.unlock() }
-        let remaining = max(0, maxSamples - samples.count)
-        guard remaining > 0 else { return .full }
-        if chunk.count <= remaining {
-            samples.append(contentsOf: chunk)
-            return .appended
-        }
-        let prefix = chunk.prefix(remaining)
-        samples.append(contentsOf: prefix)
-        return .truncated
-    }
-
-    func snapshot() -> [Float] {
-        lock.lock()
-        defer { lock.unlock() }
-        return samples
-    }
-
-    func count() -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return samples.count
-    }
-}
-
-private final class LockedFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Bool
-
-    init(_ initialValue: Bool = false) {
-        value = initialValue
-    }
-
-    func reset(to newValue: Bool = false) {
-        lock.lock()
-        value = newValue
-        lock.unlock()
-    }
-
-    func setIfNeeded() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !value else { return false }
-        value = true
-        return true
-    }
-}
-
-// MARK: - Supported Languages
-struct WhisperLanguage: Identifiable, Hashable {
-    // Kept as `WhisperLanguage` for API compatibility across the app.
-    let id: String        // BCP-47 dictation language code
-    let name: String
-    let flag: String
-
-    enum Tier { case excellent, good }
-    let tier: Tier
-}
-
-extension WhisperLanguage {
-    static let all: [WhisperLanguage] = [
-        // Whisper Large v3 Turbo supported languages
-        WhisperLanguage(id: "zh", name: "中文（普通话）",       flag: "🇨🇳", tier: .excellent),
-        WhisperLanguage(id: "en", name: "English",           flag: "🇺🇸", tier: .excellent),
-        WhisperLanguage(id: "ar", name: "العربية",            flag: "🇸🇦", tier: .excellent),
-        WhisperLanguage(id: "de", name: "Deutsch",           flag: "🇩🇪", tier: .excellent),
-        WhisperLanguage(id: "fr", name: "Français",          flag: "🇫🇷", tier: .excellent),
-        WhisperLanguage(id: "es", name: "Español",           flag: "🇪🇸", tier: .excellent),
-        WhisperLanguage(id: "pt", name: "Português",         flag: "🇵🇹", tier: .excellent),
-        WhisperLanguage(id: "id", name: "Bahasa Indonesia",  flag: "🇮🇩", tier: .good),
-        WhisperLanguage(id: "it", name: "Italiano",          flag: "🇮🇹", tier: .excellent),
-        WhisperLanguage(id: "ko", name: "한국어",              flag: "🇰🇷", tier: .excellent),
-        WhisperLanguage(id: "ru", name: "Русский",           flag: "🇷🇺", tier: .excellent),
-        WhisperLanguage(id: "th", name: "ภาษาไทย",           flag: "🇹🇭", tier: .good),
-        WhisperLanguage(id: "vi", name: "Tiếng Việt",        flag: "🇻🇳", tier: .good),
-        WhisperLanguage(id: "ja", name: "日本語",              flag: "🇯🇵", tier: .excellent),
-        WhisperLanguage(id: "tr", name: "Türkçe",            flag: "🇹🇷", tier: .good),
-        WhisperLanguage(id: "hi", name: "हिन्दी",              flag: "🇮🇳", tier: .good),
-        WhisperLanguage(id: "ms", name: "Bahasa Melayu",     flag: "🇲🇾", tier: .good),
-        WhisperLanguage(id: "nl", name: "Nederlands",        flag: "🇳🇱", tier: .excellent),
-        WhisperLanguage(id: "sv", name: "Svenska",           flag: "🇸🇪", tier: .good),
-        WhisperLanguage(id: "da", name: "Dansk",             flag: "🇩🇰", tier: .good),
-        WhisperLanguage(id: "fi", name: "Suomi",             flag: "🇫🇮", tier: .good),
-        WhisperLanguage(id: "pl", name: "Polski",            flag: "🇵🇱", tier: .excellent),
-        WhisperLanguage(id: "cs", name: "Čeština",           flag: "🇨🇿", tier: .good),
-        WhisperLanguage(id: "tl", name: "Filipino",          flag: "🇵🇭", tier: .good),
-        WhisperLanguage(id: "fa", name: "فارسی",             flag: "🇮🇷", tier: .good),
-        WhisperLanguage(id: "el", name: "Ελληνικά",          flag: "🇬🇷", tier: .good),
-        WhisperLanguage(id: "hu", name: "Magyar",            flag: "🇭🇺", tier: .good),
-        WhisperLanguage(id: "ro", name: "Română",            flag: "🇷🇴", tier: .good),
-        WhisperLanguage(id: "mk", name: "Македонски",        flag: "🇲🇰", tier: .good),
-        WhisperLanguage(id: "yue", name: "粵語",               flag: "🇭🇰", tier: .good),
-    ]
-}
+// WhisperLanguage, AudioSampleBuffer, LockedFlag, AudioFileLoadError
+// are now in their respective extracted modules.
 
 // MARK: - DictationEngine
 @Observable
@@ -156,15 +43,13 @@ final class DictationEngine {
         return "\(normalized.prefix(limit))…(+\(remaining) chars)"
     }
 
-    private enum AudioFileLoadError: Error {
-        case invalidBuffer
-        case conversionFailed(String)
-        case emptyAudio
-    }
-
-    private var audioEngine: AVAudioEngine?
-    private var inputNode: AVAudioInputNode?
-    private let audioSampleBuffer = AudioSampleBuffer()
+    // MARK: - Extracted services (Phase 1 refactor)
+    // These replace previously inlined logic in this file.
+    private let audioCaptureService = AudioCaptureService()
+    private let asrOrchestrator = ASROrchestrator()
+    private let transcriptStabilizer = TranscriptStabilizer()
+    private let insertionEngineService = InsertionEngine()
+    private let modelManager = ModelManager()
 
     /// Prevents overlapping dictation sessions (start/stop race conditions).
     private var isDictating: Bool = false
@@ -180,7 +65,6 @@ final class DictationEngine {
     private var targetApp: NSRunningApplication?
     private var correctionMonitorTask: Task<Void, Never>?
     private var modelLoadTask: Task<Void, Never>?
-    private let audioCaptureLimitFlag = LockedFlag()
     private var lastTranscriptionBackendName: String = "unknown"
     private var asrBackend: any ASRService
     private let ecoTextFormatter = EcoTextFormatter()
@@ -542,15 +426,11 @@ final class DictationEngine {
         targetApp = NSWorkspace.shared.frontmostApplication
         Self.pipelineLogger.notice("[Dictation] start; target app=\(self.targetApp?.bundleIdentifier ?? "nil", privacy: .public)")
 
-        audioSampleBuffer.reset()
-        // Pre-allocate enough for long dictations to avoid repeated reallocations on the realtime audio thread.
-        let preallocatedSamples = min(maxDictationSamples, Int(whisperSampleRate * 120))
-        audioSampleBuffer.reserveCapacity(preallocatedSamples)
-        audioCaptureLimitFlag.reset()
         state.dictationState = .listening
         overlayController.show()
-        guard startAudioCapture() else {
-            // Ensure the session is fully rolled back when audio init fails.
+        guard audioCaptureService.startCapture(onLevels: { [weak self] levels in
+            Task { @MainActor in self?.updateHUDLevels(levels) }
+        }) else {
             isDictating = false
             targetApp = nil
             state.dictationState = .idle
@@ -566,43 +446,58 @@ final class DictationEngine {
         isProcessing = true
 
         let state = AppState.shared
-        stopAudioCapture()
+        audioCaptureService.stopCapture()
         // Give CoreAudio a brief moment to flush the last callback before snapshotting.
         try? await Task.sleep(nanoseconds: 30_000_000) // 30 ms
         state.dictationState = .processing
-        let capturedSamples = audioSampleBuffer.count()
+        let capturedSamples = audioCaptureService.sampleCount
         Self.pipelineLogger.notice("[Dictation] stop; captured samples=\(capturedSamples)")
+
+        var metrics = DictationSessionMetrics()
+        metrics.capturedSampleCount = capturedSamples
 
         let asrStartedAt = CFAbsoluteTimeGetCurrent()
         let rawText = await runASRTranscription()
         Self.pipelineLogger.notice(
             "[Dictation] ASR raw preview=\"\(Self.debugPreview(rawText), privacy: .public)\""
         )
-        let asrDurationMs = Int((CFAbsoluteTimeGetCurrent() - asrStartedAt) * 1_000)
+        metrics.asrDurationMs = Int((CFAbsoluteTimeGetCurrent() - asrStartedAt) * 1_000)
+        metrics.rawCharacterCount = rawText.count
+        metrics.backendName = lastTranscriptionBackendName
+
+        // CommandInterpreter: check for spoken meta-commands before processing
+        let (recognizedCommand, commandStrippedText) = CommandInterpreter.shared.interpret(rawText, languageCode: state.selectedLanguage.id)
+        let effectiveRawText = commandStrippedText
+        // TODO: [COMMANDS] handle recognizedCommand (.cancelLast, .copyOnly, etc.)
+        _ = recognizedCommand
 
         let postProcessStartedAt = CFAbsoluteTimeGetCurrent()
-        let postProcessResult = postProcess(rawText)
+        let postProcessResult = postProcess(effectiveRawText)
         let normalizedText = postProcessResult.text
         Self.pipelineLogger.notice(
             "[Dictation] post-process preview=\"\(Self.debugPreview(normalizedText), privacy: .public)\""
         )
-        let postProcessDurationMs = Int((CFAbsoluteTimeGetCurrent() - postProcessStartedAt) * 1_000)
+        metrics.stabilizeDurationMs = Int((CFAbsoluteTimeGetCurrent() - postProcessStartedAt) * 1_000)
+        metrics.listBlocksDetected = postProcessResult.listBlocksCount
 
         let formatterStartedAt = CFAbsoluteTimeGetCurrent()
         var finalText = await applyFormattingPipeline(
-            rawASRText: rawText,
+            rawASRText: effectiveRawText,
             normalizedText: normalizedText,
             listBlocksCount: postProcessResult.listBlocksCount
         )
-        let formatterDurationMs = Int((CFAbsoluteTimeGetCurrent() - formatterStartedAt) * 1_000)
+        metrics.formatterDurationMs = Int((CFAbsoluteTimeGetCurrent() - formatterStartedAt) * 1_000)
         finalText = capitalizeProperNouns(in: finalText)
+        metrics.finalCharacterCount = finalText.count
+        metrics.formatterMode = state.formattingMode.rawValue
         Self.pipelineLogger.notice(
             "[Dictation] final formatted preview=\"\(Self.debugPreview(finalText), privacy: .public)\""
         )
         Self.pipelineLogger.notice("[Dictation] transcription lengths raw=\(rawText.count) final=\(finalText.count)")
         Self.pipelineLogger.notice(
-            "[Dictation] stage timings asr=\(asrDurationMs, privacy: .public)ms post=\(postProcessDurationMs, privacy: .public)ms format=\(formatterDurationMs, privacy: .public)ms"
+            "[Dictation] stage timings asr=\(metrics.asrDurationMs, privacy: .public)ms post=\(metrics.stabilizeDurationMs, privacy: .public)ms format=\(metrics.formatterDurationMs, privacy: .public)ms"
         )
+        LocalMetricsRecorder.shared.record(metrics)
 
         state.lastTranscription = finalText
         state.dictationState = .done(text: finalText)
@@ -679,6 +574,7 @@ final class DictationEngine {
             defaultCodeStyle: state.defaultCodeStyle,
             preferredMode: effectiveMode
         )
+        let sanitizedLLMInput = ProTextFormatter.llmInput(for: context)
 
         let formatter: any TextFormatter
         if effectiveMode == .advanced && state.isProModeUnlocked {
@@ -700,19 +596,46 @@ final class DictationEngine {
         Self.pipelineLogger.notice(
             "[Formatting] input rawPreview=\"\(Self.debugPreview(rawASRText), privacy: .public)\" postPreview=\"\(Self.debugPreview(normalizedText), privacy: .public)\""
         )
+        if effectiveMode == .advanced && state.isProModeUnlocked {
+            Self.pipelineLogger.notice(
+                "[Formatting] llm input sanitizedLen=\(sanitizedLLMInput.count, privacy: .public) sanitizedPreview=\"\(Self.debugPreview(sanitizedLLMInput), privacy: .public)\""
+            )
+        }
 
         let result = await formatter.format(context)
+        let llmAttempted = result.llmInputLength != nil
+        let llmReturnedText = result.llmOutputLength != nil
+        let pipelineDecision: String
+        if !llmAttempted {
+            pipelineDecision = "regex-only"
+        } else if !result.usedDeterministicFallback {
+            pipelineDecision = "accepted-llm-output"
+        } else if result.llmInputLength == 0 {
+            pipelineDecision = "fallback-sanitized-input-empty"
+        } else if llmReturnedText {
+            pipelineDecision = "fallback-replaced-llm-output"
+        } else {
+            pipelineDecision = "fallback-after-llm-nil"
+        }
+        Self.pipelineLogger.notice(
+            "[Formatting] decision=\(pipelineDecision, privacy: .public) llmAttempted=\(llmAttempted, privacy: .public) llmReturnedText=\(llmReturnedText, privacy: .public) usedFallback=\(result.usedDeterministicFallback, privacy: .public)"
+        )
         if result.usedDeterministicFallback {
             Self.pipelineLogger.notice("[Formatting] result: deterministic fallback (rejectedTokens=\(result.rejectedIntroducedTokens.count, privacy: .public))")
         } else {
             Self.pipelineLogger.notice("[Formatting] result: LLM text accepted")
         }
         Self.pipelineLogger.notice(
-            "[Formatting] metrics llmInLen=\(result.llmInputLength ?? -1, privacy: .public) llmOutLen=\(result.llmOutputLength ?? -1, privacy: .public) recall=\(result.llmRecall ?? -1, privacy: .public)"
+            "[Formatting] metrics llmInLen=\(result.llmInputLength ?? -1, privacy: .public) llmOutLen=\(result.llmOutputLength ?? -1, privacy: .public) recall=\(result.llmRecall ?? -1, privacy: .public) validationDecision=\(result.llmValidationDecision ?? "none", privacy: .public)"
         )
         if result.usedDeterministicFallback, !result.rejectedIntroducedTokens.isEmpty {
             Self.pipelineLogger.warning(
                 "[Dictation] integrity fallback triggered; rejected tokens=\(result.rejectedIntroducedTokens.joined(separator: ","), privacy: .public)"
+            )
+        }
+        if result.usedDeterministicFallback, llmReturnedText {
+            Self.pipelineLogger.warning(
+                "[Formatting] fallback replaced LLM output after downstream validation finalPreview=\"\(Self.debugPreview(result.text), privacy: .public)\""
             )
         }
         Self.pipelineLogger.notice(
@@ -721,177 +644,17 @@ final class DictationEngine {
         return result.text
     }
 
-    // MARK: - Audio Capture
+    // MARK: - Audio Capture (delegated to AudioCaptureService)
 
-    /// The ASR engine expects 16 kHz mono Float32 PCM.
-    private let whisperSampleRate: Double = 16_000
-    /// Hard cap to avoid unbounded memory growth if key-up is missed.
-    private let maxDictationDurationSeconds: Double = 300
-    private var maxDictationSamples: Int {
-        Int(whisperSampleRate * maxDictationDurationSeconds)
-    }
-
-    @discardableResult
-    private func startAudioCapture() -> Bool {
-        // Always tear down any previous engine (safety net for race conditions).
-        stopAudioCapture()
-
-        let engine = AVAudioEngine()
-        audioEngine = engine
-
-        let inputNode = engine.inputNode
-        self.inputNode = inputNode
-
-        // Native hardware format (e.g. 44100 or 48000 Hz, possibly multi-channel)
-        let hwFormat = inputNode.outputFormat(forBus: 0)
-
-        // Target format: 16 kHz, mono, Float32 — expected by ASR
-        guard let whisperFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: whisperSampleRate,
-            channels: 1,
-            interleaved: false
-        ) else {
-            AppState.shared.error = L10n.ui(
-                for: AppState.shared.selectedLanguage.id,
-                fr: "Impossible de créer le format audio 16kHz.",
-                en: "Unable to create 16kHz audio format.",
-                es: "No se pudo crear el formato de audio 16kHz.",
-                zh: "无法创建 16kHz 音频格式。",
-                ja: "16kHz オーディオ形式を作成できませんでした。",
-                ru: "Не удалось создать аудиоформат 16 кГц."
-            )
-            return false
-        }
-
-        // Build a converter from hardware format → 16kHz mono
-        guard let converter = AVAudioConverter(from: hwFormat, to: whisperFormat) else {
-            AppState.shared.error = L10n.ui(
-                for: AppState.shared.selectedLanguage.id,
-                fr: "Impossible de créer le convertisseur audio.",
-                en: "Unable to create audio converter.",
-                es: "No se pudo crear el convertidor de audio.",
-                zh: "无法创建音频转换器。",
-                ja: "オーディオコンバータを作成できませんでした。",
-                ru: "Не удалось создать аудиоконвертер."
-            )
-            return false
-        }
-
-        let resamplingRatio = whisperSampleRate / hwFormat.sampleRate
-        let maxSamples = maxDictationSamples
-        let maxDurationSeconds = maxDictationDurationSeconds
-        let sampleBuffer = audioSampleBuffer
-        let captureLimitFlag = audioCaptureLimitFlag
-        let reusableCapacity = AVAudioFrameCount(Double(4096) * resamplingRatio + 8)
-        guard let reusableOutBuffer = AVAudioPCMBuffer(pcmFormat: whisperFormat, frameCapacity: reusableCapacity) else {
-            AppState.shared.error = L10n.ui(
-                for: AppState.shared.selectedLanguage.id,
-                fr: "Impossible d'initialiser le buffer audio.",
-                en: "Unable to initialize audio buffer.",
-                es: "No se pudo inicializar el búfer de audio.",
-                zh: "无法初始化音频缓冲区。",
-                ja: "オーディオバッファを初期化できませんでした。",
-                ru: "Не удалось инициализировать аудиобуфер."
-            )
-            return false
-        }
-
-        // Tap on the hardware format, convert each buffer to 16kHz
-        var lastHUDLevelPushAt = CFAbsoluteTimeGetCurrent()
-        var hudLevels = [Float](repeating: 0.1, count: 28)
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [sampleBuffer, captureLimitFlag] hwBuffer, _ in
-            autoreleasepool {
-                // Compute how many output frames correspond to this input buffer
-                let inputFrames = AVAudioFrameCount(hwBuffer.frameLength)
-                let outputFrames = AVAudioFrameCount(Double(inputFrames) * resamplingRatio + 1)
-                let outBuffer: AVAudioPCMBuffer
-                if outputFrames <= reusableOutBuffer.frameCapacity {
-                    reusableOutBuffer.frameLength = 0
-                    outBuffer = reusableOutBuffer
-                } else {
-                    guard let fallbackBuffer = AVAudioPCMBuffer(pcmFormat: whisperFormat, frameCapacity: outputFrames) else { return }
-                    outBuffer = fallbackBuffer
-                }
-
-                var conversionError: NSError?
-                var consumed = false
-                let status = converter.convert(to: outBuffer, error: &conversionError) { _, outStatus in
-                    if consumed {
-                        outStatus.pointee = .noDataNow
-                        return nil
-                    }
-                    consumed = true
-                    outStatus.pointee = .haveData
-                    return hwBuffer
-                }
-
-                guard status != .error, let channelData = outBuffer.floatChannelData?[0] else { return }
-                let frameCount = Int(outBuffer.frameLength)
-                guard frameCount > 0 else { return }
-                let samplePointer = UnsafeBufferPointer(start: channelData, count: frameCount)
-                let appendStatus = sampleBuffer.append(samplePointer, maxSamples: maxSamples)
-                if appendStatus != .appended && captureLimitFlag.setIfNeeded() {
-                    if appendStatus == .truncated {
-                        Self.pipelineLogger.warning("[Dictation] audio capture reached max duration (\(Int(maxDurationSeconds), privacy: .public)s); truncating additional samples")
-                    } else {
-                        Self.pipelineLogger.warning("[Dictation] audio capture reached max duration (\(Int(maxDurationSeconds), privacy: .public)s); dropping additional samples")
-                    }
-                }
-
-                // RMS spectrum for HUD (computed on the original hwBuffer for responsiveness)
-                let now = CFAbsoluteTimeGetCurrent()
-                guard now - lastHUDLevelPushAt >= 0.10 else { return }
-                lastHUDLevelPushAt = now
-
-                guard let hwChannel = hwBuffer.floatChannelData?[0] else { return }
-                let hwFrames = Int(hwBuffer.frameLength)
-                guard hwFrames > 0 else { return }
-                let bandCount = hudLevels.count
-                let bandSize = max(1, hwFrames / bandCount)
-                for i in 0..<bandCount {
-                    let start = i * bandSize
-                    let end = min(start + bandSize, hwFrames)
-                    guard start < end else {
-                        hudLevels[i] = 0.1
-                        continue
-                    }
-                    let slice = UnsafeBufferPointer(start: hwChannel + start, count: end - start)
-                    var peak: Float = 0
-                    for sample in slice {
-                        peak = max(peak, abs(sample))
-                    }
-                    hudLevels[i] = min(1.0, sqrt(min(1.0, peak * 18)))
-                }
-                let levels = hudLevels
-                Task { @MainActor in
-                    AppState.shared.updateAudioLevels(levels)
-                }
-            }
-        }
-
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            AppState.shared.error = "Démarrage audio échoué : \(error.localizedDescription)"
-            stopAudioCapture()
-            return false
-        }
-        return true
-    }
-
-    private func stopAudioCapture() {
-        inputNode?.removeTap(onBus: 0)
-        audioEngine?.stop()
-        audioEngine = nil
-        inputNode = nil
+    /// Called from AudioCaptureService's onLevels callback to push HUD updates.
+    private func updateHUDLevels(_ levels: [Float]) {
+        AppState.shared.updateAudioLevels(levels)
     }
 
     // MARK: - Transcription
 
     private func runASRTranscription() async -> String {
-        let audioSnapshot = audioSampleBuffer.snapshot()
+        let audioSnapshot = audioCaptureService.snapshotSamples()
         let languages = AppState.shared.selectedLanguages
         let lang: String? = languages.count > 1 ? nil : (languages.first?.id ?? "fr")
         return await transcribeAudioSamples(audioSnapshot, language: lang)
@@ -914,9 +677,8 @@ final class DictationEngine {
 
         let samples: [Float]
         do {
-            let sampleRate = whisperSampleRate
             samples = try await Task.detached(priority: .userInitiated) {
-                try Self.loadAudioSamples(from: url, targetSampleRate: sampleRate)
+                try AudioCaptureService.loadAudioFile(at: url)
             }.value
         } catch {
             state.error = L10n.ui(
@@ -952,7 +714,7 @@ final class DictationEngine {
         _ audioSnapshot: [Float],
         language lang: String?
     ) async -> String {
-        let vad = VoiceActivityDetector(sampleRate: whisperSampleRate)
+        let vad = VoiceActivityDetector(sampleRate: AudioCaptureService.sampleRate)
         let processedAudio: [Float]
         do {
             let result = try vad.trim(audioSnapshot)
@@ -1273,74 +1035,7 @@ final class DictationEngine {
         }
     }
 
-    private nonisolated static func loadAudioSamples(from url: URL, targetSampleRate: Double) throws -> [Float] {
-        let file = try AVAudioFile(forReading: url)
-        let inputFormat = file.processingFormat
-
-        guard file.length > 0 else {
-            throw AudioFileLoadError.emptyAudio
-        }
-
-        guard let targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: targetSampleRate,
-            channels: 1,
-            interleaved: false
-        ) else {
-            throw AudioFileLoadError.invalidBuffer
-        }
-
-        let inputFrameCount = AVAudioFrameCount(file.length)
-        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: inputFrameCount) else {
-            throw AudioFileLoadError.invalidBuffer
-        }
-        try file.read(into: inputBuffer)
-
-        if inputFormat.sampleRate == targetSampleRate,
-           inputFormat.channelCount == 1,
-           inputFormat.commonFormat == .pcmFormatFloat32,
-           let channelData = inputBuffer.floatChannelData?[0] {
-            let frameCount = Int(inputBuffer.frameLength)
-            guard frameCount > 0 else {
-                throw AudioFileLoadError.emptyAudio
-            }
-            return Array(UnsafeBufferPointer(start: channelData, count: frameCount))
-        }
-
-        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
-            throw AudioFileLoadError.conversionFailed("converter unavailable")
-        }
-
-        let ratio = targetSampleRate / inputFormat.sampleRate
-        let outputCapacity = AVAudioFrameCount(Double(inputBuffer.frameLength) * ratio + 1024)
-        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputCapacity) else {
-            throw AudioFileLoadError.invalidBuffer
-        }
-
-        var conversionError: NSError?
-        var didConsumeInput = false
-        let status = converter.convert(to: outputBuffer, error: &conversionError) { _, outStatus in
-            if didConsumeInput {
-                outStatus.pointee = .endOfStream
-                return nil
-            }
-            didConsumeInput = true
-            outStatus.pointee = .haveData
-            return inputBuffer
-        }
-
-        guard status != .error else {
-            throw AudioFileLoadError.conversionFailed(conversionError?.localizedDescription ?? "conversion error")
-        }
-        guard let outputData = outputBuffer.floatChannelData?[0] else {
-            throw AudioFileLoadError.invalidBuffer
-        }
-        let outputFrameCount = Int(outputBuffer.frameLength)
-        guard outputFrameCount > 0 else {
-            throw AudioFileLoadError.emptyAudio
-        }
-        return Array(UnsafeBufferPointer(start: outputData, count: outputFrameCount))
-    }
+    // loadAudioSamples moved to AudioCaptureService.loadAudioFile(at:)
 
     // MARK: - Post-processing
 
