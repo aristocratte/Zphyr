@@ -596,7 +596,7 @@ struct PreflightView: View {
                 ) { advance() }
             } else if AdvancedLLMFormatter.shared.isInstalling {
                 EmptyView()
-            } else if AppState.shared.advancedModeInstalled {
+            } else if AppState.shared.advancedModeInstalled && AdvancedLLMFormatter.resolveInstallURL() != nil {
                 PFPrimaryButton(
                     label: t("Continuer", "Continue", "Continuar", "继续", "続ける", "Продолжить"),
                     icon: "arrow.right"
@@ -754,8 +754,7 @@ struct PreflightView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.zBg)
-        } else if AppState.shared.advancedModeInstalled {
-            // Success state — briefly shown before auto-advance
+        } else if AppState.shared.advancedModeInstalled && AdvancedLLMFormatter.resolveInstallURL() != nil {
             VStack(spacing: 20) {
                 ZStack {
                     Circle()

@@ -132,11 +132,16 @@ final class AdvancedLLMFormatter {
     private let log = Logger(subsystem: "com.zphyr.app", category: "AdvancedLLM")
     var isModelLoaded: Bool { container != nil }
 
-    // Speed tracking
-    private var lastFraction: Double = 0
+        // Speed tracking
+    private var lastBytes: Int64 = 0
     private var lastSpeedUpdate: Date = .distantPast
 
-    private init() {}
+    private init() {
+        // Reconcile UserDefaults flag with actual disk state on startup
+        if AppState.shared.advancedModeInstalled && Self.resolveInstallURL() == nil {
+            AppState.shared.advancedModeInstalled = false
+        }
+    }
 
     // MARK: - Installation
 
@@ -149,7 +154,7 @@ final class AdvancedLLMFormatter {
         downloadProgress  = 0
         downloadSpeed     = ""
         downloadedMB      = ""
-        lastFraction      = 0
+        lastBytes         = 0
         lastSpeedUpdate   = Date()
 
         let task = Task<Void, Never> {
@@ -160,17 +165,26 @@ final class AdvancedLLMFormatter {
                     progressHandler: { [weak self] progress in
                         Task { @MainActor [weak self] in
                             guard let self else { return }
-                            let p  = progress.fractionCompleted
+                            let p   = progress.fractionCompleted
                             let now = Date()
                             let dt  = now.timeIntervalSince(self.lastSpeedUpdate)
                             if dt >= 0.6 {
-                                let dp       = p - self.lastFraction
-                                let bps      = (dp * Self.modelBytes) / dt
-                                let received = p * Self.modelBytes
+                                // Use real bytes from Progress if available, else estimate
+                                let totalBytes = progress.totalUnitCount > 0
+                                    ? progress.totalUnitCount
+                                    : Int64(Self.modelBytes)
+                                let completedBytes = progress.completedUnitCount > 0
+                                    ? progress.completedUnitCount
+                                    : Int64(p * Self.modelBytes)
+                                let deltaBytes = completedBytes - self.lastBytes
+                                let bps        = deltaBytes > 0 ? Double(deltaBytes) / dt : 0
                                 self.downloadSpeed   = bps > 0 ? Self.formatSpeed(bps) : ""
-                                self.downloadedMB    = String(format: "%.0f / 1100 MB",
-                                                              received / 1_048_576)
-                                self.lastFraction    = p
+                                self.downloadedMB    = String(
+                                    format: "%.0f / %.0f MB",
+                                    Double(completedBytes) / 1_048_576,
+                                    Double(totalBytes) / 1_048_576
+                                )
+                                self.lastBytes       = completedBytes
                                 self.lastSpeedUpdate = now
                             }
                             self.downloadProgress = p
