@@ -711,7 +711,7 @@ struct PreflightView: View {
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundColor(Color.zText)
 
-                    Text("Qwen3-1.7B-4bit · ~1.1 GB")
+                    Text("Zphyr-v1 (fine-tuned) · ~1.1 GB")
                         .font(.system(size: 13))
                         .foregroundColor(Color.zTextDim)
 
@@ -768,7 +768,7 @@ struct PreflightView: View {
                 Text(t("Mode IA installé !", "AI mode installed!", "¡Modo IA instalado!", "AI 模式已安装！", "AI モードがインストールされました！", "Режим ИИ установлен!"))
                     .font(.system(size: 22, weight: .bold))
                     .foregroundColor(Color.zText)
-                Text("Qwen3-1.7B-4bit · prêt")
+                Text("Zphyr-v1 (fine-tuned) · prêt")
                     .font(.system(size: 13))
                     .foregroundColor(Color.zTextDim)
             }

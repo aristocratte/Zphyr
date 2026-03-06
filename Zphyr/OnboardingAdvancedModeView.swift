@@ -70,7 +70,7 @@ struct OnboardingAdvancedModeView: View {
                 AdvFeatureRow(icon: "arrow.down.circle",
                               color: Color(hex: "#34C759"),
                               title: "Téléchargement unique",
-                              subtitle: "Qwen3-1.7B-4bit · ~1,1 Go · stocké en cache local")
+                              subtitle: "Zphyr-v1 (fine-tuned) · ~1,1 Go · stocké en cache local")
             }
             .padding(20)
             .background(zSurface)

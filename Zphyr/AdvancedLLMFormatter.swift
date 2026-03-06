@@ -3,7 +3,7 @@
 //  Zphyr
 //
 //  On-device LLM text formatting using Apple's MLX Swift framework.
-//  Model: mlx-community/Qwen3-1.7B-4bit (~1.1 GB, 4-bit quantized)
+//  Model: arhesstide/zphyr_qwen_v1-MLX-4bit (fine-tuned Qwen3-1.7B, 4-bit quantized)
 //  Runs on Apple Silicon via Metal — zero network latency after initial download.
 //
 //  ─── ONE-TIME SETUP IN XCODE ────────────────────────────────────────────────
@@ -42,7 +42,7 @@ import MLXLMCommon
 final class AdvancedLLMFormatter {
 
     static let shared     = AdvancedLLMFormatter()
-    static let modelId    = "mlx-community/Qwen3-1.7B-4bit"
+    static let modelId    = "arhesstide/zphyr_qwen_v1-MLX-4bit"
     static let modelBytes: Double = 1_100 * 1_024 * 1_024  // ~1.1 GB
 
     /// Best-effort discovery of the local cache directory for the formatting model.
@@ -52,7 +52,7 @@ final class AdvancedLLMFormatter {
 
         // MLX Swift caches models at ~/Library/Caches/models/<org>/<model>/
         let mlxDirect = home
-            .appendingPathComponent("Library/Caches/models/mlx-community/Qwen3-1.7B-4bit")
+            .appendingPathComponent("Library/Caches/models/arhesstide/zphyr_qwen_v1-MLX-4bit")
         if fm.fileExists(atPath: mlxDirect.path),
            directoryContainsModelFiles(mlxDirect) {
             return mlxDirect
@@ -75,8 +75,8 @@ final class AdvancedLLMFormatter {
 
             for entry in entries {
                 let name = entry.lastPathComponent.lowercased()
-                let isMatch = name.contains("models--mlx-community--qwen3-1.7b-4bit")
-                    || name.contains("qwen3-1.7b-4bit")
+                let isMatch = name.contains("models--arhesstide--zphyr_qwen_v1-mlx-4bit")
+                    || name.contains("zphyr_qwen_v1-mlx-4bit")
                 guard isMatch else { continue }
 
                 let snapshots = entry.appendingPathComponent("snapshots")
@@ -230,14 +230,14 @@ final class AdvancedLLMFormatter {
         log.notice("[AdvancedLLM] model unloaded")
     }
 
-    /// Deletes all cached model files for Qwen3-1.7B-4bit from disk.
+    /// Deletes all cached model files for zphyr_qwen_v1-MLX-4bit from disk.
     static func removeModelFromDisk() {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
 
-        // MLX Swift cache: ~/Library/Caches/models/mlx-community/Qwen3-1.7B-4bit/
+        // MLX Swift cache: ~/Library/Caches/models/arhesstide/zphyr_qwen_v1-MLX-4bit/
         let mlxDirect = home
-            .appendingPathComponent("Library/Caches/models/mlx-community/Qwen3-1.7B-4bit")
+            .appendingPathComponent("Library/Caches/models/arhesstide/zphyr_qwen_v1-MLX-4bit")
         if fm.fileExists(atPath: mlxDirect.path) {
             try? fm.removeItem(at: mlxDirect)
         }
@@ -254,8 +254,8 @@ final class AdvancedLLMFormatter {
             ) else { continue }
             for entry in entries {
                 let name = entry.lastPathComponent.lowercased()
-                if name.contains("models--mlx-community--qwen3-1.7b-4bit")
-                    || name.contains("qwen3-1.7b-4bit") {
+                if name.contains("models--arhesstide--zphyr_qwen_v1-mlx-4bit")
+                    || name.contains("zphyr_qwen_v1-mlx-4bit") {
                     try? fm.removeItem(at: entry)
                 }
             }
@@ -472,7 +472,7 @@ final class AdvancedLLMFormatter {
 @MainActor
 final class AdvancedLLMFormatter {
     static let shared          = AdvancedLLMFormatter()
-    static let modelId         = "mlx-community/Qwen3-1.7B-4bit"
+    static let modelId         = "arhesstide/zphyr_qwen_v1-MLX-4bit"
     static func resolveInstallURL() -> URL? { nil }
     var downloadProgress: Double = 0
     var isInstalling: Bool       = false

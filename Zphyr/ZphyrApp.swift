@@ -371,9 +371,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         var uniquePaths = Set<String>()
         var results: [URL] = []
 
-        // MLX Swift cache: ~/Library/Caches/models/mlx-community/Qwen3-1.7B-4bit/
+        // MLX Swift cache: ~/Library/Caches/models/arhesstide/zphyr_qwen_v1-MLX-4bit/
         let mlxDirect = home
-            .appendingPathComponent("Library/Caches/models/mlx-community/Qwen3-1.7B-4bit")
+            .appendingPathComponent("Library/Caches/models/arhesstide/zphyr_qwen_v1-MLX-4bit")
         if fileManager.fileExists(atPath: mlxDirect.path) {
             uniquePaths.insert(mlxDirect.standardizedFileURL.path)
             results.append(mlxDirect)
@@ -395,7 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
             for entry in entries {
                 let name = entry.lastPathComponent.lowercased()
-                let isQwenModelFolder = name.contains("models--mlx-community--qwen3-1.7b-4bit") || name.contains("qwen3-1.7b-4bit")
+                let isQwenModelFolder = name.contains("models--arhesstide--zphyr_qwen_v1-mlx-4bit") || name.contains("zphyr_qwen_v1-mlx-4bit")
                 guard isQwenModelFolder else { continue }
                 let normalizedPath = entry.standardizedFileURL.path
                 guard !uniquePaths.contains(normalizedPath) else { continue }

@@ -21,12 +21,17 @@ struct ProTextFormatter: TextFormatter {
 
         let constraints = LLMFormattingConstraints.strict
         let llmInput = context.normalizedText
+        log.notice(
+            "[ProFormatter] invoking LLM inputPreview=\"\(Self.debugPreview(llmInput), privacy: .public)\" rawPreview=\"\(Self.debugPreview(context.rawASRText), privacy: .public)\""
+        )
         guard let llmCandidate = await AdvancedLLMFormatter.shared.format(
             llmInput,
             style: context.defaultCodeStyle,
             constraints: constraints
         ) else {
-            log.notice("[ProFormatter] LLM returned nil → using deterministic fallback")
+            log.notice(
+                "[ProFormatter] LLM returned nil → deterministic fallback preview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
+            )
             return TextFormatterResult(
                 text: deterministic.text,
                 usedDeterministicFallback: true,
@@ -44,7 +49,9 @@ struct ProTextFormatter: TextFormatter {
         ) {
         case .valid:
             let recall = tokenRecall(source: context.rawASRText, candidate: llmCandidate)
-            log.notice("[ProFormatter] LLM text accepted (integrity check passed) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recall=\(recall, privacy: .public)")
+            log.notice(
+                "[ProFormatter] LLM text accepted (integrity check passed) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recall=\(recall, privacy: .public) outputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\""
+            )
             return TextFormatterResult(
                 text: llmCandidate,
                 usedDeterministicFallback: false,
@@ -56,7 +63,9 @@ struct ProTextFormatter: TextFormatter {
 
         case .invalidIntroducedTokens(let introducedTokens):
             let recall = tokenRecall(source: context.rawASRText, candidate: llmCandidate)
-            log.warning("[ProFormatter] integrity check failed (introduced tokens) → deterministic fallback (rejected=\(introducedTokens.joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recall=\(recall, privacy: .public))")
+            log.warning(
+                "[ProFormatter] integrity check failed (introduced tokens) → deterministic fallback (rejected=\(introducedTokens.joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recall=\(recall, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
+            )
             return TextFormatterResult(
                 text: deterministic.text,
                 usedDeterministicFallback: true,
@@ -67,7 +76,9 @@ struct ProTextFormatter: TextFormatter {
             )
 
         case .invalidDroppedContent(let recall, let missingTokens):
-            log.warning("[ProFormatter] integrity check failed (dropped content) → deterministic fallback (recall=\(recall, privacy: .public) threshold=\(minimumRecall, privacy: .public) missing=\(missingTokens.prefix(12).joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public))")
+            log.warning(
+                "[ProFormatter] integrity check failed (dropped content) → deterministic fallback (recall=\(recall, privacy: .public) threshold=\(minimumRecall, privacy: .public) missing=\(missingTokens.prefix(12).joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
+            )
             return TextFormatterResult(
                 text: deterministic.text,
                 usedDeterministicFallback: true,
@@ -111,5 +122,14 @@ struct ProTextFormatter: TextFormatter {
             value[token, default: 0] += 1
         }
         return value
+    }
+
+    private static func debugPreview(_ text: String, limit: Int = 280) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        guard normalized.count > limit else { return normalized }
+        let remaining = normalized.count - limit
+        return "\(normalized.prefix(limit))…(+\(remaining) chars)"
     }
 }

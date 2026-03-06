@@ -542,7 +542,7 @@ struct SystemSettingsContent: View {
                 SettingsRow(
                     icon: "folder.fill",
                     iconColor: Color(hex: "#22D3B8"),
-                    title: t("Chemin Qwen3-1.7B (formatage)", "Qwen3-1.7B path (formatting)", "Ruta Qwen3-1.7B (formato)", "Qwen3-1.7B 路径（格式化）", "Qwen3-1.7B パス（整形）", "Путь Qwen3-1.7B (форматирование)"),
+                    title: t("Chemin Zphyr-v1 (formatage)", "Zphyr-v1 path (formatting)", "Ruta Zphyr-v1 (formato)", "Zphyr-v1 路径（格式化）", "Zphyr-v1 パス（整形）", "Путь Zphyr-v1 (форматирование)"),
                     subtitle: formatterInstallURL?.path ?? t("Non installé", "Not installed", "No instalado", "未安装", "未インストール", "Не установлен"),
                     showDivider: false
                 ) {
@@ -1100,7 +1100,7 @@ private struct QwenModelCard: View {
                                 .foregroundColor(Color(hex: "#22D3B8"))
                         }
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Qwen3-1.7B-4bit")
+                            Text("Zphyr-v1 (fine-tuned)")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(Color(hex: "#1A1A1A"))
                             HStack(spacing: 5) {
@@ -1150,7 +1150,7 @@ private struct QwenModelCard: View {
                 SettingsRow(
                     icon: "brain.head.profile",
                     iconColor: Color(hex: "#22D3B8"),
-                    title: "Qwen3-1.7B-4bit",
+                    title: "Zphyr-v1 (fine-tuned)",
                     subtitle: L10n.ui(for: lang, fr: "Installé · IA locale prête", en: "Installed · local AI ready", es: "Instalado · IA local lista", zh: "已安装 · 本地 AI 就绪", ja: "インストール済み · ローカル AI 準備完了", ru: "Установлен · локальный ИИ готов"),
                     showDivider: false
                 ) {
@@ -1172,7 +1172,7 @@ private struct QwenModelCard: View {
                 SettingsRow(
                     icon: formatter.installError != nil ? "exclamationmark.triangle.fill" : "arrow.down.circle.fill",
                     iconColor: formatter.installError != nil ? Color(hex: "#FF9500") : Color(hex: "#AF52DE"),
-                    title: "Qwen3-1.7B-4bit",
+                    title: "Zphyr-v1 (fine-tuned)",
                     subtitle: formatter.installError ?? L10n.ui(for: lang, fr: "~1,1 Go · IA locale sur Apple Silicon", en: "~1.1 GB · Local AI on Apple Silicon", es: "~1,1 GB · IA local en Apple Silicon", zh: "~1.1 GB · Apple Silicon 本地 AI", ja: "~1.1 GB · Apple Silicon ローカル AI", ru: "~1,1 ГБ · локальный ИИ на Apple Silicon"),
                     showDivider: false
                 ) {

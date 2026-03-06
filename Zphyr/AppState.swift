@@ -96,7 +96,7 @@ enum FormattingMode: String, CaseIterable, Identifiable {
         case .trigger:
             return L10n.ui(for: lang, fr: "Normal (Trigger explicite)", en: "Normal (Explicit trigger)", es: "Normal (disparador)", zh: "普通（显式触发）", ja: "通常（明示的トリガー）", ru: "Обычный (триггер)")
         case .advanced:
-            return L10n.ui(for: lang, fr: "Avancé (IA locale Qwen3-1.7B)", en: "Advanced (local AI Qwen3-1.7B)", es: "Avanzado (IA local Qwen3-1.7B)", zh: "高级（本地 AI Qwen3-1.7B）", ja: "高度（ローカル AI Qwen3-1.7B）", ru: "Расширенный (локальный ИИ Qwen3-1.7B)")
+            return L10n.ui(for: lang, fr: "Avancé (IA locale Zphyr-v1)", en: "Advanced (local AI Zphyr-v1)", es: "Avanzado (IA local Zphyr-v1)", zh: "高级（本地 AI Zphyr-v1）", ja: "高度（ローカル AI Zphyr-v1）", ru: "Расширенный (локальный ИИ Zphyr-v1)")
         }
     }
 
@@ -105,7 +105,7 @@ enum FormattingMode: String, CaseIterable, Identifiable {
         case .trigger:
             return L10n.ui(for: lang, fr: "Dites «camel get user» → getUserProfile", en: "Say «camel get user» → getUserProfile", es: "Di «camel get user» → getUserProfile", zh: "说「camel get user」→ getUserProfile", ja: "「camel get user」→ getUserProfile", ru: "«camel get user» → getUserProfile")
         case .advanced:
-            return L10n.ui(for: lang, fr: "Qwen3-1.7B détecte les identifiants sans mot-clé (~1,1 Go, local)", en: "Qwen3-1.7B auto-detects identifiers without trigger (~1.1 GB, local)", es: "Qwen3-1.7B detecta identificadores sin disparador (~1,1 GB, local)", zh: "Qwen3-1.7B 自动检测标识符无需触发词（~1.1 GB，本地）", ja: "Qwen3-1.7B がトリガーなしで自動検出（~1.1 GB、ローカル）", ru: "Qwen3-1.7B автоопределяет идентификаторы без триггера (~1,1 ГБ, локально)")
+            return L10n.ui(for: lang, fr: "Zphyr-v1 détecte les identifiants sans mot-clé (~1,1 Go, local)", en: "Zphyr-v1 auto-detects identifiers without trigger (~1.1 GB, local)", es: "Zphyr-v1 detecta identificadores sin disparador (~1,1 GB, local)", zh: "Zphyr-v1 自动检测标识符无需触发词（~1.1 GB，本地）", ja: "Zphyr-v1 がトリガーなしで自動検出（~1.1 GB、ローカル）", ru: "Zphyr-v1 автоопределяет идентификаторы без триггера (~1,1 ГБ, локально)")
         }
     }
 }
@@ -175,6 +175,7 @@ struct DictionarySuggestion: Equatable {
 final class AppState {
     static let shared = AppState()
     private nonisolated static let dictionaryLogger = Logger(subsystem: "com.zphyr.app", category: "DictionarySuggestion")
+    private nonisolated static let settingsLogger = Logger(subsystem: "com.zphyr.app", category: "SettingsRouting")
     private static let stylePersonalKey = "zphyr.style.personal"
     private static let styleWorkKey = "zphyr.style.work"
     private static let styleEmailKey = "zphyr.style.email"
@@ -217,6 +218,11 @@ final class AppState {
     }() {
         didSet {
             UserDefaults.standard.set(preferredASRBackend.rawValue, forKey: AppState.preferredASRBackendKey)
+            if preferredASRBackend != oldValue {
+                Self.settingsLogger.notice(
+                    "[Settings] preferredASRBackend changed from \(oldValue.rawValue, privacy: .public) to \(self.preferredASRBackend.rawValue, privacy: .public)"
+                )
+            }
             enforcePerformanceRouting()
         }
     }
@@ -285,6 +291,11 @@ final class AppState {
     }() {
         didSet {
             UserDefaults.standard.set(formattingMode.rawValue, forKey: "zphyr.formattingMode")
+            if formattingMode != oldValue {
+                Self.settingsLogger.notice(
+                    "[Settings] formattingMode changed from \(oldValue.rawValue, privacy: .public) to \(self.formattingMode.rawValue, privacy: .public) (tier=\(self.performanceProfile.tier.rawValue, privacy: .public))"
+                )
+            }
             enforcePerformanceRouting()
         }
     }
@@ -301,7 +312,14 @@ final class AppState {
     var advancedModeInstalled: Bool = {
         UserDefaults.standard.bool(forKey: "zphyr.advancedMode.installed")
     }() {
-        didSet { UserDefaults.standard.set(advancedModeInstalled, forKey: "zphyr.advancedMode.installed") }
+        didSet {
+            UserDefaults.standard.set(advancedModeInstalled, forKey: "zphyr.advancedMode.installed")
+            if advancedModeInstalled != oldValue {
+                Self.settingsLogger.notice(
+                    "[Settings] advancedModeInstalled changed from \(oldValue, privacy: .public) to \(self.advancedModeInstalled, privacy: .public)"
+                )
+            }
+        }
     }
 
     // Settings — launch at login (backed by SMAppService)
@@ -392,11 +410,17 @@ final class AppState {
 
         let effectiveBackend = router.effectiveASRBackend(preferred: preferredASRBackend, profile: profile)
         if preferredASRBackend != effectiveBackend {
+            Self.settingsLogger.notice(
+                "[Routing] forcing ASR backend from \(self.preferredASRBackend.rawValue, privacy: .public) to \(effectiveBackend.rawValue, privacy: .public) (tier=\(profile.tier.rawValue, privacy: .public))"
+            )
             preferredASRBackend = effectiveBackend
         }
 
         let effectiveMode = router.effectiveFormattingMode(preferred: formattingMode, profile: profile)
         if formattingMode != effectiveMode {
+            Self.settingsLogger.notice(
+                "[Routing] forcing formatting mode from \(self.formattingMode.rawValue, privacy: .public) to \(effectiveMode.rawValue, privacy: .public) (tier=\(profile.tier.rawValue, privacy: .public))"
+            )
             formattingMode = effectiveMode
         }
     }
