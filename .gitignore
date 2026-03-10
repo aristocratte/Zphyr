@@ -23,6 +23,12 @@ build/
 
 # Logs
 *.log
+*.pyc
+__pycache__/
 
 # Local tooling metadata
 .claude/
+
+# Eval harness artifacts
+Evals/reports/
+Evals/metrics/.venv/

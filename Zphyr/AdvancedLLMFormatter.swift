@@ -47,14 +47,38 @@ final class AdvancedLLMFormatter {
         case chatTemplate = "chat-template"
     }
 
+    struct SanitizedGenerationOutput: Sendable {
+        let rawText: String
+        let cleanedText: String?
+        let fallbackReason: String?
+        let strippedReasoningTags: Bool
+    }
+
     static let shared     = AdvancedLLMFormatter()
     static let modelId    = "arhesstide/zphyr_qwen_v1-MLX-4bit"
     static let modelBytes: Double = 1_100 * 1_024 * 1_024  // ~1.1 GB
+    static var overrideInstallURL: URL?
+    private static let extraStopTokens: Set<String> = ["<think>", "</think>"]
+
+    private static func preferredExplicitInstallURL() -> URL? {
+        if let overrideInstallURL {
+            return overrideInstallURL
+        }
+        if let overridePath = ProcessInfo.processInfo.environment["ZPHYR_FORMATTER_MODEL_PATH"],
+           !overridePath.isEmpty {
+            return URL(fileURLWithPath: overridePath, isDirectory: true)
+        }
+        return nil
+    }
 
     /// Best-effort discovery of the local cache directory for the formatting model.
     static func resolveInstallURL() -> URL? {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
+
+        if let explicitURL = preferredExplicitInstallURL() {
+            return directoryContainsModelFiles(explicitURL) ? explicitURL : nil
+        }
 
         // MLX Swift caches models at ~/Library/Caches/models/<org>/<model>/
         let mlxDirect = home
@@ -143,9 +167,10 @@ final class AdvancedLLMFormatter {
     private var lastSpeedUpdate: Date = .distantPast
 
     private init() {
-        // Reconcile UserDefaults flag with actual disk state on startup
-        if AppState.shared.advancedModeInstalled && Self.resolveInstallURL() == nil {
-            AppState.shared.advancedModeInstalled = false
+        // Reconcile UserDefaults flag with actual disk state on startup.
+        let installedOnDisk = Self.resolveInstallURL() != nil
+        if AppState.shared.advancedModeInstalled != installedOnDisk {
+            AppState.shared.advancedModeInstalled = installedOnDisk
         }
     }
 
@@ -233,14 +258,50 @@ final class AdvancedLLMFormatter {
 
     /// Silently loads an already-downloaded model from the local cache (no network).
     func loadIfInstalled() async {
-        guard AppState.shared.advancedModeInstalled, container == nil else { return }
-        let config = ModelConfiguration(id: Self.modelId)
-        container = try? await LLMModelFactory.shared.loadContainer(configuration: config)
+        guard container == nil else { return }
+        guard let installURL = Self.resolveInstallURL() else {
+            if AppState.shared.advancedModeInstalled {
+                AppState.shared.advancedModeInstalled = false
+            }
+            if let explicitURL = Self.preferredExplicitInstallURL() {
+                log.error("[AdvancedLLM] load skipped: explicit model path invalid or incomplete: \(explicitURL.path, privacy: .public)")
+            } else {
+                log.notice("[AdvancedLLM] load skipped: model not present on disk")
+            }
+            return
+        }
+        if !AppState.shared.advancedModeInstalled {
+            AppState.shared.advancedModeInstalled = true
+        }
+        let configuration: ModelConfiguration
+        if Self.preferredExplicitInstallURL() != nil {
+            configuration = ModelConfiguration(
+                directory: installURL,
+                extraEOSTokens: Self.extraStopTokens
+            )
+            log.notice("[AdvancedLLM] loading explicit local model from \(installURL.path, privacy: .public)")
+        } else {
+            configuration = ModelConfiguration(
+                id: Self.modelId,
+                extraEOSTokens: Self.extraStopTokens
+            )
+            log.notice("[AdvancedLLM] loading cached model using id=\(Self.modelId, privacy: .public) resolvedPath=\(installURL.path, privacy: .public)")
+        }
+
+        do {
+            container = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
+        } catch {
+            container = nil
+            AppState.shared.advancedModeInstalled = false
+            log.error("[AdvancedLLM] load failed from \(installURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
         if container != nil {
-            log.notice("[AdvancedLLM] loaded from disk cache")
+            log.notice("[AdvancedLLM] loaded model successfully from \(installURL.path, privacy: .public)")
         } else {
             AppState.shared.advancedModeInstalled = false
-            log.warning("[AdvancedLLM] cache missing, resetting installed flag")
+            log.warning("[AdvancedLLM] load returned nil container for path \(installURL.path, privacy: .public)")
         }
     }
 
@@ -318,28 +379,13 @@ final class AdvancedLLMFormatter {
         }
 
         let systemPrompt = """
-            You are a highly precise text formatting engine. Your ONLY job is to take raw voice dictation text and output clean, professionally formatted text.
-
-            STRICT RULES:
-
-            SPOKEN PUNCTUATION: You MUST convert spoken commands into actual symbols.
-            "virgule" -> ,
-            "point" -> .
-            "à la ligne" -> \\n
-            "nouveau paragraphe" -> \\n\\n
-
-            CODE VARIABLES: If the user dictates code variables, functions, or classes, you MUST format them correctly (\(defaultStyleHint) by default) and fix their spelling if the raw text wrote them phonetically (e.g., "fetch user data" -> "fetchUserData", "max retraise alloud" -> "maxRetriesAllowed").
-
-            CLEANUP: Remove hesitation words like "euh", "hum", "bah". Fix obvious phonetic transcription errors.
-
-            DO NOT add conversational filler (e.g., "Voici le texte", "Sure"). Output ONLY the final text.
-
-            EXAMPLES:
-            Input: "Salut l'équipe virgule à la ligne la fonction fetch user data bug point"
-            Output: "Salut l'équipe,\\nLa fonction fetchUserData bug."
-
-            Input: "je vais créer la variable euh max retries allowed en python point"
-            Output: "Je vais créer la variable max_retries_allowed en Python."
+            Return only the final formatted text.
+            No reasoning. No explanation. No `<think>` tags. No XML or HTML-like tags.
+            No markdown unless the final text itself requires a list or code block.
+            Preserve meaning, language, URLs, paths, code, package names, versions, and technical tokens exactly.
+            Apply minimal formatting only: punctuation, capitalization, spacing, explicit spoken punctuation, and obvious ASR cleanup.
+            For dictated identifiers, use \(defaultStyleHint) only when the input clearly asks for an identifier form.
+            If uncertain, make the smallest safe change and never add extra words.
             """
 
         do {
@@ -371,12 +417,29 @@ final class AdvancedLLMFormatter {
             for await generation in stream {
                 if case .chunk(let chunk) = generation { output += chunk }
             }
-            let result = output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            let rawResult = output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-            let outputWords = result.split(whereSeparator: \.isWhitespace).count
             log.notice(
-                "[AdvancedLLM] generated mode=\(promptMode, privacy: .public) in \(String(format: "%.2f", elapsed), privacy: .public)s output=\(outputWords, privacy: .public) words preview=\"\(Self.debugPreview(result), privacy: .public)\""
+                "[AdvancedLLM] raw output mode=\(promptMode, privacy: .public) in \(String(format: "%.2f", elapsed), privacy: .public)s preview=\"\(Self.debugPreview(rawResult), privacy: .public)\""
             )
+            let sanitized = Self.sanitizeGeneratedOutput(rawResult)
+            if sanitized.strippedReasoningTags {
+                log.notice(
+                    "[AdvancedLLM] cleaned reasoning tags mode=\(promptMode, privacy: .public) cleanedPreview=\"\(Self.debugPreview(sanitized.cleanedText ?? ""), privacy: .public)\""
+                )
+            } else {
+                log.notice(
+                    "[AdvancedLLM] cleaned output mode=\(promptMode, privacy: .public) preview=\"\(Self.debugPreview(sanitized.cleanedText ?? ""), privacy: .public)\""
+                )
+            }
+            guard let result = sanitized.cleanedText else {
+                log.warning(
+                    "[AdvancedLLM] rejecting output mode=\(promptMode, privacy: .public) reason=\(sanitized.fallbackReason ?? "unknown", privacy: .public) rawPreview=\"\(Self.debugPreview(sanitized.rawText), privacy: .public)\""
+                )
+                return nil
+            }
+
+            let outputWords = result.split(whereSeparator: \.isWhitespace).count
             guard !result.isEmpty else {
                 log.notice("[AdvancedLLM] empty result after trimming mode=\(promptMode, privacy: .public)")
                 return nil
@@ -460,6 +523,9 @@ final class AdvancedLLMFormatter {
     }
 
     private func shouldUseRawAlpacaPrompt(container: ModelContainer) async -> Bool {
+        if Self.preferredExplicitInstallURL() != nil {
+            return true
+        }
         let configuration = await container.configuration
         let normalizedName = configuration.name.lowercased()
         return normalizedName == Self.modelId.lowercased()
@@ -470,13 +536,12 @@ final class AdvancedLLMFormatter {
         [
             "Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.",
             "Instruction:",
-            "Format this dictated text.",
+            "Return only the final formatted text. No reasoning. No explanation. No <think> tags. No XML or HTML-like tags. Preserve meaning and technical tokens exactly. Apply only the minimal formatting needed.",
             "",
             "Input:",
             text,
             "",
-            "Response:",
-            ""
+            "Response:"
         ].joined(separator: "\n")
     }
 
@@ -489,6 +554,91 @@ final class AdvancedLLMFormatter {
             normalized
                 .split(whereSeparator: { $0.isWhitespace })
                 .map(String.init)
+        )
+    }
+
+    nonisolated static func sanitizeGeneratedOutput(
+        _ rawOutput: String,
+        requiredTerms: [String] = []
+    ) -> SanitizedGenerationOutput {
+        let trimmedRaw = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRaw.isEmpty else {
+            return SanitizedGenerationOutput(
+                rawText: trimmedRaw,
+                cleanedText: nil,
+                fallbackReason: "empty_raw_output",
+                strippedReasoningTags: false
+            )
+        }
+
+        var strippedReasoningTags = false
+        var cleaned = trimmedRaw
+
+        if cleaned.range(of: #"(?is)<think>.*?</think>"#, options: .regularExpression) != nil {
+            strippedReasoningTags = true
+            cleaned = cleaned.replacingOccurrences(
+                of: #"(?is)<think>.*?</think>"#,
+                with: " ",
+                options: .regularExpression
+            )
+        }
+
+        if cleaned.range(of: #"(?i)</?think>"#, options: .regularExpression) != nil {
+            strippedReasoningTags = true
+            cleaned = cleaned.replacingOccurrences(
+                of: #"(?i)</?think>"#,
+                with: " ",
+                options: .regularExpression
+            )
+        }
+
+        cleaned = cleaned
+            .replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if cleaned.isEmpty {
+            return SanitizedGenerationOutput(
+                rawText: trimmedRaw,
+                cleanedText: nil,
+                fallbackReason: "empty_after_reasoning_cleanup",
+                strippedReasoningTags: strippedReasoningTags
+            )
+        }
+
+        if cleaned.range(of: #"<[A-Za-z/][^>]*>"#, options: .regularExpression) != nil {
+            return SanitizedGenerationOutput(
+                rawText: trimmedRaw,
+                cleanedText: nil,
+                fallbackReason: "xml_like_tag_contamination",
+                strippedReasoningTags: strippedReasoningTags
+            )
+        }
+
+        if !cleaned.contains(where: { $0.isLetter || $0.isNumber }) {
+            return SanitizedGenerationOutput(
+                rawText: trimmedRaw,
+                cleanedText: nil,
+                fallbackReason: "non_substantive_output",
+                strippedReasoningTags: strippedReasoningTags
+            )
+        }
+
+        let missingTerms = requiredTerms.filter { !$0.isEmpty && !cleaned.contains($0) }
+        if !missingTerms.isEmpty {
+            return SanitizedGenerationOutput(
+                rawText: trimmedRaw,
+                cleanedText: nil,
+                fallbackReason: "missing_required_terms",
+                strippedReasoningTags: strippedReasoningTags
+            )
+        }
+
+        return SanitizedGenerationOutput(
+            rawText: trimmedRaw,
+            cleanedText: cleaned,
+            fallbackReason: nil,
+            strippedReasoningTags: strippedReasoningTags
         )
     }
 
@@ -555,18 +705,36 @@ final class AdvancedLLMFormatter {
 final class AdvancedLLMFormatter {
     static let shared          = AdvancedLLMFormatter()
     static let modelId         = "arhesstide/zphyr_qwen_v1-MLX-4bit"
+    static var overrideInstallURL: URL?
+    struct SanitizedGenerationOutput: Sendable {
+        let rawText: String
+        let cleanedText: String?
+        let fallbackReason: String?
+        let strippedReasoningTags: Bool
+    }
     static func resolveInstallURL() -> URL? { nil }
+    nonisolated static func sanitizeGeneratedOutput(
+        _ rawOutput: String,
+        requiredTerms: [String] = []
+    ) -> SanitizedGenerationOutput {
+        let trimmed = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return SanitizedGenerationOutput(
+            rawText: trimmed,
+            cleanedText: trimmed.isEmpty ? nil : trimmed,
+            fallbackReason: trimmed.isEmpty ? "empty_raw_output" : nil,
+            strippedReasoningTags: false
+        )
+    }
     nonisolated static func alpacaPrompt(for text: String) -> String {
         [
             "Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.",
             "Instruction:",
-            "Format this dictated text.",
+            "Return only the final formatted text. No reasoning. No explanation. No <think> tags. No XML or HTML-like tags. Preserve meaning and technical tokens exactly. Apply only the minimal formatting needed.",
             "",
             "Input:",
             text,
             "",
-            "Response:",
-            ""
+            "Response:"
         ].joined(separator: "\n")
     }
     var downloadProgress: Double = 0

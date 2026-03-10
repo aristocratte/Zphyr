@@ -171,7 +171,7 @@ struct FormattingPipelineTests {
         let expected = """
         Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
         Instruction:
-        Format this dictated text.
+        Return only the final formatted text. No reasoning. No explanation. No <think> tags. No XML or HTML-like tags. Preserve meaning and technical tokens exactly. Apply only the minimal formatting needed.
 
         Input:
         attention ici il manque la gestion d erreur
@@ -180,6 +180,40 @@ struct FormattingPipelineTests {
         """
 
         #expect(prompt == expected)
+    }
+
+    @Test func advancedLLMFormatterStripsThinkBlocks() {
+        let sanitized = AdvancedLLMFormatter.sanitizeGeneratedOutput(
+            "<think>\ninternal chain of thought\n</think>\n\nTexte final propre."
+        )
+
+        #expect(sanitized.cleanedText == "Texte final propre.")
+        #expect(sanitized.strippedReasoningTags)
+        #expect(sanitized.fallbackReason == nil)
+    }
+
+    @Test func advancedLLMFormatterRejectsPureThinkOutput() {
+        let sanitized = AdvancedLLMFormatter.sanitizeGeneratedOutput("<think>\n\n</think>")
+
+        #expect(sanitized.cleanedText == nil)
+        #expect(sanitized.fallbackReason == "empty_after_reasoning_cleanup")
+    }
+
+    @Test func advancedLLMFormatterRejectsMissingRequiredTerms() {
+        let sanitized = AdvancedLLMFormatter.sanitizeGeneratedOutput(
+            "Texte final sans le terme protégé.",
+            requiredTerms: ["NEXT_PUBLIC_API_URL"]
+        )
+
+        #expect(sanitized.cleanedText == nil)
+        #expect(sanitized.fallbackReason == "missing_required_terms")
+    }
+
+    @Test func advancedLLMFormatterRejectsResidualThinkTag() {
+        let sanitized = AdvancedLLMFormatter.sanitizeGeneratedOutput("<think>")
+
+        #expect(sanitized.cleanedText == nil)
+        #expect(sanitized.fallbackReason == "empty_after_reasoning_cleanup")
     }
 
     @Test func advancedLLMFormatterDatasetReproHarness() async {

@@ -48,6 +48,7 @@ final class DictationEngine {
     private let audioCaptureService = AudioCaptureService()
     private let asrOrchestrator = ASROrchestrator()
     private let transcriptStabilizer = TranscriptStabilizer()
+    private let formattingPipeline = FormattingPipeline()
     private let insertionEngineService = InsertionEngine()
     private let modelManager = ModelManager()
 
@@ -183,6 +184,11 @@ final class DictationEngine {
     /// Loads the currently-selected ASR backend.
     /// For installable backends, this also drives download progress in AppState.
     func loadModel() async {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            Self.modelLogger.notice("[ModelLoad] skipping backend load under XCTest")
+            return
+        }
+
         if let inFlight = modelLoadTask {
             if inFlight.isCancelled {
                 // Old task was cancelled but may still be running; don't await it.
@@ -465,49 +471,49 @@ final class DictationEngine {
         metrics.rawCharacterCount = rawText.count
         metrics.backendName = lastTranscriptionBackendName
 
-        // CommandInterpreter: check for spoken meta-commands before processing
-        let (recognizedCommand, commandStrippedText) = CommandInterpreter.shared.interpret(rawText, languageCode: state.selectedLanguage.id)
-        let effectiveRawText = commandStrippedText
-        // TODO: [COMMANDS] handle recognizedCommand (.cancelLast, .copyOnly, etc.)
-        _ = recognizedCommand
-
-        let postProcessStartedAt = CFAbsoluteTimeGetCurrent()
-        let postProcessResult = postProcess(effectiveRawText)
-        let normalizedText = postProcessResult.text
-        Self.pipelineLogger.notice(
-            "[Dictation] post-process preview=\"\(Self.debugPreview(normalizedText), privacy: .public)\""
+        // ── Post-ASR formatting pipeline ────────────────────────────────────
+        let pipelineInput = TranscriptionInput(
+            rawText: rawText,
+            languageCode: state.selectedLanguage.id,
+            targetBundleID: targetApp?.bundleIdentifier
         )
-        metrics.stabilizeDurationMs = Int((CFAbsoluteTimeGetCurrent() - postProcessStartedAt) * 1_000)
-        metrics.listBlocksDetected = postProcessResult.listBlocksCount
+        let pipelineResult = await formattingPipeline.run(pipelineInput)
 
-        let formatterStartedAt = CFAbsoluteTimeGetCurrent()
-        var finalText = await applyFormattingPipeline(
-            rawASRText: effectiveRawText,
-            normalizedText: normalizedText,
-            listBlocksCount: postProcessResult.listBlocksCount
-        )
-        metrics.formatterDurationMs = Int((CFAbsoluteTimeGetCurrent() - formatterStartedAt) * 1_000)
-        finalText = capitalizeProperNouns(in: finalText)
+        let finalText = pipelineResult.finalText
+        metrics.stabilizeDurationMs = Int(pipelineResult.totalDurationMs)
+        metrics.listBlocksDetected = pipelineResult.listBlocksCount
+        metrics.formatterDurationMs = 0  // subsumed into pipeline total
         metrics.finalCharacterCount = finalText.count
         metrics.formatterMode = state.formattingMode.rawValue
+
+        // Handle commands extracted by the pipeline
+        let recognizedCommand = pipelineResult.extractedCommand
+        if recognizedCommand == .cancelLast {
+            Self.pipelineLogger.notice("[Dictation] cancel command detected — discarding")
+            targetApp = nil
+            playDictationEndSound()
+            overlayController.hide()
+            state.dictationState = .idle
+            isProcessing = false
+            return
+        }
+
         Self.pipelineLogger.notice(
-            "[Dictation] final formatted preview=\"\(Self.debugPreview(finalText), privacy: .public)\""
+            "[Dictation] pipeline completed preview=\"\(Self.debugPreview(finalText), privacy: .public)\" dur=\(String(format: "%.1f", pipelineResult.totalDurationMs), privacy: .public)ms stages=\(pipelineResult.trace.count, privacy: .public)"
         )
         Self.pipelineLogger.notice("[Dictation] transcription lengths raw=\(rawText.count) final=\(finalText.count)")
-        Self.pipelineLogger.notice(
-            "[Dictation] stage timings asr=\(metrics.asrDurationMs, privacy: .public)ms post=\(metrics.stabilizeDurationMs, privacy: .public)ms format=\(metrics.formatterDurationMs, privacy: .public)ms"
-        )
         LocalMetricsRecorder.shared.record(metrics)
 
         state.lastTranscription = finalText
         state.dictationState = .done(text: finalText)
 
         if !finalText.isEmpty {
-            if state.autoInsert {
-                await insertIntoTargetApp(finalText)
-            } else {
+            let shouldCopyOnly = recognizedCommand == .copyOnly || !state.autoInsert
+            if shouldCopyOnly {
                 copyTextToClipboard(finalText)
-                Self.pipelineLogger.notice("[Dictation] autoInsert=off; copied transcription to clipboard")
+                Self.pipelineLogger.notice("[Dictation] copied to clipboard (\(recognizedCommand == .copyOnly ? "copyOnly command" : "autoInsert=off", privacy: .public))")
+            } else {
+                await insertIntoTargetApp(finalText)
             }
         } else {
             let bufferCount = capturedSamples
@@ -547,6 +553,11 @@ final class DictationEngine {
 
     // MARK: - Text Formatter Pipeline
 
+    // MARK: - Legacy Post-ASR Helpers
+
+    // These helpers are no longer on the active runtime path.
+    // FormattingPipeline.run(_:) is the single source of truth for live dictation.
+    // Keep this section read-only until the legacy implementation is fully removed.
     private func applyFormattingPipeline(
         rawASRText: String,
         normalizedText: String,

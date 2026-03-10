@@ -1,0 +1,88 @@
+{
+    "_comment": "STUB — replace after first successful eval run via: python Evals/metrics/zphyr_eval.py lock --run ... --confirm-reviewed --review-notes '...'",
+    "version": "1.0",
+    "locked_date": null,
+    "review_notes": "No baseline locked yet. Run the harness and lock after review.",
+    "source_metrics_file": null,
+    "formatting_score": null,
+    "global_hard_failures": null,
+    "categories": {
+        "technical": {
+            "L2": {
+                "wer": null,
+                "cer": null,
+                "entity_preservation": null,
+                "hard_failures": null,
+                "formatting_score": null,
+                "command_accuracy": null,
+                "mean_duration_ms": null
+            }
+        },
+        "commands": {
+            "L2": {
+                "wer": null,
+                "cer": null,
+                "entity_preservation": null,
+                "hard_failures": null,
+                "formatting_score": null,
+                "command_accuracy": null,
+                "mean_duration_ms": null
+            }
+        },
+        "prose": {
+            "L2": {
+                "wer": null,
+                "cer": null,
+                "entity_preservation": null,
+                "hard_failures": null,
+                "formatting_score": null,
+                "command_accuracy": null,
+                "mean_duration_ms": null
+            }
+        },
+        "short": {
+            "L2": {
+                "wer": null,
+                "cer": null,
+                "entity_preservation": null,
+                "hard_failures": null,
+                "formatting_score": null,
+                "command_accuracy": null,
+                "mean_duration_ms": null
+            }
+        },
+        "lists": {
+            "L2": {
+                "wer": null,
+                "cer": null,
+                "entity_preservation": null,
+                "hard_failures": null,
+                "formatting_score": null,
+                "command_accuracy": null,
+                "mean_duration_ms": null
+            }
+        },
+        "multilingual": {
+            "L2": {
+                "wer": null,
+                "cer": null,
+                "entity_preservation": null,
+                "hard_failures": null,
+                "formatting_score": null,
+                "command_accuracy": null,
+                "mean_duration_ms": null
+            }
+        },
+        "corrections": {
+            "L2": {
+                "wer": null,
+                "cer": null,
+                "entity_preservation": null,
+                "hard_failures": null,
+                "formatting_score": null,
+                "command_accuracy": null,
+                "mean_duration_ms": null
+            }
+        }
+    }
+}

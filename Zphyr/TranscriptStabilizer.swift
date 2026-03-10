@@ -212,7 +212,7 @@ final class TranscriptStabilizer {
         return transformed.joined(separator: "\n")
     }
 
-    private func applyToneFormattingToProse(
+    func applyToneFormattingToProse(
         _ text: String,
         tone: WritingTone,
         languageCode: String
