@@ -5,6 +5,7 @@ struct TextIntegrityVerifier {
     enum ValidationResult: Sendable {
         case valid
         case invalidIntroducedTokens([String])
+        case invalidProtectedTerms([String])
         case invalidDroppedContent(recall: Double, missingTokens: [String])
     }
 
@@ -32,15 +33,39 @@ struct TextIntegrityVerifier {
         self.allowedDroppedTokens = allowedDroppedTokens
     }
 
-    func validate(rawASRText: String, formattedText: String) -> ValidationResult {
-        validate(rawASRText: rawASRText, formattedText: formattedText, mode: .strict(minRecall: 0.0))
+    func validate(
+        rawASRText: String,
+        formattedText: String,
+        protectedTerms: [String] = []
+    ) -> ValidationResult {
+        validate(
+            rawASRText: rawASRText,
+            formattedText: formattedText,
+            protectedTerms: protectedTerms,
+            mode: .strict(minRecall: 0.0)
+        )
     }
 
-    func validate(rawASRText: String, formattedText: String, minRecall: Double) -> ValidationResult {
-        validate(rawASRText: rawASRText, formattedText: formattedText, mode: .strict(minRecall: minRecall))
+    func validate(
+        rawASRText: String,
+        formattedText: String,
+        protectedTerms: [String] = [],
+        minRecall: Double
+    ) -> ValidationResult {
+        validate(
+            rawASRText: rawASRText,
+            formattedText: formattedText,
+            protectedTerms: protectedTerms,
+            mode: .strict(minRecall: minRecall)
+        )
     }
 
-    func validate(rawASRText: String, formattedText: String, mode: ValidationMode) -> ValidationResult {
+    func validate(
+        rawASRText: String,
+        formattedText: String,
+        protectedTerms: [String] = [],
+        mode: ValidationMode
+    ) -> ValidationResult {
         switch mode {
         case .trustFormatterOutput(let reason):
             let trimmedOutput = formattedText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -56,11 +81,21 @@ struct TextIntegrityVerifier {
             return .valid
 
         case .strict(let minRecall):
-            return validateStrict(rawASRText: rawASRText, formattedText: formattedText, minRecall: minRecall)
+            return validateStrict(
+                rawASRText: rawASRText,
+                formattedText: formattedText,
+                protectedTerms: protectedTerms,
+                minRecall: minRecall
+            )
         }
     }
 
-    private func validateStrict(rawASRText: String, formattedText: String, minRecall: Double) -> ValidationResult {
+    private func validateStrict(
+        rawASRText: String,
+        formattedText: String,
+        protectedTerms: [String],
+        minRecall: Double
+    ) -> ValidationResult {
         let sourceTokenList = tokenize(rawASRText)
         let candidateTokenList = tokenize(formattedText)
 
@@ -72,6 +107,17 @@ struct TextIntegrityVerifier {
                 "[IntegrityVerifier] strict validation failed with empty candidate rawLen=\(rawASRText.count, privacy: .public)"
             )
             return .invalidIntroducedTokens(["<empty>"])
+        }
+
+        let relevantProtectedTerms = protectedTerms.filter {
+            !$0.isEmpty && rawASRText.localizedCaseInsensitiveContains($0)
+        }
+        let missingProtectedTerms = relevantProtectedTerms.filter { !formattedText.contains($0) }
+        if !missingProtectedTerms.isEmpty {
+            Self.log.warning(
+                "[IntegrityVerifier] strict validation rejected protected terms missing=\"\(missingProtectedTerms.prefix(12).joined(separator: ","), privacy: .public)\" rawPreview=\"\(Self.debugPreview(rawASRText), privacy: .public)\" formattedPreview=\"\(Self.debugPreview(formattedText), privacy: .public)\""
+            )
+            return .invalidProtectedTerms(missingProtectedTerms)
         }
 
         let introduced = candidateTokens

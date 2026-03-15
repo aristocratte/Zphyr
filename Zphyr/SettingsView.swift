@@ -205,6 +205,12 @@ struct GeneralSettingsContent: View {
     @Bindable private var state = AppState.shared
 
     private var lang: String { AppState.shared.uiDisplayLanguage.rawValue }
+    private var defaultOutputProfileBinding: Binding<OutputProfile> {
+        Binding(
+            get: { state.defaultOutputProfile },
+            set: { state.defaultOutputProfile = $0 }
+        )
+    }
 
     private static let uiLanguages: [(SupportedUILanguage, String)] = [
         (.fr, "\u{1F1EB}\u{1F1F7} Français"),
@@ -260,9 +266,118 @@ struct GeneralSettingsContent: View {
                 }
             }
 
+            SettingsCard {
+                SettingsRow(icon: "text.quote", iconColor: Color(hex: "#22D3B8"),
+                            title: t("Profil de sortie par défaut", "Default output profile", "Perfil de salida por defecto", "默认输出配置", "デフォルト出力プロファイル", "Профиль вывода по умолчанию"),
+                            subtitle: state.defaultOutputProfile.subtitle(for: lang),
+                            showDivider: false) {
+                    Picker("", selection: defaultOutputProfileBinding) {
+                        ForEach(OutputProfile.allCases) { profile in
+                            Text(profile.displayName(for: lang)).tag(profile)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 180)
+                }
+            }
+
+            SettingsCard {
+                SettingsRow(icon: "ladybug", iconColor: Color(hex: "#5856D6"),
+                            title: t("Export debug local", "Local debug export", "Export debug local", "本地调试导出", "ローカルデバッグ書き出し", "Локальный экспорт отладки"),
+                            subtitle: t("Génère session.json et summary.md pour la dernière session.", "Generates session.json and summary.md for the latest session.", "Genera session.json y summary.md para la última sesión.", "为最近一次会话生成 session.json 和 summary.md。", "直近セッションの session.json と summary.md を生成します。", "Генерирует session.json и summary.md для последней сессии."),
+                            showDivider: false) {
+                    Button(t("Exporter", "Export", "Exportar", "导出", "書き出し", "Экспорт")) {
+                        do {
+                            let exportURL = try SessionDebugExporter.shared.exportLatestSessionInteractively()
+                            NSWorkspace.shared.activateFileViewerSelecting([exportURL])
+                        } catch {
+                            AppState.shared.error = error.localizedDescription
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+
+            ProtectedTermsSettingsCard()
+
         }
         .onAppear {
             state.refreshPerformanceProfile()
+        }
+    }
+}
+
+private struct ProtectedTermsSettingsCard: View {
+    @Bindable private var store = DictionaryStore.shared
+    @State private var newProtectedTerm = ""
+    private var lang: String { AppState.shared.uiDisplayLanguage.rawValue }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(t("Glossary / protected terms", "Glossary / protected terms", "Glosario / términos protegidos", "词汇表 / 保护术语", "用語集 / 保護用語", "Глоссарий / защищенные термины"))
+                .font(.system(size: 20, weight: .bold))
+                .foregroundColor(Color(hex: "#1A1A1A"))
+
+            SettingsCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        TextField(
+                            t("Ajouter un terme protégé", "Add a protected term", "Añadir un término protegido", "添加保护术语", "保護用語を追加", "Добавить защищенный термин"),
+                            text: $newProtectedTerm
+                        )
+                        .textFieldStyle(.roundedBorder)
+
+                        Button(t("Ajouter", "Add", "Añadir", "添加", "追加", "Добавить")) {
+                            let trimmed = newProtectedTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !trimmed.isEmpty else { return }
+                            store.addProtectedTerm(trimmed)
+                            newProtectedTerm = ""
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+
+                    Text(
+                        t("Conservation stricte dans les profils Verbatim et Technique.",
+                          "Strictly preserved in Verbatim and Technical profiles.",
+                          "Conservación estricta en los perfiles Verbatim y Técnico.",
+                          "在 Verbatim 和 Technical 配置中严格保留。",
+                          "Verbatim と Technical プロファイルで厳密に保持します。",
+                          "Строго сохраняется в профилях Verbatim и Technical.")
+                    )
+                    .font(.system(size: 11))
+                    .foregroundColor(Color(hex: "#888880"))
+
+                    if store.sortedProtectedTerms.isEmpty {
+                        Text(t("Aucun terme protégé défini.", "No protected terms defined.", "No hay términos protegidos.", "未定义保护术语。", "保護用語は未設定です。", "Защищенные термины не заданы."))
+                            .font(.system(size: 12))
+                            .foregroundColor(Color(hex: "#AAAAAA"))
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(store.sortedProtectedTerms, id: \.self) { term in
+                                HStack {
+                                    Text(term)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(Color(hex: "#222220"))
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer()
+                                    Button {
+                                        if let index = store.protectedTerms.firstIndex(where: { $0 == term }) {
+                                            store.removeProtectedTerms(at: IndexSet(integer: index))
+                                        }
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(Color(hex: "#AAAAAA"))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(16)
+            }
         }
     }
 }
@@ -307,6 +422,19 @@ struct SystemSettingsContent: View {
         )
     }
 
+    private var formattingModelBinding: Binding<FormattingModelID> {
+        Binding(
+            get: { state.activeFormattingModel },
+            set: { newValue in
+                guard newValue != state.activeFormattingModel else { return }
+                state.activeFormattingModel = newValue
+                Task { @MainActor in
+                    AdvancedLLMFormatter.shared.unload()
+                }
+            }
+        )
+    }
+
     private var asrInstallURL: URL? {
         guard asrRequiresInstall else { return nil }
         let fm = FileManager.default
@@ -317,7 +445,46 @@ struct SystemSettingsContent: View {
     }
 
     private var formatterInstallURL: URL? {
-        AdvancedLLMFormatter.resolveInstallURL()
+        AdvancedLLMFormatter.resolveInstallURL(for: state.activeFormattingModel)
+    }
+
+    private var formatterDescriptor: FormattingModelDescriptor {
+        FormattingModelCatalog.descriptor(for: state.activeFormattingModel)
+    }
+
+    private var formatterInstallStatus: FormattingModelInstallStatus {
+        guard state.isProModeUnlocked else {
+            return .unavailable(
+                t(
+                    "Indisponible sur ce profil matériel.",
+                    "Unavailable on this hardware profile.",
+                    "No disponible en este perfil de hardware.",
+                    "此硬件配置不可用。",
+                    "このハードウェアプロファイルでは利用できません。",
+                    "Недоступно на этом профиле железа."
+                )
+            )
+        }
+        return AdvancedLLMFormatter.shared.installStatus(for: state.activeFormattingModel)
+    }
+
+    private var formatterInstallStatusText: String {
+        switch formatterInstallStatus {
+        case .installed:
+            return t("Installé", "Installed", "Instalado", "已安装", "インストール済み", "Установлен")
+        case .notInstalled:
+            return t("Non installé", "Not installed", "No instalado", "未安装", "未インストール", "Не установлен")
+        case .downloading(let progress):
+            return t("Téléchargement \(Int(progress * 100))%", "Downloading \(Int(progress * 100))%", "Descargando \(Int(progress * 100))%", "下载中 \(Int(progress * 100))%", "ダウンロード中 \(Int(progress * 100))%", "Загрузка \(Int(progress * 100))%")
+        case .preparing:
+            return t("Préparation…", "Preparing…", "Preparando…", "准备中…", "準備中…", "Подготовка…")
+        case .unavailable(let reason), .error(let reason):
+            return reason
+        }
+    }
+
+    private var formatterApproxSizeLabel: String {
+        ByteCountFormatter.string(fromByteCount: formatterDescriptor.approximateBytes, countStyle: .file)
     }
 
     var body: some View {
@@ -389,10 +556,57 @@ struct SystemSettingsContent: View {
                 }
             }
 
-            // Qwen model install card — only visible in advanced mode
-            if state.formattingMode == .advanced {
-                QwenModelCard()
+            SettingsCard {
+                SettingsRow(
+                    icon: "brain.head.profile",
+                    iconColor: Color(hex: "#22D3B8"),
+                    title: t("Modèle de formatage", "Formatting model", "Modelo de formateo", "格式化模型", "フォーマットモデル", "Модель форматирования"),
+                    subtitle: state.activeFormattingModel.shortDescription(for: lang),
+                    showDivider: true
+                ) {
+                    Picker("", selection: formattingModelBinding) {
+                        ForEach(FormattingModelID.allCases) { modelID in
+                            Text(modelID.displayName(for: lang)).tag(modelID)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 190)
+                }
+
+                SettingsRow(
+                    icon: "sparkles",
+                    iconColor: Color(hex: "#AF52DE"),
+                    title: t("Usage recommandé", "Recommended use", "Uso recomendado", "推荐用途", "推奨用途", "Рекомендуемое применение"),
+                    subtitle: state.activeFormattingModel.recommendedUsage(for: lang),
+                    showDivider: true
+                ) {
+                    Text(formatterApproxSizeLabel)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Color(hex: "#666660"))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(hex: "#F0F0EE"))
+                        .cornerRadius(7)
+                }
+
+                SettingsRow(
+                    icon: "checkmark.seal",
+                    iconColor: Color(hex: "#007AFF"),
+                    title: t("État du modèle", "Model status", "Estado del modelo", "模型状态", "モデル状態", "Состояние модели"),
+                    subtitle: formatterInstallStatusText,
+                    showDivider: false
+                ) {
+                    Text(formatterInstallStatusText)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Color(hex: "#007AFF"))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(hex: "#007AFF").opacity(0.08))
+                        .cornerRadius(7)
+                }
             }
+
+            FormattingModelCard(modelID: state.activeFormattingModel)
 
             // Model status card
             SettingsCard {
@@ -404,8 +618,6 @@ struct SystemSettingsContent: View {
                     showDivider: true
                 ) {
                     Picker("", selection: asrBackendBinding) {
-                        Text("Apple Speech Analyzer")
-                            .tag(ASRBackendKind.appleSpeechAnalyzer)
                         Text("Whisper Large v3 Turbo")
                             .tag(ASRBackendKind.whisperKit)
                             .disabled(!state.isWhisperASRUnlocked)
@@ -542,7 +754,7 @@ struct SystemSettingsContent: View {
                 SettingsRow(
                     icon: "folder.fill",
                     iconColor: Color(hex: "#22D3B8"),
-                    title: t("Chemin Zphyr-v1 (formatage)", "Zphyr-v1 path (formatting)", "Ruta Zphyr-v1 (formato)", "Zphyr-v1 路径（格式化）", "Zphyr-v1 パス（整形）", "Путь Zphyr-v1 (форматирование)"),
+                    title: t("Chemin modèle de formatage", "Formatting model path", "Ruta del modelo de formateo", "格式化模型路径", "フォーマットモデルのパス", "Путь модели форматирования"),
                     subtitle: formatterInstallURL?.path ?? t("Non installé", "Not installed", "No instalado", "未安装", "未インストール", "Не установлен"),
                     showDivider: false
                 ) {
@@ -1075,20 +1287,32 @@ struct SCustomShortcutRecorder: View {
     }
 }
 
-// MARK: - Qwen Model Card
+// MARK: - Formatting Model Card
 
-private struct QwenModelCard: View {
+private struct FormattingModelCard: View {
+    let modelID: FormattingModelID
     @State private var formatter = AdvancedLLMFormatter.shared
     private var lang: String { AppState.shared.uiDisplayLanguage.rawValue }
+    private var descriptor: FormattingModelDescriptor { FormattingModelCatalog.descriptor(for: modelID) }
 
-    /// Single source of truth: model files exist on disk.
     private var isModelOnDisk: Bool {
-        AdvancedLLMFormatter.resolveInstallURL() != nil
+        AdvancedLLMFormatter.resolveInstallURL(for: modelID) != nil
+    }
+
+    private var modelStatus: FormattingModelInstallStatus {
+        guard AppState.shared.isProModeUnlocked else {
+            return .unavailable(L10n.ui(for: lang, fr: "Indisponible sur ce profil matériel.", en: "Unavailable on this hardware profile.", es: "No disponible en este perfil de hardware.", zh: "此硬件配置不可用。", ja: "このハードウェアプロファイルでは利用できません。", ru: "Недоступно на этом профиле железа."))
+        }
+        return formatter.installStatus(for: modelID)
+    }
+
+    private var sizeLabel: String {
+        ByteCountFormatter.string(fromByteCount: descriptor.approximateBytes, countStyle: .file)
     }
 
     var body: some View {
         SettingsCard {
-            if formatter.isInstalling {
+            if formatter.isInstalling && formatter.installingModelID == modelID {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 10) {
                         ZStack {
@@ -1100,7 +1324,7 @@ private struct QwenModelCard: View {
                                 .foregroundColor(Color(hex: "#22D3B8"))
                         }
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Zphyr-v1 (fine-tuned)")
+                            Text(modelID.displayName(for: lang))
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(Color(hex: "#1A1A1A"))
                             HStack(spacing: 5) {
@@ -1129,7 +1353,7 @@ private struct QwenModelCard: View {
                                 .font(.system(size: 12, weight: .semibold).monospacedDigit())
                                 .foregroundColor(Color(hex: "#22D3B8"))
                             Button(L10n.ui(for: lang, fr: "Annuler", en: "Cancel", es: "Cancelar", zh: "取消", ja: "キャンセル", ru: "Отмена")) {
-                                AdvancedLLMFormatter.shared.cancelInstall()
+                                formatter.cancelInstall()
                             }
                             .buttonStyle(.plain)
                             .font(.system(size: 11, weight: .medium))
@@ -1150,42 +1374,104 @@ private struct QwenModelCard: View {
                 SettingsRow(
                     icon: "brain.head.profile",
                     iconColor: Color(hex: "#22D3B8"),
-                    title: "Zphyr-v1 (fine-tuned)",
-                    subtitle: L10n.ui(for: lang, fr: "Installé · IA locale prête", en: "Installed · local AI ready", es: "Instalado · IA local lista", zh: "已安装 · 本地 AI 就绪", ja: "インストール済み · ローカル AI 準備完了", ru: "Установлен · локальный ИИ готов"),
+                    title: modelID.displayName(for: lang),
+                    subtitle: "\(L10n.ui(for: lang, fr: "Installé · IA locale prête", en: "Installed · local AI ready", es: "Instalado · IA local lista", zh: "已安装 · 本地 AI 就绪", ja: "インストール済み · ローカル AI 準備完了", ru: "Установлен · локальный ИИ готов")) · \(sizeLabel)",
                     showDivider: false
                 ) {
-                    Button(L10n.ui(for: lang, fr: "Supprimer", en: "Remove", es: "Eliminar", zh: "删除", ja: "削除", ru: "Удалить")) {
-                        AdvancedLLMFormatter.shared.unload()
-                        AppState.shared.advancedModeInstalled = false
-                        AdvancedLLMFormatter.removeModelFromDisk()
+                    HStack(spacing: 12) {
+                        Button(L10n.ui(for: lang, fr: "Recharger", en: "Reload", es: "Recargar", zh: "重新加载", ja: "再読み込み", ru: "Перезагрузить")) {
+                            formatter.unload()
+                            Task {
+                                await formatter.loadIfInstalled(modelID: modelID)
+                                await formatter.warmup()
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color(hex: "#007AFF"))
+
+                        Button(L10n.ui(for: lang, fr: "Supprimer", en: "Remove", es: "Eliminar", zh: "删除", ja: "削除", ru: "Удалить")) {
+                            formatter.unload()
+                            AdvancedLLMFormatter.removeModelFromDisk(modelID: modelID)
+                            AppState.shared.syncActiveFormattingModelInstallState()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color(hex: "#FF3B30"))
                     }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(Color(hex: "#FF3B30"))
                 }
-                .onAppear {
-                    if !AppState.shared.advancedModeInstalled {
-                        AppState.shared.advancedModeInstalled = true
+
+                // RAM resident warning — shown only when model is actually loaded in memory
+                if formatter.loadedModelID == modelID {
+                    Divider()
+                        .padding(.horizontal, 16)
+                    HStack(spacing: 10) {
+                        Image(systemName: "memorychip")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(Color(hex: "#FF9500"))
+                        Text(L10n.ui(for: lang,
+                            fr: "Modèle chargé en RAM (\(sizeLabel)) — peut réduire la mémoire disponible pour d'autres applications gourmandes.",
+                            en: "Model loaded in RAM (\(sizeLabel)) — may reduce available memory for other resource-intensive apps.",
+                            es: "Modelo cargado en RAM (\(sizeLabel)) — puede reducir la memoria disponible para otras apps exigentes.",
+                            zh: "模型已载入内存（\(sizeLabel)）— 可能影响其他高内存占用应用的可用空间。",
+                            ja: "モデルがRAMに読み込まれています（\(sizeLabel)）— 他のメモリ集約型アプリに影響する場合があります。",
+                            ru: "Модель загружена в ОЗУ (\(sizeLabel)) — может сократить доступную память для ресурсоёмких приложений."
+                        ))
+                        .font(.system(size: 11))
+                        .foregroundColor(Color(hex: "#7A4A00"))
+                        .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color(hex: "#FF9500").opacity(0.08))
                 }
             } else {
+                let subtitle: String = {
+                    switch modelStatus {
+                    case .unavailable(let reason), .error(let reason):
+                        return reason
+                    default:
+                        return "\(sizeLabel) · \(modelID.shortDescription(for: lang))"
+                    }
+                }()
+
                 SettingsRow(
-                    icon: formatter.installError != nil ? "exclamationmark.triangle.fill" : "arrow.down.circle.fill",
-                    iconColor: formatter.installError != nil ? Color(hex: "#FF9500") : Color(hex: "#AF52DE"),
-                    title: "Zphyr-v1 (fine-tuned)",
-                    subtitle: formatter.installError ?? L10n.ui(for: lang, fr: "~1,1 Go · IA locale sur Apple Silicon", en: "~1.1 GB · Local AI on Apple Silicon", es: "~1,1 GB · IA local en Apple Silicon", zh: "~1.1 GB · Apple Silicon 本地 AI", ja: "~1.1 GB · Apple Silicon ローカル AI", ru: "~1,1 ГБ · локальный ИИ на Apple Silicon"),
+                    icon: {
+                        switch modelStatus {
+                        case .unavailable, .error:
+                            return "exclamationmark.triangle.fill"
+                        default:
+                            return "arrow.down.circle.fill"
+                        }
+                    }(),
+                    iconColor: {
+                        switch modelStatus {
+                        case .unavailable, .error:
+                            return Color(hex: "#FF9500")
+                        default:
+                            return Color(hex: "#AF52DE")
+                        }
+                    }(),
+                    title: modelID.displayName(for: lang),
+                    subtitle: subtitle,
                     showDivider: false
                 ) {
-                    if formatter.installError != nil {
+                    switch modelStatus {
+                    case .unavailable:
+                        Text(L10n.ui(for: lang, fr: "Indisponible", en: "Unavailable", es: "No disponible", zh: "不可用", ja: "利用不可", ru: "Недоступно"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(Color(hex: "#FF9500"))
+                    case .error:
                         Button(L10n.ui(for: lang, fr: "Réessayer", en: "Retry", es: "Reintentar", zh: "重试", ja: "再試行", ru: "Повторить")) {
-                            Task { await AdvancedLLMFormatter.shared.installModel() }
+                            Task { await formatter.installModel(modelID: modelID) }
                         }
                         .buttonStyle(.plain)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(Color(hex: "#FF9500"))
-                    } else {
+                    default:
                         Button(L10n.ui(for: lang, fr: "Installer", en: "Install", es: "Instalar", zh: "安装", ja: "インストール", ru: "Установить")) {
-                            Task { await AdvancedLLMFormatter.shared.installModel() }
+                            Task { await formatter.installModel(modelID: modelID) }
                         }
                         .buttonStyle(.plain)
                         .font(.system(size: 12, weight: .semibold))

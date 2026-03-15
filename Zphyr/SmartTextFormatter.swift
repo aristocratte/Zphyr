@@ -143,8 +143,10 @@ final class SmartTextFormatter {
             var items: [String] = []
             items.reserveCapacity(group.count)
             var blockEnd = group.last?.range.location ?? groupUpperBound
+            var foundLastMarker = false
 
             for markerIndex in 0..<group.count {
+                if foundLastMarker { break }
                 let marker = group[markerIndex]
                 let itemStart = marker.range.location + marker.range.length
                 let itemEnd: Int
@@ -158,6 +160,12 @@ final class SmartTextFormatter {
                 let rawItem = nsText.substring(with: NSRange(location: itemStart, length: itemEnd - itemStart))
                 guard let cleanedItem = normalizedListItem(rawItem), cleanedItem.count >= 2 else { continue }
                 items.append(cleanedItem)
+
+                // Stop after the first "last" marker — following markers are narrative text
+                if marker.numberOfRanges >= 2 {
+                    let markerText = normalizedMarker(nsText.substring(with: marker.range(at: 1)))
+                    if lastSet.contains(markerText) { foundLastMarker = true }
+                }
             }
 
             guard items.count >= 2, let firstMarker = group.first else { continue }

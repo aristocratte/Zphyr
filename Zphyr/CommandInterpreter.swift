@@ -34,23 +34,60 @@ struct CommandInterpreter {
         let lower = trimmed.lowercased()
 
         let cancelPhrases = abortPhrases(for: languageCode)
+
+        // Pass 1: Exact full match and suffix match
         for phrase in cancelPhrases {
-            if lower == phrase || lower.hasPrefix(phrase + " ") || lower.hasPrefix(phrase + ",") {
-                // Entire utterance is an abort command
+            // Entire utterance is the abort command
+            if lower == phrase {
                 return (.cancelLast, "")
             }
+            // Abort command at the end — strip it, return content before
             if lower.hasSuffix(" " + phrase) || lower.hasSuffix("," + phrase) || lower.hasSuffix(", " + phrase) {
-                // Abort command at the end — strip it, return remaining text
                 let endIndex = lower.range(of: phrase, options: .backwards)!.lowerBound
                 let remaining = String(trimmed[trimmed.startIndex..<endIndex])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .trimmingCharacters(in: CharacterSet(charactersIn: ","))
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                if remaining.isEmpty {
-                    return (.cancelLast, "")
-                }
                 return (.cancelLast, remaining)
             }
+        }
+
+        // Pass 2: Abort phrase embedded mid-utterance with content before it.
+        // Fires only when:
+        //   (a) the content before the phrase is entirely filler/hesitation words, OR
+        //   (b) the content after the phrase contains another abort phrase.
+        // This catches e.g. "send this to Jean cancel never mind actually send it"
+        // without false-positiving on "I need to cancel the appointment".
+        let fillerWords: Set<String> = [
+            "wait", "actually", "um", "uh", "hmm", "so", "like", "well", "okay", "ok", "right", "just"
+        ]
+        for phrase in cancelPhrases {
+            let escaped = NSRegularExpression.escapedPattern(for: phrase)
+            guard let regex = try? NSRegularExpression(pattern: "\\b\(escaped)\\b"),
+                  let match = regex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)),
+                  let range = Range(match.range, in: lower) else { continue }
+
+            // Must have content before the phrase (not at utterance start)
+            guard range.lowerBound != lower.startIndex else { continue }
+
+            let before = String(trimmed[trimmed.startIndex..<range.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let after = String(lower[range.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Condition (a): everything before is filler
+            let beforeWords = before.lowercased().split(separator: " ").map(String.init)
+            let beforeAllFillers = !beforeWords.isEmpty && beforeWords.allSatisfy { fillerWords.contains($0) }
+
+            // Condition (b): content after contains another abort phrase
+            let afterHasAbort = cancelPhrases.contains { p in after.contains(p) }
+
+            guard beforeAllFillers || afterHasAbort else { continue }
+
+            let contentBefore = beforeAllFillers ? "" : before
+                .trimmingCharacters(in: CharacterSet(charactersIn: ","))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (.cancelLast, contentBefore)
         }
 
         return (.none, transcript)
@@ -149,6 +186,18 @@ struct CommandInterpreter {
             if charAfter.isLetter || charAfter.isNumber { return nil }
         }
 
+        // Only match at the START or END of the utterance.
+        // Matching command phrases embedded in the middle of natural speech
+        // causes false positives (e.g. "I'll copy that" triggers copyOnly).
+        let isAtStart = range.lowerBound == lower.startIndex
+        let isAtEnd: Bool = {
+            let trailing = String(lower[range.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: ".,"))
+            return trailing.isEmpty
+        }()
+        guard isAtStart || isAtEnd else { return nil }
+
         // Map back to original text indices
         return range
     }
@@ -160,7 +209,7 @@ struct CommandInterpreter {
         case "fr":
             return ["annule", "annuler", "annule ça", "annuler ça", "oublie", "oublie ça", "laisse tomber"]
         case "es":
-            return ["cancela", "cancelar", "cancela eso", "olvida", "olvida eso"]
+            return ["cancela", "cancelar", "cancela eso", "olvida", "olvida eso", "borra", "borra eso"]
         case "de":
             return ["abbrechen", "rückgängig", "vergiss das"]
         default:

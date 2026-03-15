@@ -122,6 +122,28 @@ struct StyleView: View {
                 .cornerRadius(14)
                 .shadow(color: .black.opacity(0.04), radius: 6, x: 0, y: 1)
 
+                VStack(spacing: 0) {
+                    ForEach(OutputProfile.allCases) { profile in
+                        OutputProfileRow(
+                            profile: profile,
+                            languageCode: languageCode,
+                            isSelected: currentOutputProfile == profile
+                        ) {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+                                setOutputProfile(profile)
+                            }
+                        }
+                        if profile != OutputProfile.allCases.last {
+                            Divider()
+                                .padding(.leading, 58)
+                                .padding(.trailing, 16)
+                        }
+                    }
+                }
+                .background(Color.white)
+                .cornerRadius(14)
+                .shadow(color: .black.opacity(0.04), radius: 6, x: 0, y: 1)
+
                 if let notice = state.advancedFeaturesNotice {
                     Text(notice)
                         .font(.system(size: 11))
@@ -150,6 +172,24 @@ struct StyleView: View {
         case .work:     state.styleWork     = tone
         case .email:    state.styleEmail    = tone
         case .other:    state.styleOther    = tone
+        }
+    }
+
+    private var currentOutputProfile: OutputProfile {
+        switch selectedContext {
+        case .personal: return state.outputProfilePersonal
+        case .work:     return state.outputProfileWork
+        case .email:    return state.outputProfileEmail
+        case .other:    return state.outputProfileOther
+        }
+    }
+
+    private func setOutputProfile(_ profile: OutputProfile) {
+        switch selectedContext {
+        case .personal: state.outputProfilePersonal = profile
+        case .work:     state.outputProfileWork = profile
+        case .email:    state.outputProfileEmail = profile
+        case .other:    state.outputProfileOther = profile
         }
     }
 }
@@ -250,6 +290,55 @@ private struct ToneRow: View {
         case (.other, .veryCasual):
             return L10n.ui(for: languageCode, fr: "j'aime bien cette routine", en: "i like this routine", es: "me gusta esta rutina", zh: "这个流程不错", ja: "このルーティンいい", ru: "мне нравится этот процесс")
         }
+    }
+}
+
+private struct OutputProfileRow: View {
+    let profile: OutputProfile
+    let languageCode: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    private var accentColor: Color { Color(hex: "0A84FF") }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(isSelected ? accentColor.opacity(0.12) : Color(hex: "F0F0EE"))
+                        .frame(width: 36, height: 36)
+                    Image(systemName: "text.quote")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(isSelected ? accentColor : Color(hex: "888880"))
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(profile.displayName(for: languageCode))
+                        .font(.system(size: 13.5, weight: isSelected ? .semibold : .regular))
+                        .foregroundColor(Color(hex: "111111"))
+                    Text(profile.subtitle(for: languageCode))
+                        .font(.system(size: 11.5))
+                        .foregroundColor(Color(hex: "AAAAAA"))
+                }
+
+                Spacer()
+
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(accentColor)
+                    .opacity(isSelected ? 1 : 0)
+                    .frame(width: 16)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 13)
+            .background(isHovered && !isSelected ? Color(hex: "F8F8F7") : Color.white)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
     }
 }
 

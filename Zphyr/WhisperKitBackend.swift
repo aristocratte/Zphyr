@@ -176,7 +176,8 @@ final class WhisperKitBackend: ASRService {
             temperatureFallbackCount: 3,
             usePrefillPrompt: languageHint != nil,
             skipSpecialTokens: true,
-            withoutTimestamps: true
+            withoutTimestamps: false,  // must be false — WhisperKit needs timestamps for seek advancement in multi-window decoding
+            chunkingStrategy: .vad    // pre-split at VAD boundaries for reliable long-audio transcription
         )
 
         let results: [TranscriptionResult] = try await kit.transcribe(

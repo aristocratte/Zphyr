@@ -1,0 +1,155 @@
+{
+  "dataset": "zphyr_v2_validated_ft",
+  "mode": "advanced",
+  "label": "postft_v2_round1",
+  "val": {
+    "split_name": "v2_validated_val",
+    "source_artifact": "/Users/aris/Documents/VoiceProject/Zphyr/Evals/reports/seed_split_postft_v2_round1_v2_validated_val_advanced_L2.json",
+    "overall": {
+      "wer": 0.25274343088714346,
+      "cer": 0.09933608176506964,
+      "total_examples": 167
+    },
+    "by_category": {
+      "commands": {
+        "wer": 0.1626984126984127,
+        "cer": 0.027939762283018445,
+        "count": 24
+      },
+      "corrections": {
+        "wer": 0.2717757936507937,
+        "cer": 0.13238364789113602,
+        "count": 24
+      },
+      "lists": {
+        "wer": 0.43297073297073296,
+        "cer": 0.28938726720590746,
+        "count": 21
+      },
+      "multilingual": {
+        "wer": 0.13839285714285712,
+        "cer": 0.026313867848752337,
+        "count": 24
+      },
+      "prose": {
+        "wer": 0.2809074259074259,
+        "cer": 0.06922903291768331,
+        "count": 20
+      },
+      "short": {
+        "wer": 0.34722222222222227,
+        "cer": 0.14959764607597426,
+        "count": 24
+      },
+      "technical": {
+        "wer": 0.18051587301587302,
+        "cer": 0.03525914022385869,
+        "count": 30
+      }
+    },
+    "null_edit_preservation": {
+      "total": 0,
+      "preserved": 0,
+      "rate": 0.0
+    },
+    "protected_terms": {
+      "total_examples_with_terms": 54,
+      "total_terms": 78,
+      "survived": 59,
+      "accuracy": 0.7564102564102564
+    },
+    "hard_negatives": {
+      "total": 16,
+      "passed": 2,
+      "pass_rate": 0.125
+    },
+    "translation_violations": {
+      "total": 0
+    },
+    "reasoning_tag_contamination": {
+      "total": 0
+    },
+    "latency_ms": {
+      "mean": 334.61004103015284
+    },
+    "rewrite_stage": {
+      "ran_count": 166,
+      "ran_rate": 0.9940119760479041
+    }
+  },
+  "test": {
+    "split_name": "v2_validated_test",
+    "source_artifact": "/Users/aris/Documents/VoiceProject/Zphyr/Evals/reports/seed_split_postft_v2_round1_v2_validated_test_advanced_L2.json",
+    "overall": {
+      "wer": 0.257795124037639,
+      "cer": 0.11180604991198757,
+      "total_examples": 167
+    },
+    "by_category": {
+      "commands": {
+        "wer": 0.20793650793650792,
+        "cer": 0.06449480775033409,
+        "count": 21
+      },
+      "corrections": {
+        "wer": 0.31363636363636366,
+        "cer": 0.15705984621557081,
+        "count": 22
+      },
+      "lists": {
+        "wer": 0.45555555555555555,
+        "cer": 0.31855550562848634,
+        "count": 21
+      },
+      "multilingual": {
+        "wer": 0.13913690476190474,
+        "cer": 0.026339921802097738,
+        "count": 24
+      },
+      "prose": {
+        "wer": 0.18783333333333335,
+        "cer": 0.030289062984922323,
+        "count": 25
+      },
+      "short": {
+        "wer": 0.2986111111111111,
+        "cer": 0.1631531526752115,
+        "count": 24
+      },
+      "technical": {
+        "wer": 0.2338888888888889,
+        "cer": 0.06223922585085521,
+        "count": 30
+      }
+    },
+    "null_edit_preservation": {
+      "total": 0,
+      "preserved": 0,
+      "rate": 0.0
+    },
+    "protected_terms": {
+      "total_examples_with_terms": 54,
+      "total_terms": 78,
+      "survived": 58,
+      "accuracy": 0.7435897435897436
+    },
+    "hard_negatives": {
+      "total": 14,
+      "passed": 2,
+      "pass_rate": 0.14285714285714285
+    },
+    "translation_violations": {
+      "total": 0
+    },
+    "reasoning_tag_contamination": {
+      "total": 0
+    },
+    "latency_ms": {
+      "mean": 353.7920706286402
+    },
+    "rewrite_stage": {
+      "ran_count": 166,
+      "ran_rate": 0.9940119760479041
+    }
+  }
+}

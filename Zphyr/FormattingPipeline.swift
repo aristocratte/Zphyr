@@ -52,10 +52,16 @@ final class FormattingPipeline {
             languageCode: input.languageCode,
             targetBundleID: input.targetBundleID,
             tone: activeTone(bundleID: input.targetBundleID),
+            outputProfile: state.activeOutputProfile(for: input.targetBundleID),
+            formattingModelID: state.activeFormattingModel,
+            protectedTerms: DictionaryStore.shared.sortedProtectedTerms,
             defaultCodeStyle: state.defaultCodeStyle,
             formattingMode: effectiveMode,
             isProModeUnlocked: state.isProModeUnlocked,
-            isLLMLoaded: AdvancedLLMFormatter.shared.isModelLoaded
+            isLLMLoaded: AdvancedLLMFormatter.shared.isModelLoaded(modelID: state.activeFormattingModel)
+        )
+        Self.log.notice(
+            "[Pipeline] profile=\(metadata.outputProfile.rawValue, privacy: .public) formatterModel=\(metadata.formattingModelID.rawValue, privacy: .public) protectedTerms=\(metadata.protectedTerms.count, privacy: .public) formattingMode=\(metadata.formattingMode.rawValue, privacy: .public)"
         )
 
         // ── Abort command pre-scan ─────────────────────────────────────────
@@ -65,15 +71,17 @@ final class FormattingPipeline {
         if abortCommand != .none {
             let abortTrace = StageTrace.record(
                 name: "AbortCommandScan", index: 0,
-                input: input.rawText, output: "",
+                input: input.rawText, output: cleanedText,
                 durationMs: (CFAbsoluteTimeGetCurrent() - pipelineStart) * 1_000,
                 transformations: ["detected_abort_command:\(abortCommand)"]
             )
             lastTrace = [abortTrace]
             Self.log.notice("[Pipeline] abort command detected — short-circuiting")
             return PipelineResult(
-                finalText: "",
+                finalText: cleanedText,
                 extractedCommand: abortCommand,
+                decision: .commandShortCircuit,
+                fallbackReason: .abortCommandDetected,
                 trace: [abortTrace],
                 totalDurationMs: (CFAbsoluteTimeGetCurrent() - pipelineStart) * 1_000,
                 listBlocksCount: 0
@@ -91,6 +99,7 @@ final class FormattingPipeline {
         traces.reserveCapacity(stages.count)
 
         for (index, stage) in stages.enumerated() {
+            io = io.clearingStageMetadata()
             let stageStart = CFAbsoluteTimeGetCurrent()
             let inputText = io.text
             io = await stage.process(io)
@@ -102,9 +111,9 @@ final class FormattingPipeline {
                 input: inputText,
                 output: io.text,
                 durationMs: durationMs,
-                transformations: [],
+                transformations: io.stageTransformations,
                 isModelBased: stage.isModelBased,
-                wasSkipped: inputText == io.text && !stage.isModelBased
+                wasSkipped: io.stageWasSkipped || (inputText == io.text && !stage.isModelBased)
             )
             traces.append(trace)
 
@@ -117,12 +126,14 @@ final class FormattingPipeline {
         lastTrace = traces
 
         Self.log.notice(
-            "[Pipeline] completed stages=\(traces.count, privacy: .public) total=\(String(format: "%.1f", totalMs), privacy: .public)ms command=\(String(describing: io.extractedCommand), privacy: .public)"
+            "[Pipeline] completed stages=\(traces.count, privacy: .public) total=\(String(format: "%.1f", totalMs), privacy: .public)ms command=\(String(describing: io.extractedCommand), privacy: .public) decision=\(io.pipelineDecision.rawValue, privacy: .public) fallbackReason=\(io.fallbackReason?.rawValue ?? "none", privacy: .public)"
         )
 
         return PipelineResult(
             finalText: io.text,
             extractedCommand: io.extractedCommand,
+            decision: io.pipelineDecision,
+            fallbackReason: io.fallbackReason,
             trace: traces,
             totalDurationMs: totalMs,
             listBlocksCount: formattingNormalization.lastListBlocksCount
@@ -170,7 +181,6 @@ struct TranscriptCleanupStage: PipelineStage {
 
 /// Conservative filler word removal and exact word-level repetition removal.
 /// Only removes unambiguous fillers. Does NOT remove false starts or partial words.
-@MainActor
 final class DisfluencyRemovalStage: PipelineStage {
     let name = "DisfluencyRemoval"
 
@@ -179,9 +189,25 @@ final class DisfluencyRemovalStage: PipelineStage {
     private let repetitionRegex = try? NSRegularExpression(
         pattern: #"(?i)\b(\w{2,})(?:\s+\1){1,3}\b"#
     )
+    // Words that encode punctuation symbols — "dash dash" → "--", never collapse to "dash"
+    private static let spokenSymbolMarkers: Set<String> = [
+        "dash", "slash", "dot", "underscore", "backslash", "plus"
+    ]
+
+    nonisolated deinit {}
 
     func process(_ input: StageIO) -> StageIO {
         guard !input.text.isEmpty else { return input }
+        if input.metadata.outputProfile == .verbatim {
+            return input.withText(
+                input.text,
+                stageTransformations: ["disfluency_skipped_verbatim"],
+                stageWasSkipped: true
+            )
+        }
+        if isPureFillerUtterance(input.text, languageCode: input.metadata.languageCode) {
+            return input.withText("")
+        }
         var text = input.text
         let lang = input.metadata.languageCode
 
@@ -206,8 +232,8 @@ final class DisfluencyRemovalStage: PipelineStage {
                       let wordRange = Range(match.range(at: 1), in: mutableText),
                       let fullRange = Range(match.range, in: mutableText) else { continue }
                 let word = String(mutableText[wordRange])
-                // Keep short-word repetitions (emphasis patterns like "no no")
-                guard word.count > 3 else { continue }
+                // Keep short-word repetitions AND known spoken symbol markers ("dash dash" → "--")
+                guard word.count > 3, !Self.spokenSymbolMarkers.contains(word.lowercased()) else { continue }
                 mutableText.replaceSubrange(fullRange, with: word)
             }
             text = mutableText
@@ -257,23 +283,95 @@ final class DisfluencyRemovalStage: PipelineStage {
         case .ru: return ru + common
         }
     }
+
+    private func isPureFillerUtterance(_ text: String, languageCode: String) -> Bool {
+        let lowered = text.lowercased()
+        guard text == lowered else { return false }
+        let fillerTokens = pureFillerTokenSet(for: languageCode)
+        let tokens = lowered
+            .split(whereSeparator: \.isWhitespace)
+            .map {
+                $0.trimmingCharacters(in: CharacterSet.punctuationCharacters)
+            }
+            .filter { !$0.isEmpty }
+        guard !tokens.isEmpty else { return false }
+        return tokens.allSatisfy { fillerTokens.contains(String($0)) }
+    }
+
+    private func pureFillerTokenSet(for languageCode: String) -> Set<String> {
+        var tokens = Set(
+            fillerWords(for: languageCode)
+                .map { $0.lowercased().trimmingCharacters(in: CharacterSet.punctuationCharacters) }
+                .filter { !$0.isEmpty }
+        )
+        if SupportedUILanguage.fromWhisperCode(languageCode) == .en {
+            tokens.insert("er")
+        }
+        return tokens
+    }
 }
 
 // MARK: - Stage 3: Punctuation & Capitalization
 
 /// Spoken punctuation → symbols, sentence capitalization, proper noun capitalization,
 /// transition sentence boundaries.
-@MainActor
 final class PunctuationCapitalizationStage: PipelineStage {
     let name = "PunctuationCapitalization"
 
     private var formalPunctuationRuleCache: [String: [(regex: NSRegularExpression, replacement: String)]] = [:]
     private var transitionRuleCache: [String: [TransitionBoundaryRule]] = [:]
 
+    nonisolated deinit {}
+
     private let spaceBeforePunctuationRegex = try? NSRegularExpression(pattern: "\\s+([,;:.!?\\)])")
-    private let missingSpaceAfterPunctuationRegex = try? NSRegularExpression(pattern: "([,;:.!?])([^\\s])")
+    // Note: excludes . and : to avoid corrupting URLs (https://), floats (3.14), version numbers (3.14.1)
+    private let missingSpaceAfterPunctuationRegex = try? NSRegularExpression(pattern: "([,;!?])([^\\s])")
+
+    // Spoken technical symbol reconstruction (slash/dot/underscore/etc. → actual symbols)
+    private let spokenSymbolRegexes: [(regex: NSRegularExpression, template: String)] = {
+        let rules: [(String, String)] = [
+            // slash / underscore / backslash
+            (#"(?i)\bslash\b"#, "/"),
+            (#"(?i)\bunderscore\b"#, "_"),
+            (#"(?i)\bbackslash\b"#, #"\\"#),
+            // dot between word chars: "config dot yaml" → "config.yaml"
+            (#"(?i)([a-zA-Z0-9])\s+dot\s+([a-zA-Z0-9])"#, "$1.$2"),
+            // plus after word chars: for regex patterns like \d+
+            (#"([a-zA-Z0-9])\s+plus\b"#, "$1+"),
+            // at → @ for email-like pattern: left side must already contain a dot
+            (#"([a-zA-Z0-9]+\.[a-zA-Z0-9]+)\s+at\s+([a-zA-Z0-9])"#, "$1@$2"),
+            // at → @ for email-like pattern: right side has known domain (accounts at github.com)
+            (#"([a-zA-Z0-9._-]+)\s+at\s+([a-zA-Z0-9][a-zA-Z0-9._-]*\.(?:com|io|net|org|app|dev|ai|co|fr|de|uk|ca|ru|jp|cn|us|eu))\b"#, "$1@$2"),
+            // at → @ for decorator/dotted-name pattern: "at app.route" → "@app.route"
+            // (fires only inside reconstructSpokenSymbols which requires a tech indicator)
+            (#"\bat\s+([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_./]*)"#, "@$1"),
+            // Collapse spaces: "word / word" → "word/word" (includes accented chars for fr/es)
+            (#"([\p{L}a-zA-Z0-9_.@-])\s*/\s*([\p{L}a-zA-Z0-9_.@-])"#, "$1/$2"),
+            // at → @ for npm-style scope: "at scope/mypackage" → "@scope/mypackage"
+            // Runs after slash-space collapse so "slash" has already become "/"
+            (#"\bat\s+([a-zA-Z_][a-zA-Z0-9_]*/[a-zA-Z_][a-zA-Z0-9_./]*)"#, "@$1"),
+            // Collapse spaces: "word _ word" → "word_word"
+            (#"([a-zA-Z0-9])\s+_\s+([a-zA-Z0-9])"#, "$1_$2"),
+            // Collapse spaces: "word : word" → "word:word" (git@host:org)
+            (#"([a-zA-Z0-9_.@])\s*:\s*([a-zA-Z0-9_.@/])"#, "$1:$2"),
+            // Collapse backslash-space-letter: "\ d" → "\d"
+            (#"\\\s+([a-zA-Z0-9])"#, #"\\$1"#),
+            // Collapse spaces after double-hyphen: "-- verbose" → "--verbose"
+            (#"--\s+([a-zA-Z0-9])"#, "--$1"),
+            // Collapse spaces around hyphens: "eu - west - 1" → "eu-west-1" (tech names)
+            (#"([a-zA-Z0-9])\s+-\s+([a-zA-Z0-9])"#, "$1-$2"),
+        ]
+        return rules.compactMap { pattern, template in
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+            return (regex, template)
+        }
+    }()
     private let spaceAfterOpenParenRegex = try? NSRegularExpression(pattern: "\\(\\s+")
+    private let spaceAfterOpenBracketRegex = try? NSRegularExpression(pattern: #"([\[{])\s+"#)
+    private let spaceBeforeCloseBracketRegex = try? NSRegularExpression(pattern: #"\s+([\])}])"#)
     private let dashSpacingRegex = try? NSRegularExpression(pattern: "\\s*—\\s*")
+    // Collapses duplicate adjacent punctuation: ".." or ". ." → "." (from mixed-language markers)
+    private let dupePunctuationRegex = try? NSRegularExpression(pattern: #"([.!?,;])\s*\1+"#)
 
     struct TransitionBoundaryRule {
         let regex: NSRegularExpression
@@ -300,6 +398,13 @@ final class PunctuationCapitalizationStage: PipelineStage {
 
     func process(_ input: StageIO) -> StageIO {
         guard !input.text.isEmpty else { return input }
+        if input.metadata.outputProfile == .verbatim {
+            return input.withText(
+                input.text,
+                stageTransformations: ["punctuation_skipped_verbatim"],
+                stageWasSkipped: true
+            )
+        }
         var text = input.text
         let lang = input.metadata.languageCode
 
@@ -314,16 +419,43 @@ final class PunctuationCapitalizationStage: PipelineStage {
 
     // MARK: - Spoken Punctuation
 
+    /// Returns true when text mixes CJK with substantial Latin-alphabet content.
+    /// Used to suppress CJK-specific punctuation rules (e.g. "句号" → ".") in
+    /// bilingual explanatory sentences where the CJK term is a vocabulary word.
+    private func hasMixedLatinContent(_ text: String) -> Bool {
+        let latinWordCount = text.components(separatedBy: .whitespaces).filter { w in
+            w.unicodeScalars.contains { s in
+                (s.value >= 65 && s.value <= 90) || (s.value >= 97 && s.value <= 122)
+            }
+        }.count
+        return latinWordCount >= 3
+    }
+
     private func applySpokenPunctuation(to text: String, languageCode: String) -> String {
         var result = text
 
-        for item in formalPunctuationRules(for: languageCode) {
+        // For CJK languages with mixed Latin content, suppress language-specific
+        // punctuation keyword rules to protect vocabulary terms like "句号" in
+        // bilingual sentences ("X is the Chinese word for period 句号").
+        let isCJKMixed = (languageCode == "zh" || languageCode == "ja") && hasMixedLatinContent(result)
+        let rulesLang = isCJKMixed ? "base" : languageCode
+
+        for item in formalPunctuationRules(for: rulesLang) {
             let range = NSRange(result.startIndex..., in: result)
             result = item.regex.stringByReplacingMatches(
                 in: result,
                 range: range,
                 withTemplate: item.replacement
             )
+        }
+
+        // Spoken technical symbols (slash/dot/underscore/backslash/at) → actual symbols
+        result = reconstructSpokenSymbols(in: result)
+
+        // Collapse duplicate adjacent punctuation (e.g. "period 句号" both convert → "..")
+        if let dupePunctuationRegex {
+            let range = NSRange(result.startIndex..., in: result)
+            result = dupePunctuationRegex.stringByReplacingMatches(in: result, range: range, withTemplate: "$1")
         }
 
         // Remove spaces before punctuation
@@ -340,11 +472,24 @@ final class PunctuationCapitalizationStage: PipelineStage {
                 in: result, range: range, withTemplate: "$1 $2"
             )
         }
-        // Normalize opening parenthesis
+        // Normalize opening parenthesis/bracket/brace: remove space after "(" "[" "{"
         if let spaceAfterOpenParenRegex {
             let range = NSRange(result.startIndex..., in: result)
             result = spaceAfterOpenParenRegex.stringByReplacingMatches(
                 in: result, range: range, withTemplate: "("
+            )
+        }
+        if let spaceAfterOpenBracketRegex {
+            let range = NSRange(result.startIndex..., in: result)
+            result = spaceAfterOpenBracketRegex.stringByReplacingMatches(
+                in: result, range: range, withTemplate: "$1"
+            )
+        }
+        // Remove space before closing bracket/brace: "] )" → "])"
+        if let spaceBeforeCloseBracketRegex {
+            let range = NSRange(result.startIndex..., in: result)
+            result = spaceBeforeCloseBracketRegex.stringByReplacingMatches(
+                in: result, range: range, withTemplate: "$1"
             )
         }
         // Normalize em dash spacing
@@ -375,6 +520,27 @@ final class PunctuationCapitalizationStage: PipelineStage {
         return result
     }
 
+    // MARK: - Spoken Symbol Reconstruction
+
+    private func reconstructSpokenSymbols(in text: String) -> String {
+        let lower = text.lowercased()
+        // Only reconstruct when technical indicator words are present
+        let hasTechIndicator = lower.contains("slash") || lower.contains("underscore") ||
+            lower.contains("backslash") ||
+            lower.contains(" - ") ||    // "dash" → "-" already applied; "eu - west" needs collapse
+            lower.range(of: #"\bat\s+[a-z0-9][a-z0-9._]*\.[a-z]"#, options: .regularExpression) != nil ||
+            lower.range(of: #"\bdot\s+(com|io|net|org|yaml|yml|json|py|swift|js|ts|git|md|txt|sh|app)\b"#,
+                         options: .regularExpression) != nil
+        guard hasTechIndicator else { return text }
+
+        var result = text
+        for item in spokenSymbolRegexes {
+            let range = NSRange(result.startIndex..., in: result)
+            result = item.regex.stringByReplacingMatches(in: result, range: range, withTemplate: item.template)
+        }
+        return result
+    }
+
     // MARK: - Punctuation Rule Data
 
     private func formalPunctuationRules(for languageCode: String) -> [(regex: NSRegularExpression, replacement: String)] {
@@ -382,29 +548,73 @@ final class PunctuationCapitalizationStage: PipelineStage {
             return cached
         }
 
-        let replacements = formalPunctuationReplacements(for: languageCode) + [
-            // French keywords
-            ("\\bpoint\\s+virgule\\b", ";"),
-            ("\\bdeux\\s+points\\b", ":"),
-            ("\\bpoint\\s+d['']interrogation\\b", "?"),
-            ("\\bpoint\\s+d['']exclamation\\b", "!"),
-            ("\\bpoint\\b", "."),
-            ("\\bvirgule\\b", ","),
-            ("\\btiret\\b", "—"),
-            ("\\bouvrir\\s+parenth[èe]se\\b", "("),
-            ("\\bfermer\\s+parenth[èe]se\\b", ")"),
+        // Language-agnostic base rules (dashes, double-hyphen, code syntax)
+        var baseRules: [(String, String)] = [
+            ("\\bdash\\s+dash\\b", "--"),
+            ("\\bdash\\b", "-"),
+        ]
 
-            // English keywords
-            ("\\bsemicolon\\b", ";"),
-            ("\\bcolon\\b", ":"),
-            ("\\bquestion\\s+mark\\b", "?"),
-            ("\\bexclamation\\s+mark\\b", "!"),
-            ("\\bperiod\\b", "."),
-            ("\\bfull\\s+stop\\b", "."),
-            ("\\bcomma\\b", ","),
-            ("\\bdash\\b", "—"),
-            ("\\bopen\\s+parenthesis\\b", "("),
-            ("\\bclose\\s+parenthesis\\b", ")")
+        // "base" is a special sentinel meaning: apply only universal rules, no spoken
+        // punctuation keywords from any language (used for CJK-mixed text where CJK
+        // punctuation words like "句号" are vocabulary terms, not commands).
+        let lang = SupportedUILanguage.fromWhisperCode(languageCode)
+        guard languageCode != "base" else {
+            let replacements = baseRules + [
+                ("\\bopen\\s+paren(?:thesis)?\\b", "("),
+                ("\\bclose\\s+paren(?:thesis)?\\b", ")"),
+                ("\\bleft\\s+bracket\\b", "["), ("\\bright\\s+bracket\\b", "]"),
+                ("\\bopen\\s+bracket\\b", "["), ("\\bclose\\s+bracket\\b", "]"),
+                ("\\bleft\\s+brace\\b", "{"), ("\\bright\\s+brace\\b", "}"),
+                ("\\bopen\\s+brace\\b", "{"), ("\\bclose\\s+brace\\b", "}")
+            ]
+            let compiled = replacements.compactMap { pattern, replacement -> (regex: NSRegularExpression, replacement: String)? in
+                guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+                return (regex, replacement)
+            }
+            formalPunctuationRuleCache["base"] = compiled
+            return compiled
+        }
+
+        // French/English spoken-punctuation: only apply for fr/en inputs to avoid
+        // false conversions in CJK, Russian etc. (e.g. "period" as vocabulary in Chinese)
+        if lang == .fr || lang == .en || lang == .es {
+            baseRules += [
+                // French keywords
+                ("\\bpoint\\s+virgule\\b", ";"),
+                ("\\bdeux\\s+points\\b", ":"),
+                ("\\bpoint\\s+d['']interrogation\\b", "?"),
+                ("\\bpoint\\s+d['']exclamation\\b", "!"),
+                ("\\bpoint\\b", "."),
+                ("\\bvirgule\\b", ","),
+                ("\\btiret\\b", "—"),
+                ("\\bouvrir\\s+parenth[èe]se\\b", "("),
+                ("\\bfermer\\s+parenth[èe]se\\b", ")"),
+            ]
+        }
+        if lang == .en || lang == .fr {
+            baseRules += [
+                // English keywords
+                ("\\bsemicolon\\b", ";"),
+                ("\\bcolon\\b", ":"),
+                ("\\bquestion\\s+mark\\b", "?"),
+                ("\\bexclamation\\s+mark\\b", "!"),
+                ("\\bperiod\\b", "."),
+                ("\\bfull\\s+stop\\b", "."),
+                ("\\bcomma\\b", ","),
+            ]
+        }
+
+        let replacements = formalPunctuationReplacements(for: languageCode) + baseRules + [
+            ("\\bopen\\s+paren(?:thesis)?\\b", "("),
+            ("\\bclose\\s+paren(?:thesis)?\\b", ")"),
+            ("\\bleft\\s+bracket\\b", "["),
+            ("\\bright\\s+bracket\\b", "]"),
+            ("\\bopen\\s+bracket\\b", "["),
+            ("\\bclose\\s+bracket\\b", "]"),
+            ("\\bleft\\s+brace\\b", "{"),
+            ("\\bright\\s+brace\\b", "}"),
+            ("\\bopen\\s+brace\\b", "{"),
+            ("\\bclose\\s+brace\\b", "}")
         ]
 
         let compiled = replacements.compactMap { pattern, replacement -> (regex: NSRegularExpression, replacement: String)? in
@@ -509,6 +719,11 @@ final class PunctuationCapitalizationStage: PipelineStage {
 final class FormattingNormalizationStage: PipelineStage {
     let name = "FormattingNormalization"
 
+    /// Code keywords that must not be capitalized at sentence boundaries.
+    fileprivate static let codeKeywords: Set<String> = [
+        "null", "true", "false", "nil", "undefined", "void", "nan"
+    ]
+
     private let smartFormatter = SmartTextFormatter()
     private let codeFormatter = CodeFormatter()
 
@@ -519,31 +734,49 @@ final class FormattingNormalizationStage: PipelineStage {
         guard !input.text.isEmpty else { return input }
         var text = input.text
         let lang = input.metadata.languageCode
+        let outputProfile = input.metadata.outputProfile
 
-        // ── Smart structural analysis (repetition cleanup + list detection) ──
-        let smart = smartFormatter.run(text, languageCode: lang)
-        text = smart.cleanedText
-            .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // ── List block rendering (inline markdown) ──
-        text = TranscriptStabilizer.renderDetectedListBlocksInline(text, blocks: smart.detectedListBlocks)
-        lastListBlocksCount = smart.detectedListBlocks.count
+        if outputProfile != .verbatim {
+            let smart = smartFormatter.run(text, languageCode: lang)
+            text = smart.cleanedText
+                .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            text = TranscriptStabilizer.renderDetectedListBlocksInline(text, blocks: smart.detectedListBlocks)
+            lastListBlocksCount = smart.detectedListBlocks.count
+        } else {
+            lastListBlocksCount = 0
+        }
 
         // ── Dictionary pronunciation mappings ──
         text = applyDictionaryPronunciationMappings(to: text)
 
-        // ── Contextual link/snippet injection ──
-        text = applyContextualLinkSnippets(to: text, bundleID: input.metadata.targetBundleID, languageCode: lang)
+        if outputProfile == .clean || outputProfile == .email {
+            text = applyContextualLinkSnippets(
+                to: text,
+                bundleID: input.metadata.targetBundleID,
+                languageCode: lang
+            )
+            text = convertNumberWords(in: text)
+            text = applyToneFormattingPreservingLists(
+                text,
+                tone: input.metadata.tone,
+                languageCode: lang
+            )
+        }
 
-        // ── Tone formatting (formal/casual/very casual) ──
-        text = applyToneFormattingPreservingLists(text, tone: input.metadata.tone, languageCode: lang)
-
-        // ── Code formatting (if trigger/advanced mode) ──
-        text = applyCodeFormatting(text, metadata: input.metadata)
+        if outputProfile != .verbatim {
+            text = applyCodeFormatting(text, metadata: input.metadata)
+        }
 
         // ── Whitespace normalization ──
         text = normalizeWhitespacePreservingParagraphs(in: text)
+        if outputProfile == .clean || outputProfile == .email {
+            text = finalizeShortUtteranceText(
+                text,
+                originalText: input.text,
+                languageCode: input.metadata.languageCode
+            )
+        }
 
         return input.withText(text)
     }
@@ -794,7 +1027,9 @@ final class FormattingNormalizationStage: PipelineStage {
         case .casual:
             result = applyLightPunctuation(to: result, languageCode: languageCode)
             result = capitalizeSentences(in: result)
-            result = applyAutomaticFormalParagraphFormatting(to: result, languageCode: languageCode)
+            if shouldApplyCasualParagraphFormatting(to: result) {
+                result = applyAutomaticFormalParagraphFormatting(to: result, languageCode: languageCode)
+            }
 
         case .veryCasual:
             result = result.lowercased()
@@ -842,28 +1077,158 @@ final class FormattingNormalizationStage: PipelineStage {
 
     private func applyLightPunctuation(to text: String, languageCode: String) -> String {
         var result = insertTransitionSentenceBoundaries(in: text, languageCode: languageCode)
-        if let first = result.first {
-            result = first.uppercased() + result.dropFirst()
-        }
-        let wordCount = result.split(separator: " ").count
-        if wordCount >= 5, let last = result.last, !".!?".contains(last) {
-            result += "."
+        if let first = result.first, first.isLetter {
+            let wordEnd = result.firstIndex(where: { ch in !ch.isLetter && !ch.isNumber && ch != "_" }) ?? result.endIndex
+            let firstWord = String(result[result.startIndex..<wordEnd])
+            let trailingText = result[wordEnd...]
+            if !shouldPreserveSentenceStartCasing(firstWord, trailingText: trailingText) {
+                result = String(first).uppercased() + result.dropFirst()
+            }
+        } else if let first = result.first {
+            result = String(first).uppercased() + result.dropFirst()
         }
         return result
+    }
+
+    private func shouldAppendTerminalPeriod(to text: String) -> Bool {
+        guard let last = text.last, !".!?".contains(last) else { return false }
+        guard !text.contains("\n") else { return false }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !words.isEmpty else { return false }
+
+        if words.count >= 5 { return true }
+        if trimmed.contains(where: \.isNumber) { return false }
+        if trimmed.range(of: #"[/\\@:_#\[\]{}<>=$]"#, options: .regularExpression) != nil {
+            return false
+        }
+
+        let cleanedWords = words.map {
+            $0.trimmingCharacters(in: CharacterSet.punctuationCharacters)
+        }
+        guard cleanedWords.allSatisfy({ !$0.isEmpty }) else { return false }
+
+        if cleanedWords.count == 1 {
+            let token = cleanedWords[0]
+            guard token.contains(where: \.isLetter) else { return false }
+            if Self.codeKeywords.contains(token.lowercased()) {
+                return false
+            }
+            return token != token.uppercased()
+        }
+
+        guard cleanedWords.count <= 4 else { return false }
+        return cleanedWords.allSatisfy {
+            $0.range(of: #"^[\p{L}'’]+$"#, options: .regularExpression) != nil
+        }
+    }
+
+    private func shouldPreserveSentenceStartCasing(_ firstWord: String, trailingText: Substring) -> Bool {
+        let lowered = firstWord.lowercased()
+        if Self.codeKeywords.contains(lowered) && firstWord == lowered {
+            return true
+        }
+        if lowered == "version" && firstWord == lowered {
+            let trailing = trailingText.trimmingCharacters(in: .whitespaces)
+            if let first = trailing.first, first.isNumber {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func shouldApplyCasualParagraphFormatting(to text: String) -> Bool {
+        if text.contains("\n") {
+            return true
+        }
+        let wordCount = text.split(whereSeparator: \.isWhitespace).count
+        let sentenceDelimiterCount = text.filter { ".!?".contains($0) }.count
+        return wordCount >= 5 || sentenceDelimiterCount >= 2
+    }
+
+    private func finalizeShortUtteranceText(
+        _ text: String,
+        originalText: String,
+        languageCode: String
+    ) -> String {
+        var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !result.isEmpty else { return result }
+        guard shouldFinalizeShortUtterance(originalText: originalText, languageCode: languageCode) else {
+            return result
+        }
+
+        if shouldRestoreLowercaseVersionReference(originalText: originalText, formattedText: result) {
+            return originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if shouldAppendTerminalPeriod(to: result) {
+            result += "."
+        }
+
+        return result
+    }
+
+    private func shouldRestoreLowercaseVersionReference(originalText: String, formattedText: String) -> Bool {
+        let original = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard original == original.lowercased(), original.lowercased().hasPrefix("version ") else {
+            return false
+        }
+        let trailing = original.dropFirst("version".count).trimmingCharacters(in: .whitespaces)
+        guard let first = trailing.first, first.isNumber else { return false }
+        return formattedText.lowercased() == original.lowercased()
+    }
+
+    private func shouldFinalizeShortUtterance(originalText: String, languageCode: String) -> Bool {
+        let original = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !original.isEmpty, !original.contains("\n") else { return false }
+        guard original.split(whereSeparator: \.isWhitespace).count <= 4 else { return false }
+
+        let abort = CommandInterpreter.shared.scanForAbort(original, languageCode: languageCode)
+        if abort.command != .none {
+            return false
+        }
+
+        let command = CommandInterpreter.shared.extractNonAbort(original, languageCode: languageCode)
+        return command.command == .none
     }
 
     private func capitalizeSentences(in text: String) -> String {
         guard !text.isEmpty else { return text }
         var result = ""
         var shouldCapitalize = true
-        for ch in text {
+        let chars = Array(text)
+        for (i, ch) in chars.enumerated() {
             if shouldCapitalize, ch.isLetter {
-                result.append(contentsOf: String(ch).uppercased())
+                // Don't capitalize code keywords (null, true, false, nil, etc.)
+                // Don't capitalize camelCase identifiers (myArray, fetchUserData, etc.)
+                var j = i + 1
+                while j < chars.count && (chars[j].isLetter || chars[j].isNumber || chars[j] == "_") { j += 1 }
+                let word = String(chars[i..<j])
+                let hasMidCapital = word.dropFirst().contains { $0.isUppercase }
+                let trailing = String(chars[j...])
+                if shouldPreserveSentenceStartCasing(word, trailingText: trailing[...]) || hasMidCapital {
+                    result.append(ch)
+                } else {
+                    result.append(contentsOf: String(ch).uppercased())
+                }
                 shouldCapitalize = false
             } else {
                 result.append(ch)
             }
             if ".!?".contains(ch) {
+                // Don't treat a dot as a sentence boundary if:
+                //   • it's between digits (3.14, 1.0.0)
+                //   • it's not followed by whitespace (inside a URL, domain, file extension)
+                if ch == "." {
+                    let prevIsDigit = i > 0 && chars[i - 1].isNumber
+                    let nextIsDigit = i + 1 < chars.count && chars[i + 1].isNumber
+                    let nextIsSpaceOrEnd = i + 1 >= chars.count || chars[i + 1].isWhitespace
+                    if prevIsDigit || nextIsDigit || !nextIsSpaceOrEnd {
+                        shouldCapitalize = false
+                        continue
+                    }
+                }
                 shouldCapitalize = true
             }
         }
@@ -915,16 +1280,32 @@ final class FormattingNormalizationStage: PipelineStage {
     }
 
     private func sentenceChunks(from text: String) -> [String] {
-        var chunks: [String] = []
+        var raw: [String] = []
         text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: [.bySentences, .localized]) { substring, _, _, _ in
-            guard let raw = substring else { return }
-            let sentence = raw
+            guard let s = substring else { return }
+            let sentence = s
                 .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !sentence.isEmpty {
-                chunks.append(sentence)
-            }
+            if !sentence.isEmpty { raw.append(sentence) }
         }
+
+        // Re-join fragments incorrectly split at decimal/version-number dots.
+        // E.g. ["version 2.", "0"] → ["version 2.0"]
+        var chunks: [String] = []
+        var i = 0
+        while i < raw.count {
+            var chunk = raw[i]
+            while i + 1 < raw.count &&
+                  chunk.last == "." &&
+                  chunk.dropLast().last?.isNumber == true &&
+                  raw[i + 1].first?.isNumber == true {
+                i += 1
+                chunk += raw[i]
+            }
+            chunks.append(chunk)
+            i += 1
+        }
+
         if !chunks.isEmpty { return chunks }
         let fallback = text
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
@@ -983,6 +1364,88 @@ final class FormattingNormalizationStage: PipelineStage {
             .joined(separator: "\n")
         return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    // MARK: - Number-word conversion
+
+    /// Converts English written-out number words to digit representation.
+    /// "thirty dollars" → "30 dollars", "one hundred and fifty thousand" → "150,000"
+    func convertNumberWords(in text: String) -> String {
+        let tokens = text.components(separatedBy: " ")
+        var result: [String] = []
+        var i = 0
+
+        while i < tokens.count {
+            let lower = tokens[i].lowercased()
+            if Self.numberTokenValue[lower] != nil || Self.scaleValues[lower] != nil {
+                // Collect the full number-word sequence
+                var numValues: [(unitVal: Int?, scaleVal: Int?)] = []
+                var j = i
+                while j < tokens.count {
+                    let t = tokens[j].lowercased()
+                    if let v = Self.numberTokenValue[t] {
+                        numValues.append((v, nil))
+                        j += 1
+                    } else if let s = Self.scaleValues[t] {
+                        numValues.append((nil, s))
+                        j += 1
+                    } else if t == "and" && j + 1 < tokens.count {
+                        let next = tokens[j + 1].lowercased()
+                        if Self.numberTokenValue[next] != nil || Self.scaleValues[next] != nil {
+                            j += 1 // skip "and"
+                        } else { break }
+                    } else { break }
+                }
+                if numValues.isEmpty {
+                    result.append(tokens[i]); i += 1
+                } else {
+                    result.append(Self.formatParsedNumber(Self.parseNumberTokens(numValues)))
+                    i = j
+                }
+            } else {
+                result.append(tokens[i])
+                i += 1
+            }
+        }
+        return result.joined(separator: " ")
+    }
+
+    private static let numberTokenValue: [String: Int] = [
+        "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+        "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+        "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+        "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+        "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+        "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90
+    ]
+    private static let scaleValues: [String: Int] = [
+        "hundred": 100, "thousand": 1_000, "million": 1_000_000, "billion": 1_000_000_000
+    ]
+
+    private static func parseNumberTokens(_ tokens: [(unitVal: Int?, scaleVal: Int?)]) -> Int {
+        var current = 0
+        var total = 0
+        for (unitVal, scaleVal) in tokens {
+            if let v = unitVal {
+                current += v
+            } else if let s = scaleVal {
+                if s == 100 {
+                    current = max(current, 1) * 100
+                } else {
+                    total += max(current, 1) * s
+                    current = 0
+                }
+            }
+        }
+        return total + current
+    }
+
+    private static func formatParsedNumber(_ value: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.groupingSeparator = ","
+        formatter.usesGroupingSeparator = true
+        return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
 }
 
 // MARK: - Stage 5: Contextual Rewrite (Model-Based, Optional)
@@ -998,15 +1461,64 @@ struct ContextualRewriteStage: PipelineStage {
     private static let log = Logger(subsystem: "com.zphyr.app", category: "Pipeline.Rewrite")
 
     func process(_ input: StageIO) async -> StageIO {
-        guard !input.text.isEmpty else { return input }
+        guard !input.text.isEmpty else {
+            return input.withText(
+                input.text,
+                stageTransformations: ["rewrite_skipped_empty_input"],
+                stageWasSkipped: true,
+                fallbackReason: .rewriteSkippedEmptyInput
+            )
+        }
         let meta = input.metadata
 
-        // Gate: only run if Pro mode is unlocked AND the LLM is loaded
-        guard meta.formattingMode == .advanced,
-              meta.isProModeUnlocked,
-              meta.isLLMLoaded else {
-            Self.log.notice("[Pipeline.Rewrite] skipped: formattingMode=\(meta.formattingMode.rawValue, privacy: .public) pro=\(meta.isProModeUnlocked, privacy: .public) llm=\(meta.isLLMLoaded, privacy: .public)")
-            return input
+        guard meta.outputProfile != .verbatim else {
+            Self.log.notice("[Pipeline.Rewrite] skipped: outputProfile=verbatim")
+            return input.withText(
+                input.text,
+                stageTransformations: ["rewrite_skipped_profile_verbatim"],
+                stageWasSkipped: true,
+                fallbackReason: .profileRewriteDisabledVerbatim
+            )
+        }
+
+        guard meta.formattingMode == .advanced else {
+            Self.log.notice("[Pipeline.Rewrite] skipped: formattingMode=\(meta.formattingMode.rawValue, privacy: .public)")
+            return input.withText(
+                input.text,
+                stageTransformations: ["rewrite_skipped_mode"],
+                stageWasSkipped: true,
+                fallbackReason: .rewriteSkippedMode
+            )
+        }
+
+        guard meta.isProModeUnlocked else {
+            Self.log.notice("[Pipeline.Rewrite] skipped: pro mode locked")
+            return input.withText(
+                input.text,
+                stageTransformations: ["rewrite_skipped_pro_locked"],
+                stageWasSkipped: true,
+                pipelineDecision: .deterministicFallback,
+                fallbackReason: .rewriteSkippedProLocked
+            )
+        }
+
+        var stageTransformations: [String] = []
+        if !meta.isLLMLoaded && !AdvancedLLMFormatter.shared.isModelLoaded(modelID: meta.formattingModelID) {
+            await AdvancedLLMFormatter.shared.loadIfInstalled(modelID: meta.formattingModelID)
+            if AdvancedLLMFormatter.shared.isModelLoaded(modelID: meta.formattingModelID) {
+                stageTransformations.append("rewrite_loaded_from_disk:\(meta.formattingModelID.rawValue)")
+            }
+        }
+
+        guard AdvancedLLMFormatter.shared.isModelLoaded(modelID: meta.formattingModelID) else {
+            Self.log.notice("[Pipeline.Rewrite] skipped: formatter model unavailable model=\(meta.formattingModelID.rawValue, privacy: .public) loaded=\(AdvancedLLMFormatter.shared.isModelLoaded(modelID: meta.formattingModelID), privacy: .public) installed=\(AdvancedLLMFormatter.resolveInstallURL(for: meta.formattingModelID) != nil, privacy: .public)")
+            return input.withText(
+                input.text,
+                stageTransformations: stageTransformations + ["rewrite_skipped_model_unavailable:\(meta.formattingModelID.rawValue)"],
+                stageWasSkipped: true,
+                pipelineDecision: .deterministicFallback,
+                fallbackReason: .selectedFormattingModelUnavailable
+            )
         }
 
         // Use the deterministic text as both normalizedText (for fallback)
@@ -1015,28 +1527,37 @@ struct ContextualRewriteStage: PipelineStage {
             rawASRText: input.text,
             normalizedText: input.text,
             languageCode: meta.languageCode,
+            outputProfile: meta.outputProfile,
+            formattingModelID: meta.formattingModelID,
+            protectedTerms: meta.protectedTerms,
             defaultCodeStyle: meta.defaultCodeStyle,
             preferredMode: meta.formattingMode
         )
 
-        AppState.shared.dictationState = .formatting
+        AppState.shared.transitionCurrentDictationSession(to: .formatting)
 
         let result = await proTextFormatter.format(context)
 
-        // Additional length ratio safeguard: output shouldn't balloon
-        let lengthRatio = Double(result.text.count) / max(1.0, Double(input.text.count))
-        if lengthRatio > 1.5 {
-            Self.log.warning("[Pipeline.Rewrite] rejected: output length ratio \(lengthRatio, privacy: .public) exceeds 1.5x")
-            return input
-        }
-
         if result.usedDeterministicFallback {
-            Self.log.notice("[Pipeline.Rewrite] integrity check failed — using deterministic output")
-            return input
+            let fallbackReason = result.fallbackReason ?? .rewriteModelReturnedNil
+            Self.log.notice(
+                "[Pipeline.Rewrite] baseline round2 fell back reason=\(fallbackReason.rawValue, privacy: .public)"
+            )
+            return input.withText(
+                input.text,
+                stageTransformations: stageTransformations + ["rewrite_failed_closed:\(fallbackReason.rawValue)"],
+                pipelineDecision: result.pipelineDecision,
+                fallbackReason: fallbackReason
+            )
         }
 
-        Self.log.notice("[Pipeline.Rewrite] accepted LLM output len=\(result.text.count, privacy: .public)")
-        return input.withText(result.text)
+        Self.log.notice("[Pipeline.Rewrite] accepted baseline round2 output len=\(result.text.count, privacy: .public)")
+        return input.withText(
+            result.text,
+            stageTransformations: stageTransformations + ["rewrite_model:\(meta.formattingModelID.rawValue)"] + (result.text == input.text ? ["rewrite_noop"] : []),
+            pipelineDecision: result.pipelineDecision,
+            clearFallbackReason: true
+        )
     }
 }
 
@@ -1073,6 +1594,9 @@ struct FinalSafetyStage: PipelineStage {
 
     func process(_ input: StageIO) -> StageIO {
         guard !input.text.isEmpty else { return input }
+
+        // Preserve intentional whitespace command output (e.g. newParagraph → "\n\n")
+        if input.extractedCommand == .newParagraph { return input }
 
         var text = input.text
 

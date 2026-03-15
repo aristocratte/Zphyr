@@ -41,6 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var cachedFormatterModelDiskBytes: Int64 = 0
     private var lastProcessCPUSample: ProcessCPUSample?
     private var popoverRefreshTask: Task<Void, Never>?
+    // Cached once — physicalMemory and activeProcessorCount never change at runtime
+    private let cachedTotalRAM = Int64(ProcessInfo.processInfo.physicalMemory)
+    private let cachedMaxCPU = max(100.0, Double(ProcessInfo.processInfo.activeProcessorCount) * 100.0)
 
     private struct ProcessCPUSample {
         let timestamp: TimeInterval
@@ -80,6 +83,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let hasCompletedPreflight = UserDefaults.standard.bool(forKey: "hasCompletedPreflight")
         if hasCompletedPreflight && AppState.shared.modelStatus.isReady {
             ShortcutManager.shared.startListening()
+        }
+
+        // Eagerly preload the formatter model in the background so the first
+        // dictation doesn't pay the cold-load + shader compilation cost.
+        if hasCompletedPreflight && AppState.shared.advancedModeInstalled
+            && AppState.shared.formattingMode != .trigger {
+            Task {
+                await AdvancedLLMFormatter.shared.loadIfInstalled()
+                await AdvancedLLMFormatter.shared.warmup()
+            }
         }
     }
 
@@ -257,7 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 let diskUsage = await Task.detached(priority: .utility) {
                     let installURL = Self.resolveWhisperInstallURL(explicitPath: explicitModelPath)
                     let primaryDiskBytes = installURL.map { Self.directoryAllocatedSize(at: $0) } ?? 0
-                    let formatterDiskBytes = Self.resolveQwenDiskUsageBytes()
+                    let formatterDiskBytes = Self.resolveFormattingModelDiskUsageBytes()
                     return (installURL, primaryDiskBytes, formatterDiskBytes)
                 }.value
                 guard !Task.isCancelled else { return }
@@ -278,9 +291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let primaryInstalled = cachedPrimaryModelInstallURL != nil || state.modelStatus.isReady
         let primaryFolderAvailable = cachedPrimaryModelInstallURL != nil
         let formatterInstalled = AppState.shared.advancedModeInstalled || cachedFormatterModelDiskBytes > 0
-        let totalRAM = Int64(ProcessInfo.processInfo.physicalMemory)
         let processCPU = sampledCurrentProcessCPUPercent()
-        let maxCPU = max(100.0, Double(ProcessInfo.processInfo.activeProcessorCount) * 100.0)
 
         popoverStore.isMainWindowVisible = appHasVisibleWindow
         popoverStore.modelStatus = state.modelStatus
@@ -288,9 +299,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             primaryModelDiskBytes: cachedPrimaryModelDiskBytes,
             formatterModelDiskBytes: cachedFormatterModelDiskBytes,
             processRAMBytes: Self.currentProcessMemoryFootprintBytes(),
-            totalRAMBytes: totalRAM,
+            totalRAMBytes: cachedTotalRAM,
             processCPUPercent: processCPU,
-            maxCPUPercent: maxCPU,
+            maxCPUPercent: cachedMaxCPU,
             primaryModelInstalled: primaryInstalled,
             primaryModelFolderAvailable: primaryFolderAvailable,
             formatterModelInstalled: formatterInstalled
@@ -325,7 +336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func startStatusRefreshTimer() {
         stopStatusRefreshTimer()
-        statusRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        statusRefreshTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor [weak self] in
                 self?.refreshStatusPopover(recomputeDiskUsage: false)
@@ -360,47 +371,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         return WhisperKitBackend.resolveInstallURL()
     }
 
-    nonisolated private static func resolveQwenDiskUsageBytes() -> Int64 {
-        qwenInstallDirectories().reduce(0) { $0 + directoryAllocatedSize(at: $1) }
+    nonisolated private static func resolveFormattingModelDiskUsageBytes() -> Int64 {
+        formattingModelInstallDirectories().reduce(0) { $0 + directoryAllocatedSize(at: $1) }
     }
 
-    nonisolated private static func qwenInstallDirectories() -> [URL] {
+    nonisolated private static func formattingModelInstallDirectories() -> [URL] {
         let fileManager = FileManager.default
         let home = fileManager.homeDirectoryForCurrentUser
 
         var uniquePaths = Set<String>()
         var results: [URL] = []
 
-        // MLX Swift cache: ~/Library/Caches/models/arhesstide/zphyr_qwen_v1-MLX-4bit/
-        let mlxDirect = home
-            .appendingPathComponent("Library/Caches/models/arhesstide/zphyr_qwen_v1-MLX-4bit")
-        if fileManager.fileExists(atPath: mlxDirect.path) {
-            uniquePaths.insert(mlxDirect.standardizedFileURL.path)
-            results.append(mlxDirect)
-        }
-
-        // HuggingFace Python-style cache roots
         let roots = [
             home.appendingPathComponent(".cache/huggingface/hub"),
             home.appendingPathComponent("Library/Caches/huggingface/hub"),
             home.appendingPathComponent("Library/Application Support/huggingface/hub")
         ]
 
-        for root in roots where fileManager.fileExists(atPath: root.path) {
-            guard let entries = try? fileManager.contentsOfDirectory(
-                at: root,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
-            ) else { continue }
+        for descriptor in FormattingModelCatalog.all {
+            let mlxDirect = home
+                .appendingPathComponent("Library/Caches/models/\(descriptor.cacheNamespace)/\(descriptor.cacheSlug)")
+            if fileManager.fileExists(atPath: mlxDirect.path) {
+                let normalizedPath = mlxDirect.standardizedFileURL.path
+                if !uniquePaths.contains(normalizedPath) {
+                    uniquePaths.insert(normalizedPath)
+                    results.append(mlxDirect)
+                }
+            }
 
-            for entry in entries {
-                let name = entry.lastPathComponent.lowercased()
-                let isQwenModelFolder = name.contains("models--arhesstide--zphyr_qwen_v1-mlx-4bit") || name.contains("zphyr_qwen_v1-mlx-4bit")
-                guard isQwenModelFolder else { continue }
-                let normalizedPath = entry.standardizedFileURL.path
-                guard !uniquePaths.contains(normalizedPath) else { continue }
-                uniquePaths.insert(normalizedPath)
-                results.append(entry)
+            for root in roots where fileManager.fileExists(atPath: root.path) {
+                guard let entries = try? fileManager.contentsOfDirectory(
+                    at: root,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles]
+                ) else { continue }
+
+                for entry in entries {
+                    let name = entry.lastPathComponent.lowercased()
+                    let isFormattingModelFolder = descriptor.cacheMatchHints.contains { hint in
+                        name.contains(hint.lowercased())
+                    }
+                    guard isFormattingModelFolder else { continue }
+                    let normalizedPath = entry.standardizedFileURL.path
+                    guard !uniquePaths.contains(normalizedPath) else { continue }
+                    uniquePaths.insert(normalizedPath)
+                    results.append(entry)
+                }
             }
         }
 

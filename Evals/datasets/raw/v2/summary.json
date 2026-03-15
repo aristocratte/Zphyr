@@ -1,0 +1,30 @@
+{
+  "technical.jsonl": {
+    "rows": 200,
+    "errors": 0
+  },
+  "multilingual.jsonl": {
+    "rows": 160,
+    "errors": 0
+  },
+  "commands.jsonl": {
+    "rows": 150,
+    "errors": 0
+  },
+  "corrections.jsonl": {
+    "rows": 160,
+    "errors": 0
+  },
+  "short.jsonl": {
+    "rows": 160,
+    "errors": 0
+  },
+  "prose.jsonl": {
+    "rows": 150,
+    "errors": 0
+  },
+  "lists.jsonl": {
+    "rows": 140,
+    "errors": 1
+  }
+}

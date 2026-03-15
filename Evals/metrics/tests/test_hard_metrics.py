@@ -7,6 +7,7 @@ Run: python -m pytest Evals/metrics/tests/test_hard_metrics.py -v
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
@@ -25,6 +26,7 @@ from hard_metrics import (
 
 # ── check_protected_terms ─────────────────────────────────────────────────────
 
+
 class TestProtectedTerms:
     def test_term_present_passes(self):
         assert check_protected_terms("x", "getUserProfile", ["getUserProfile"]) == []
@@ -38,11 +40,15 @@ class TestProtectedTerms:
         assert "protectedTermCaseCorruption" in failures[0]
 
     def test_multiple_terms_all_present(self):
-        result = check_protected_terms("x", "REST API JSON HTTPS", ["REST", "API", "JSON", "HTTPS"])
+        result = check_protected_terms(
+            "x", "REST API JSON HTTPS", ["REST", "API", "JSON", "HTTPS"]
+        )
         assert result == []
 
     def test_multiple_terms_one_missing(self):
-        failures = check_protected_terms("x", "REST API JSON", ["REST", "API", "JSON", "HTTPS"])
+        failures = check_protected_terms(
+            "x", "REST API JSON", ["REST", "API", "JSON", "HTTPS"]
+        )
         assert any("HTTPS" in f for f in failures)
 
     def test_empty_term_ignored(self):
@@ -56,11 +62,14 @@ class TestProtectedTerms:
 
     def test_term_is_substring_of_another(self):
         # 'user' is substring of 'getUserProfile'; must check both separately
-        result = check_protected_terms("x", "getUserProfile and user data", ["getUserProfile", "user"])
+        result = check_protected_terms(
+            "x", "getUserProfile and user data", ["getUserProfile", "user"]
+        )
         assert result == []
 
 
 # ── check_url_integrity ───────────────────────────────────────────────────────
+
 
 class TestURLIntegrity:
     def test_url_present_passes(self):
@@ -82,8 +91,12 @@ class TestURLIntegrity:
         failures = check_url_integrity("x", "https://api.example.com", [url])
         assert any("malformedURL" in f for f in failures)
 
+    def test_https_acronym_is_not_treated_as_url(self):
+        assert check_url_integrity("x", "REST API over HTTPS", ["HTTPS"]) == []
+
 
 # ── check_email_integrity ─────────────────────────────────────────────────────
+
 
 class TestEmailIntegrity:
     def test_email_present_passes(self):
@@ -105,31 +118,54 @@ class TestEmailIntegrity:
         failures = check_email_integrity("x", "alice.smith@company.io text", [email])
         assert any("malformedEmail" in f for f in failures)
 
+    def test_git_remote_with_email_prefix_passes(self):
+        remote = "git@github.com:myorg/repo.git"
+        assert check_email_integrity("x", f"clone {remote}", [remote]) == []
+
 
 # ── check_numeric_integrity ───────────────────────────────────────────────────
 
+
 class TestNumericIntegrity:
     def test_technical_context_number_present(self):
-        assert check_numeric_integrity("x", "version 3.14.1", "version 3.14.1", "technical") == []
+        assert (
+            check_numeric_integrity(
+                "x", "version 3.14.1", "version 3.14.1", "technical"
+            )
+            == []
+        )
 
     def test_technical_context_number_missing(self):
-        failures = check_numeric_integrity("x", "version 3.14.1", "version X.Y.Z", "technical")
+        failures = check_numeric_integrity(
+            "x", "version 3.14.1", "version X.Y.Z", "technical"
+        )
         assert any("numericCorruption" in f for f in failures)
 
     def test_prose_context_skip(self):
         # In prose context, numeric check is alerting only, not hard
-        assert check_numeric_integrity("x", "version 3.14.1", "version X.Y.Z", "prose") == []
+        assert (
+            check_numeric_integrity("x", "version 3.14.1", "version X.Y.Z", "prose")
+            == []
+        )
 
     def test_thousand_separator_allowed(self):
         # 30000 reformatted as 30,000 should not fail
-        assert check_numeric_integrity("x", "timeout 30000ms", "timeout 30,000ms", "technical") == []
+        assert (
+            check_numeric_integrity(
+                "x", "timeout 30000ms", "timeout 30,000ms", "technical"
+            )
+            == []
+        )
 
     def test_correction_context_enforced(self):
-        failures = check_numeric_integrity("x", "meant 3.2 not 2.3", "meant 3.2 not 2.4", "correction")
+        failures = check_numeric_integrity(
+            "x", "meant 3.2 not 2.3", "meant 3.2 not 2.4", "correction"
+        )
         assert any("numericCorruption" in f for f in failures)
 
 
 # ── check_command_accuracy ────────────────────────────────────────────────────
+
 
 class TestCommandAccuracy:
     def test_expected_none_actual_none_passes(self):
@@ -157,29 +193,44 @@ class TestCommandAccuracy:
 
 # ── check_rewrite_gate ────────────────────────────────────────────────────────
 
+
 class TestRewriteGate:
     def test_level_none_no_change_passes(self):
-        result = check_rewrite_gate("x", "the meeting is Friday", "The meeting is Friday.", "none")
+        result = check_rewrite_gate(
+            "x", "the meeting is Friday", "The meeting is Friday.", "none"
+        )
         assert result == []  # capitalisation + period = allowed
 
     def test_level_none_filler_removal_passes(self):
-        result = check_rewrite_gate("x", "uh the meeting is Friday", "The meeting is Friday.", "none")
+        result = check_rewrite_gate(
+            "x", "uh the meeting is Friday", "The meeting is Friday.", "none"
+        )
         assert result == []  # filler removal = allowed
 
     def test_level_none_content_insertion_fails(self):
-        result = check_rewrite_gate("x", "the meeting is Friday", "The important meeting is Friday.", "none")
+        result = check_rewrite_gate(
+            "x", "the meeting is Friday", "The important meeting is Friday.", "none"
+        )
         assert any("forbiddenRewrite" in f for f in result)
 
     def test_level_light_allows_insertion(self):
-        result = check_rewrite_gate("x", "the meeting is Friday", "The important meeting is Friday.", "light")
+        result = check_rewrite_gate(
+            "x", "the meeting is Friday", "The important meeting is Friday.", "light"
+        )
         assert result == []  # light level: gate not applied
 
     def test_level_full_allows_all(self):
-        result = check_rewrite_gate("x", "meeting friday", "The quarterly meeting is scheduled for Friday.", "full")
+        result = check_rewrite_gate(
+            "x",
+            "meeting friday",
+            "The quarterly meeting is scheduled for Friday.",
+            "full",
+        )
         assert result == []
 
 
 # ── run_hard_checks (integration) ────────────────────────────────────────────
+
 
 class TestRunHardChecks:
     def _make_record(self, **kwargs):
@@ -201,7 +252,9 @@ class TestRunHardChecks:
         assert result.passed
 
     def test_missing_protected_term_fails(self):
-        result = run_hard_checks(self._make_record(finalText="call getUser with userId"))
+        result = run_hard_checks(
+            self._make_record(finalText="call getUser with userId")
+        )
         assert not result.passed
         assert any("protectedTerm" in f for f in result.hard_failures)
 
@@ -211,12 +264,15 @@ class TestRunHardChecks:
         assert "spuriousCommand" in result.hard_failures
 
     def test_case_corrupted_term_fails(self):
-        result = run_hard_checks(self._make_record(finalText="call getuserprofile with userid"))
+        result = run_hard_checks(
+            self._make_record(finalText="call getuserprofile with userid")
+        )
         assert not result.passed
         assert any("protectedTermCaseCorruption" in f for f in result.hard_failures)
 
 
 # ── hard_failure_summary ──────────────────────────────────────────────────────
+
 
 class TestHardFailureSummary:
     def test_empty_results(self):
@@ -233,7 +289,9 @@ class TestHardFailureSummary:
     def test_some_failed(self):
         r1 = HardCheckResult(case_id="ok-1")
         r2 = HardCheckResult(case_id="fail-1", hard_failures=["protectedTermMissing"])
-        r3 = HardCheckResult(case_id="fail-2", hard_failures=["spuriousCommand", "protectedTermMissing"])
+        r3 = HardCheckResult(
+            case_id="fail-2", hard_failures=["spuriousCommand", "protectedTermMissing"]
+        )
         summary = hard_failure_summary([r1, r2, r3])
         assert summary["hard_failure_count"] == 2
         assert summary["failure_types"]["protectedTermMissing"] == 2

@@ -12,8 +12,31 @@ import Foundation
 import AppKit
 import os
 
+enum InsertionStrategy: String, Sendable, Codable {
+    case typingEvents
+    case pasteWithClipboardRestore
+    case clipboardOnly
+}
+
+enum InsertionTargetFamily: String, Sendable, Codable {
+    case editorOrCode
+    case browserWebApp
+    case richTextApp
+    case plainTextApp
+}
+
+struct InsertionOutcome: Sendable {
+    let strategy: InsertionStrategy
+    let targetFamily: InsertionTargetFamily
+    let fallbackReason: FallbackReason?
+    let restoredClipboard: Bool
+}
+
 @MainActor
 final class InsertionEngine {
+    private struct PasteboardSnapshot {
+        let items: [[NSPasteboard.PasteboardType: Data]]
+    }
 
     private let log = Logger(subsystem: "com.zphyr.app", category: "InsertionEngine")
     private nonisolated static let learningLogger = Logger(subsystem: "com.zphyr.app", category: "DictionaryLearning")
@@ -22,10 +45,57 @@ final class InsertionEngine {
 
     // MARK: - Public API
 
+    nonisolated static func targetFamily(for bundleID: String?) -> InsertionTargetFamily {
+        guard let bundleID else { return .plainTextApp }
+        let lower = bundleID.lowercased()
+        if lower.contains("xcode") || lower.contains("code") || lower.contains("jetbrains") ||
+            lower.contains("zed") || lower.contains("cursor") || lower.contains("sublime") ||
+            lower.contains("nova") || lower.contains("terminal") || lower.contains("iterm") ||
+            lower.contains("warp") {
+            return .editorOrCode
+        }
+        if lower.contains("safari") || lower.contains("chrome") || lower.contains("firefox") ||
+            lower.contains("edge") || lower.contains("arc") || lower.contains("brave") ||
+            lower.contains("opera") {
+            return .browserWebApp
+        }
+        if lower.contains("notion") || lower.contains("obsidian") || lower.contains("slack") ||
+            lower.contains("teams") || lower.contains("discord") || lower.contains("messages") ||
+            lower.contains("telegram") || lower.contains("signal") || lower.contains("whatsapp") ||
+            lower.contains("evernote") || lower.contains("craft") {
+            return .richTextApp
+        }
+        return .plainTextApp
+    }
+
+    nonisolated static func recommendedStrategy(
+        for text: String,
+        bundleID: String? = nil
+    ) -> InsertionStrategy {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .clipboardOnly }
+        let isSingleLine = !trimmed.contains("\n")
+        let targetFamily = targetFamily(for: bundleID)
+        if targetFamily == .browserWebApp || targetFamily == .richTextApp {
+            return .pasteWithClipboardRestore
+        }
+        if trimmed.count <= 80 && isSingleLine {
+            return .typingEvents
+        }
+        return .pasteWithClipboardRestore
+    }
+
     /// Activates the target app, waits for it to become frontmost, then inserts text via synthesized key events.
-    func insert(_ text: String, into targetApp: NSRunningApplication?) async {
+    @discardableResult
+    func insert(_ text: String, into targetApp: NSRunningApplication?) async -> InsertionOutcome {
+        let targetFamily = Self.targetFamily(for: targetApp?.bundleIdentifier)
         guard AXIsProcessTrusted() else {
-            copyToClipboard(text)
+            let outcome = copyToClipboard(
+                text,
+                strategy: .clipboardOnly,
+                targetFamily: targetFamily,
+                fallbackReason: .insertionAccessibilityUnavailable
+            )
             AppState.shared.error = L10n.ui(
                 for: AppState.shared.selectedLanguage.id,
                 fr: "Acc\u{00E8}s Accessibilit\u{00E9} manquant. Le texte a \u{00E9}t\u{00E9} copi\u{00E9} dans le presse-papiers.",
@@ -36,10 +106,13 @@ final class InsertionEngine {
                 ru: "\u{041D}\u{0435}\u{0442} \u{0434}\u{043E}\u{0441}\u{0442}\u{0443}\u{043F}\u{0430} \u{043A} \u{0421}\u{043F}\u{0435}\u{0446}\u{0432}\u{043E}\u{0437}\u{043C}\u{043E}\u{0436}\u{043D}\u{043E}\u{0441}\u{0442}\u{044F}\u{043C}. \u{0422}\u{0435}\u{043A}\u{0441}\u{0442} \u{0441}\u{043A}\u{043E}\u{043F}\u{0438}\u{0440}\u{043E}\u{0432}\u{0430}\u{043D} \u{0432} \u{0431}\u{0443}\u{0444}\u{0435}\u{0440} \u{043E}\u{0431}\u{043C}\u{0435}\u{043D}\u{0430}."
             )
             log.error("[Insert] accessibility not trusted; used clipboard fallback")
-            return
+            return outcome
         }
 
-        log.notice("[Insert] preparing secure text injection; textLength=\(text.count) target=\(targetApp?.bundleIdentifier ?? "nil", privacy: .public)")
+        let strategy = Self.recommendedStrategy(for: text, bundleID: targetApp?.bundleIdentifier)
+        log.notice(
+            "[Insert] preparing text injection; strategy=\(strategy.rawValue, privacy: .public) family=\(targetFamily.rawValue, privacy: .public) textLength=\(text.count, privacy: .public) target=\(targetApp?.bundleIdentifier ?? "nil", privacy: .public)"
+        )
 
         if let app = targetApp, !app.isTerminated {
             let activated = app.activate()
@@ -55,7 +128,12 @@ final class InsertionEngine {
             }
             log.notice("[Insert] target frontmost=\(didBecomeFrontmost ? "yes" : "no", privacy: .public)")
             if !didBecomeFrontmost {
-                copyToClipboard(text)
+                let outcome = copyToClipboard(
+                    text,
+                    strategy: .clipboardOnly,
+                    targetFamily: targetFamily,
+                    fallbackReason: .insertionTargetNotFrontmost
+                )
                 AppState.shared.error = L10n.ui(
                     for: AppState.shared.selectedLanguage.id,
                     fr: "Impossible de revenir \u{00E0} l'application cible. Le texte a \u{00E9}t\u{00E9} copi\u{00E9} dans le presse-papiers.",
@@ -66,20 +144,76 @@ final class InsertionEngine {
                     ru: "\u{041D}\u{0435} \u{0443}\u{0434}\u{0430}\u{043B}\u{043E}\u{0441}\u{044C} \u{0432}\u{0435}\u{0440}\u{043D}\u{0443}\u{0442}\u{044C} \u{0444}\u{043E}\u{043A}\u{0443}\u{0441} \u{0446}\u{0435}\u{043B}\u{0435}\u{0432}\u{043E}\u{043C}\u{0443} \u{043F}\u{0440}\u{0438}\u{043B}\u{043E}\u{0436}\u{0435}\u{043D}\u{0438}\u{044E}. \u{0422}\u{0435}\u{043A}\u{0441}\u{0442} \u{0441}\u{043A}\u{043E}\u{043F}\u{0438}\u{0440}\u{043E}\u{0432}\u{0430}\u{043D} \u{0432} \u{0431}\u{0443}\u{0444}\u{0435}\u{0440} \u{043E}\u{0431}\u{043C}\u{0435}\u{043D}\u{0430}."
                 )
                 log.error("[Insert] aborting simulated typing: target app did not become frontmost")
-                return
+                return outcome
             }
             try? await Task.sleep(for: .milliseconds(140))
         }
 
-        log.notice("[Insert] posting secure typing events")
-        simulateTyping(text)
-        startCorrectionMonitor(originalText: text)
+        switch strategy {
+        case .typingEvents:
+            log.notice("[Insert] executing typing events")
+            simulateTyping(text)
+            startCorrectionMonitor(originalText: text)
+            return InsertionOutcome(
+                strategy: .typingEvents,
+                targetFamily: targetFamily,
+                fallbackReason: nil,
+                restoredClipboard: false
+            )
+        case .pasteWithClipboardRestore:
+            log.notice("[Insert] executing paste with clipboard restore")
+            let snapshot = capturePasteboardSnapshot()
+            putTextOnPasteboard(text)
+            simulatePasteShortcut()
+            try? await Task.sleep(for: .milliseconds(180))
+            let restoredClipboard = restorePasteboardSnapshot(snapshot)
+            if restoredClipboard {
+                log.notice("[Insert] clipboard restored after paste")
+            } else {
+                log.warning("[Insert] clipboard restore failed after paste")
+            }
+            startCorrectionMonitor(originalText: text)
+            return InsertionOutcome(
+                strategy: .pasteWithClipboardRestore,
+                targetFamily: targetFamily,
+                fallbackReason: nil,
+                restoredClipboard: restoredClipboard
+            )
+        case .clipboardOnly:
+            return copyToClipboard(text, strategy: .clipboardOnly, targetFamily: targetFamily)
+        }
     }
 
-    func copyToClipboard(_ text: String) {
-        guard !text.isEmpty else { return }
+    @discardableResult
+    func copyToClipboard(
+        _ text: String,
+        strategy: InsertionStrategy = .clipboardOnly,
+        targetFamily: InsertionTargetFamily = .plainTextApp,
+        fallbackReason: FallbackReason? = nil
+    ) -> InsertionOutcome {
+        guard !text.isEmpty else {
+            return InsertionOutcome(
+                strategy: strategy,
+                targetFamily: targetFamily,
+                fallbackReason: fallbackReason,
+                restoredClipboard: false
+            )
+        }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+        if let fallbackReason {
+            log.warning(
+                "[Insert] clipboard fallback reason=\(fallbackReason.rawValue, privacy: .public) textLength=\(text.count, privacy: .public)"
+            )
+        } else {
+            log.notice("[Insert] copied to clipboard intentionally textLength=\(text.count, privacy: .public)")
+        }
+        return InsertionOutcome(
+            strategy: strategy,
+            targetFamily: targetFamily,
+            fallbackReason: fallbackReason,
+            restoredClipboard: false
+        )
     }
 
     // MARK: - Correction Learning Monitor
@@ -214,6 +348,49 @@ final class InsertionEngine {
             keyDown.post(tap: .cghidEventTap)
             keyUp.post(tap: .cghidEventTap)
         }
+    }
+
+    private func simulatePasteShortcut() {
+        guard let src = CGEventSource(stateID: .hidSystemState),
+              let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false) else { return }
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+    }
+
+    private func capturePasteboardSnapshot() -> PasteboardSnapshot {
+        let items: [[NSPasteboard.PasteboardType: Data]] = NSPasteboard.general.pasteboardItems?.map { item in
+            var snapshot: [NSPasteboard.PasteboardType: Data] = [:]
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    snapshot[type] = data
+                }
+            }
+            return snapshot
+        } ?? []
+        return PasteboardSnapshot(items: items)
+    }
+
+    private func restorePasteboardSnapshot(_ snapshot: PasteboardSnapshot) -> Bool {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard !snapshot.items.isEmpty else { return true }
+
+        let restoredItems = snapshot.items.map { itemData in
+            let item = NSPasteboardItem()
+            for (type, data) in itemData {
+                item.setData(data, forType: type)
+            }
+            return item
+        }
+        return pasteboard.writeObjects(restoredItems)
+    }
+
+    private func putTextOnPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     // MARK: - AX Helpers (static)

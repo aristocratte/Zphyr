@@ -88,6 +88,21 @@ struct FormattingPipelineTests {
         }
     }
 
+    @Test func integrityVerifierRejectsMissingProtectedTerms() {
+        let verifier = TextIntegrityVerifier()
+        let validation = verifier.validate(
+            rawASRText: "use zphyr formatter in this note",
+            formattedText: "use formatter in this note",
+            protectedTerms: ["zphyr"]
+        )
+        switch validation {
+        case .invalidProtectedTerms(let terms):
+            #expect(terms.contains("zphyr"))
+        default:
+            Issue.record("Expected protected-term rejection.")
+        }
+    }
+
     @Test func integrityVerifierRejectsDroppedContent() {
         let verifier = TextIntegrityVerifier()
         let validation = verifier.validate(
@@ -156,6 +171,9 @@ struct FormattingPipelineTests {
             rawASRText: "Attention ici, il manque la gestion d'erreur pour le fetch point",
             normalizedText: "Attention ici. Il manque la gestion d'erreur pour le fetch.",
             languageCode: "fr",
+            outputProfile: .clean,
+            formattingModelID: .qwen3_4b,
+            protectedTerms: [],
             defaultCodeStyle: .camel,
             preferredMode: .advanced
         )
@@ -180,6 +198,25 @@ struct FormattingPipelineTests {
         """
 
         #expect(prompt == expected)
+    }
+
+    @Test func ecoFormatterKeepsVerbatimProfileUntouched() async {
+        let formatter = EcoTextFormatter()
+        let context = TextFormatterContext(
+            rawASRText: "ok ok version 2 point 0",
+            normalizedText: "ok ok version 2 point 0",
+            languageCode: "en",
+            outputProfile: .verbatim,
+            formattingModelID: .qwen3_4b,
+            protectedTerms: ["version 2"],
+            defaultCodeStyle: .camel,
+            preferredMode: .advanced
+        )
+
+        let result = await formatter.format(context)
+
+        #expect(result.text == "ok ok version 2 point 0")
+        #expect(result.pipelineDecision == .deterministicOnly)
     }
 
     @Test func advancedLLMFormatterStripsThinkBlocks() {

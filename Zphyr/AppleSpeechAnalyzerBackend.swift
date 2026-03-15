@@ -70,8 +70,10 @@ final class AppleSpeechAnalyzerBackend: ASRService {
         guard let channelData = pcm.floatChannelData?[0] else {
             throw ASRBackendError.invalidAudioBuffer
         }
+        guard !samples.isEmpty else { throw ASRBackendError.invalidAudioBuffer }
         samples.withUnsafeBufferPointer { buffer in
-            channelData.update(from: buffer.baseAddress!, count: samples.count)
+            guard let base = buffer.baseAddress else { return }
+            channelData.update(from: base, count: samples.count)
         }
 
         let url = FileManager.default.temporaryDirectory
@@ -160,7 +162,11 @@ final class AppleSpeechAnalyzerBackend: ASRService {
         }
 
         let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = false
+        // .dictation hint enables the long-form continuous speech model.
+        // Without it, SFSpeechRecognizer uses a short-command model that
+        // silently truncates after ~15 words or a brief pause.
+        request.taskHint = .dictation
+        request.shouldReportPartialResults = true
         if #available(macOS 13.0, *) {
             request.requiresOnDeviceRecognition = true
         }
@@ -169,27 +175,36 @@ final class AppleSpeechAnalyzerBackend: ASRService {
 
         let text = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             var settled = false
+            var bestPartial = ""
             var taskRef: SFSpeechRecognitionTask?
             taskRef = recognizer.recognitionTask(with: request) { result, error in
                 if settled { return }
 
+                if let result {
+                    let value = result.bestTranscription.formattedString
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !value.isEmpty { bestPartial = value }
+                    if result.isFinal {
+                        settled = true
+                        taskRef?.cancel()
+                        let final = value.isEmpty ? bestPartial : value
+                        if final.isEmpty {
+                            continuation.resume(throwing: ASRBackendError.emptyResult)
+                        } else {
+                            continuation.resume(returning: final)
+                        }
+                        return
+                    }
+                }
+
                 if let error {
                     settled = true
                     taskRef?.cancel()
-                    continuation.resume(throwing: ASRBackendError.transcriptionFailed(error.localizedDescription))
-                    return
-                }
-
-                guard let result else { return }
-                if result.isFinal {
-                    settled = true
-                    taskRef?.cancel()
-                    let value = result.bestTranscription.formattedString
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    if value.isEmpty {
-                        continuation.resume(throwing: ASRBackendError.emptyResult)
+                    // If we already accumulated a partial, prefer it over throwing.
+                    if !bestPartial.isEmpty {
+                        continuation.resume(returning: bestPartial)
                     } else {
-                        continuation.resume(returning: value)
+                        continuation.resume(throwing: ASRBackendError.transcriptionFailed(error.localizedDescription))
                     }
                 }
             }

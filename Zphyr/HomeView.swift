@@ -160,8 +160,12 @@ struct HomeView: View {
                 }
 
                 // ── Live dictation banner ─────────────────────────────
-                if appState.dictationState == .listening || appState.dictationState == .processing || appState.dictationState == .formatting {
+                if appState.currentDictationSession != nil {
                     LiveDictationBanner()
+                }
+
+                if let session = appState.latestDictationSession {
+                    DictationSessionCard(session: session)
                 }
 
                 // ── Recent transcriptions ─────────────────────────────
@@ -262,8 +266,12 @@ struct HomeView: View {
 // MARK: - Live dictation banner
 
 private struct LiveDictationBanner: View {
-    private var appState: AppState { AppState.shared }
+    @Bindable private var appState = AppState.shared
     @State private var blink = false
+
+    private var phase: DictationSessionPhase? {
+        appState.currentDictationSession?.phase
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -279,11 +287,7 @@ private struct LiveDictationBanner: View {
             }
             .onAppear { blink = true }
 
-            Text(appState.dictationState == .listening
-                 ? t("Écoute en cours…", "Listening…", "Escuchando…", "正在监听…", "聞き取り中…", "Слушаю…")
-                 : appState.dictationState == .formatting
-                 ? t("Formatage IA…", "AI formatting…", "Formateando IA…", "AI 格式化…", "AI フォーマット中…", "ИИ форматирует…")
-                 : t("Transcription…", "Transcribing…", "Transcribiendo…", "转写中…", "文字起こし中…", "Транскрибация…"))
+            Text(phaseLabel)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(hex: "#FF3B30"))
 
@@ -299,11 +303,214 @@ private struct LiveDictationBanner: View {
                 }
             }
             .frame(height: 20)
+
+            Button {
+                DictationEngine.shared.cancelCurrentSession(source: "live_dictation_banner_button")
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(Color(hex: "#FF3B30"))
+                    .frame(width: 22, height: 22)
+                    .background(Color.white)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(Color(hex: "#FF3B30").opacity(0.07))
         .cornerRadius(12)
+    }
+
+    private var phaseLabel: String {
+        switch phase {
+        case .arming:
+            return t("Préparation…", "Preparing…", "Preparando…", "准备中…", "準備中…", "Подготовка…")
+        case .recording:
+            return t("Enregistrement…", "Recording…", "Grabando…", "录音中…", "録音中…", "Запись…")
+        case .retrying:
+            return t("Relance…", "Retrying…", "Reintentando…", "重试中…", "再試行中…", "Повтор…")
+        case .transcribing:
+            return t("Transcription…", "Transcribing…", "Transcribiendo…", "转写中…", "文字起こし中…", "Транскрибация…")
+        case .formatting:
+            return t("Formatage…", "Formatting…", "Formateando…", "格式化中…", "フォーマット中…", "Форматирование…")
+        case .inserting:
+            return t("Insertion…", "Inserting…", "Insertando…", "插入中…", "挿入中…", "Вставка…")
+        default:
+            return t("Dictée en cours…", "Dictating…", "Dictando…", "听写中…", "音声入力中…", "Диктовка…")
+        }
+    }
+}
+
+private struct DictationSessionCard: View {
+    @Bindable private var appState = AppState.shared
+    let session: DictationSession
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(accentColor)
+                        .frame(width: 10, height: 10)
+                    Text(phaseTitle)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(Color(hex: "#111111"))
+                }
+                Spacer()
+                HStack(spacing: 8) {
+                    if appState.retryLastSessionAvailable && !session.isActive {
+                        Button {
+                            Task { await DictationEngine.shared.retryLastSession() }
+                        } label: {
+                            Text(t("Retry", "Retry", "Retry", "重试", "再試行", "Повтор"))
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(Color(hex: "#0A84FF"))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color(hex: "#0A84FF").opacity(0.10))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Text(session.phase.rawValue.uppercased())
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(accentColor.opacity(0.10))
+                        .clipShape(Capsule())
+                }
+            }
+
+            HStack(spacing: 10) {
+                sessionFact(
+                    title: t("Profil", "Profile", "Perfil", "配置", "プロファイル", "Профиль"),
+                    value: profileLabel
+                )
+                sessionFact(
+                    title: t("Pipeline", "Pipeline", "Pipeline", "管线", "パイプライン", "Пайплайн"),
+                    value: SessionPresentation.pipelineDecisionMessage(
+                        session.pipelineDecision,
+                        languageCode: AppState.shared.uiDisplayLanguage.rawValue
+                    )
+                )
+                sessionFact(
+                    title: t("Insertion", "Insertion", "Inserción", "插入", "挿入", "Вставка"),
+                    value: SessionPresentation.insertionStrategyMessage(
+                        session.insertionStrategy,
+                        fallbackReason: session.insertionFallbackReason,
+                        languageCode: AppState.shared.uiDisplayLanguage.rawValue
+                    )
+                )
+                sessionFact(
+                    title: t("Fallback", "Fallback", "Fallback", "回退", "フォールバック", "Фолбэк"),
+                    value: fallbackLabel
+                )
+                sessionFact(
+                    title: t("Retry", "Retry", "Retry", "重试", "再試行", "Повтор"),
+                    value: appState.retryLastSessionAvailable ? "available" : "unavailable"
+                )
+            }
+
+            if let transcript = session.liveTranscription.displayText, !transcript.isEmpty {
+                Text(transcript)
+                    .font(.system(size: 12.5))
+                    .foregroundColor(Color(hex: "#555550"))
+                    .lineLimit(2)
+            }
+
+            if let preview = session.finalTextPreview,
+               !preview.isEmpty,
+               preview != session.liveTranscription.displayText {
+                Text(preview)
+                    .font(.system(size: 12))
+                    .foregroundColor(Color(hex: "#777772"))
+                    .lineLimit(2)
+            } else if let errorMessage = session.errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(.system(size: 12.5))
+                    .foregroundColor(Color(hex: "#A03A2A"))
+                    .lineLimit(2)
+            }
+        }
+        .padding(14)
+        .background(Color.white)
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.04), radius: 6, x: 0, y: 1)
+    }
+
+    private var accentColor: Color {
+        switch session.phase {
+        case .arming, .recording:
+            return Color(hex: "#FF3B30")
+        case .retrying:
+            return Color(hex: "#5856D6")
+        case .transcribing:
+            return Color(hex: "#FF9500")
+        case .formatting:
+            return Color(hex: "#22D3B8")
+        case .inserting:
+            return Color(hex: "#0A84FF")
+        case .success:
+            return Color(hex: "#34C759")
+        case .failure:
+            return Color(hex: "#FF3B30")
+        case .cancelled:
+            return Color(hex: "#8E8E93")
+        }
+    }
+
+    private var phaseTitle: String {
+        switch session.phase {
+        case .arming:
+            return t("Préparation de la dictée", "Preparing dictation", "Preparando dictado", "准备听写", "音声入力を準備中", "Подготовка диктовки")
+        case .recording:
+            return t("Enregistrement en cours", "Recording in progress", "Grabación en curso", "正在录音", "録音中", "Идет запись")
+        case .retrying:
+            return t("Relance de la dictée", "Retrying dictation", "Reintentando el dictado", "重新尝试听写", "音声入力を再試行中", "Повтор диктовки")
+        case .transcribing:
+            return t("Transcription locale", "On-device transcription", "Transcripción local", "本地转写", "ローカル文字起こし", "Локальная транскрибация")
+        case .formatting:
+            return t("Formatage du texte", "Formatting text", "Formateando texto", "文本格式化", "テキスト整形", "Форматирование текста")
+        case .inserting:
+            return t("Insertion dans l’app cible", "Inserting into target app", "Insertando en la app objetivo", "插入到目标应用", "対象アプリへ挿入中", "Вставка в целевое приложение")
+        case .success:
+            return t("Dictée terminée", "Dictation completed", "Dictado completado", "听写完成", "音声入力が完了", "Диктовка завершена")
+        case .failure:
+            return t("Dictée en échec", "Dictation failed", "Falló el dictado", "听写失败", "音声入力に失敗", "Сбой диктовки")
+        case .cancelled:
+            return t("Dictée annulée", "Dictation cancelled", "Dictado cancelado", "听写已取消", "音声入力をキャンセル", "Диктовка отменена")
+        }
+    }
+
+    @ViewBuilder
+    private func sessionFact(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundColor(Color(hex: "#AAAAAA"))
+            Text(value)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(Color(hex: "#222220"))
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var profileLabel: String {
+        session.outputProfile.displayName(for: AppState.shared.uiDisplayLanguage.rawValue)
+    }
+
+    private var fallbackLabel: String {
+        SessionPresentation.fallbackMessage(
+            pipelineFallbackReason: session.pipelineFallbackReason,
+            insertionFallbackReason: session.insertionFallbackReason,
+            outputProfile: session.outputProfile,
+            languageCode: AppState.shared.uiDisplayLanguage.rawValue
+        ) ?? "none"
     }
 }
 

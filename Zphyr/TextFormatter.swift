@@ -4,6 +4,9 @@ struct TextFormatterContext: Sendable {
     let rawASRText: String
     let normalizedText: String
     let languageCode: String
+    let outputProfile: OutputProfile
+    let formattingModelID: FormattingModelID
+    let protectedTerms: [String]
     let defaultCodeStyle: CodeStyle
     let preferredMode: FormattingMode
 }
@@ -11,6 +14,8 @@ struct TextFormatterContext: Sendable {
 struct TextFormatterResult: Sendable {
     let text: String
     let usedDeterministicFallback: Bool
+    let pipelineDecision: PipelineDecision
+    let fallbackReason: FallbackReason?
     let rejectedIntroducedTokens: [String]
     let llmInputLength: Int?
     let llmOutputLength: Int?
@@ -21,6 +26,8 @@ struct TextFormatterResult: Sendable {
         TextFormatterResult(
             text: text,
             usedDeterministicFallback: false,
+            pipelineDecision: .deterministicOnly,
+            fallbackReason: nil,
             rejectedIntroducedTokens: [],
             llmInputLength: nil,
             llmOutputLength: nil,

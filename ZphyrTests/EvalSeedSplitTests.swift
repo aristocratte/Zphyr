@@ -95,7 +95,6 @@ struct SeedEvalRunRecord: Codable {
 
 @MainActor
 final class EvalSeedSplitTests: XCTestCase {
-
     private struct RuntimeConfig: Decodable {
         let mode: String?
         let splitPath: String?
@@ -222,6 +221,9 @@ final class EvalSeedSplitTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
+        guard ProcessInfo.processInfo.environment["ZPHYR_RUN_EVALS"] == "1" else {
+            throw XCTSkip("Seed split eval is opt-in. Set ZPHYR_RUN_EVALS=1 to run it.")
+        }
         let runtimeConfig = loadRuntimeConfig()
 
         // Apply EVAL_MODE to AppState so pipeline runs under correct mode

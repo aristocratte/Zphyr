@@ -45,8 +45,8 @@ final class CodeFormatter {
     )
     private let advancedRegex: NSRegularExpression? = {
         let keywordList = "variable|var|fonction|function|méthode|method|clase|función|método|tipo|parámetro|funktion|klasse|methode|konstante|переменная|функция|метод|класс|константа|параметр|classe|class|const|let|constante|type|param|paramètre|parameter"
-        let stopWordList = "en|dans|pour|avec|sur|with|in|to|for|at|of|the|a|de|du|la|le|les|un|une|et|ou|puis|ensuite|ici|là|python|swift|javascript|typescript|rust|golang|kotlin|go|js|ts|py"
-        let pattern = #"\b(?:"# + keywordList + #")\s+([a-zA-ZÀ-ÿ0-9](?:\s+[a-zA-ZÀ-ÿ0-9]){1,4})(?=\s+(?:"# + stopWordList + #")\b|[,;.!?]|$)"#
+        let stopWordList = "en|dans|pour|avec|sur|with|in|to|for|at|of|the|a|de|du|la|le|les|un|une|et|ou|puis|ensuite|ici|là|python|swift|javascript|typescript|rust|golang|kotlin|go|js|ts|py|doit|peut|faut|reste|fait|vient|devient|retourne|donne|prend|veut|sera"
+        let pattern = #"\b(?:"# + keywordList + #")\s+([a-zA-ZÀ-ÿ0-9]+(?:\s+[a-zA-ZÀ-ÿ0-9]+){1,4}?)(?=\s+(?:"# + stopWordList + #")\b|[,;.!?]|$)"#
         return try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
     }()
     private let strongCodeIntentRegex = try? NSRegularExpression(
@@ -74,9 +74,9 @@ final class CodeFormatter {
                 result.replaceSubrange(swiftRange, with: formatted)
             }
         }
-        if matches.isEmpty, hasStrongCodeIntent(in: result) {
-            // In explicit-trigger mode, keep conservative behavior but still
-            // format obvious "variable/function/class ..." phrases.
+        if matches.isEmpty, hasStrongCodeIntent(in: result), codeKeywordLeadsPhrase(result) {
+            // In explicit-trigger mode only apply formatAdvanced when a code keyword
+            // leads the phrase (e.g. "fonction background color" but NOT "the function is decorated").
             result = formatAdvanced(result, defaultStyle: defaultStyle)
         }
         return result
@@ -159,5 +159,17 @@ final class CodeFormatter {
         guard let strongCodeIntentRegex else { return false }
         let range = NSRange(text.startIndex..., in: text)
         return strongCodeIntentRegex.firstMatch(in: text, range: range) != nil
+    }
+
+    /// Returns true only when a code keyword is the first (or second) word of the phrase.
+    /// Prevents false positives like "the function is decorated with" from being reformatted.
+    private func codeKeywordLeadsPhrase(_ text: String) -> Bool {
+        let starters: Set<String> = [
+            "variable", "var", "fonction", "function", "méthode", "method",
+            "class", "classe", "constante", "constant", "const", "let",
+            "param", "paramètre", "parameter", "type"
+        ]
+        let words = text.split(separator: " ", maxSplits: 2).map { $0.lowercased() }
+        return words.prefix(2).contains { starters.contains($0) }
     }
 }

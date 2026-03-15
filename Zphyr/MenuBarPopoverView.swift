@@ -72,7 +72,7 @@ struct MenuBarPopoverView: View {
     private var donutSlices: [DonutSlice] {
         let values: [(label: String, value: Int64, color: Color)] = [
             ("Whisper", max(0, store.snapshot.primaryModelDiskBytes), Color(hex: "#0A84FF")),
-            ("Qwen formatage", max(0, store.snapshot.formatterModelDiskBytes), Color(hex: "#22D3B8"))
+            ("Formatage local", max(0, store.snapshot.formatterModelDiskBytes), Color(hex: "#22D3B8"))
         ]
         let total = Double(values.reduce(0) { $0 + $1.value })
         guard total > 0 else { return [] }
@@ -206,7 +206,7 @@ struct MenuBarPopoverView: View {
                     )
                     legendRow(
                         color: Color(hex: "#22D3B8"),
-                        title: t("Qwen formatage", "Qwen formatting", "Qwen de formateo", "Qwen 格式化", "Qwen フォーマット", "Qwen форматирования"),
+                        title: t("Formatage local", "Local formatting", "Formateo local", "本地格式化", "ローカル整形", "Локальное форматирование"),
                         value: formatInstalledSize(
                             bytes: store.snapshot.formatterModelDiskBytes,
                             installed: store.snapshot.formatterModelInstalled

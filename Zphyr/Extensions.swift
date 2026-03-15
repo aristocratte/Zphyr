@@ -169,8 +169,9 @@ enum SecureLocalDataStore {
         }
 
         var keyBytes = Data(count: 32)
-        let fillStatus = keyBytes.withUnsafeMutableBytes { bytes in
-            SecRandomCopyBytes(kSecRandomDefault, 32, bytes.baseAddress!)
+        let fillStatus = keyBytes.withUnsafeMutableBytes { bytes -> OSStatus in
+            guard let ptr = bytes.baseAddress else { return errSecParam }
+            return SecRandomCopyBytes(kSecRandomDefault, 32, ptr)
         }
         guard fillStatus == errSecSuccess else {
             logger.error("[SecureStore] random bytes generation failed: \(fillStatus)")

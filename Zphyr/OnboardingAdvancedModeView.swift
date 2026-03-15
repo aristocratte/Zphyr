@@ -2,22 +2,23 @@
 //  OnboardingAdvancedModeView.swift
 //  Zphyr
 //
-//  Preflight slide: optional Qwen3.5-0.8B-4bit installation.
-//  Shown after the Whisper model slide. User can skip and install later in Settings.
+//  Preflight slide for choosing and optionally installing one local formatting model.
 //
 
 import SwiftUI
 
 struct OnboardingAdvancedModeView: View {
 
-    // Callbacks from PreflightView
-    var onInstall: () -> Void
+    @Binding var selectedModel: FormattingModelID
+    var status: FormattingModelInstallStatus
+    var primaryTitle: String
+    var primaryEnabled: Bool
+    var onPrimaryAction: () -> Void
     var onSkip: () -> Void
 
-    @State private var isHoveringInstall = false
-    @State private var isHoveringSkip    = false
+    @State private var isHoveringPrimary = false
+    @State private var isHoveringSkip = false
 
-    // Color tokens (matching the Preflight light theme)
     private let zBg      = Color(hex: "#F8F8F6")
     private let zSurface = Color(hex: "#FFFFFF")
     private let zBorder  = Color(hex: "#E5E5E0")
@@ -26,11 +27,34 @@ struct OnboardingAdvancedModeView: View {
     private let zTextDim = Color(hex: "#AAAAAA")
     private let zAccent  = Color(hex: "#22D3B8")
 
+    private var lang: String { AppState.shared.uiDisplayLanguage.rawValue }
+
+    private var selectedSizeLabel: String {
+        ByteCountFormatter.string(
+            fromByteCount: FormattingModelCatalog.descriptor(for: selectedModel).approximateBytes,
+            countStyle: .file
+        )
+    }
+
+    private var statusText: String {
+        switch status {
+        case .installed:
+            return L10n.ui(for: lang, fr: "Installé", en: "Installed", es: "Instalado", zh: "已安装", ja: "インストール済み", ru: "Установлен")
+        case .notInstalled:
+            return L10n.ui(for: lang, fr: "Non installé", en: "Not installed", es: "No instalado", zh: "未安装", ja: "未インストール", ru: "Не установлен")
+        case .downloading(let progress):
+            return L10n.ui(for: lang, fr: "Téléchargement \(Int(progress * 100))%", en: "Downloading \(Int(progress * 100))%", es: "Descargando \(Int(progress * 100))%", zh: "下载中 \(Int(progress * 100))%", ja: "ダウンロード中 \(Int(progress * 100))%", ru: "Загрузка \(Int(progress * 100))%")
+        case .preparing:
+            return L10n.ui(for: lang, fr: "Préparation…", en: "Preparing…", es: "Preparando…", zh: "准备中…", ja: "準備中…", ru: "Подготовка…")
+        case .unavailable(let reason), .error(let reason):
+            return reason
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Spacer()
 
-            // Icon + title
             VStack(spacing: 16) {
                 ZStack {
                     Circle()
@@ -42,53 +66,55 @@ struct OnboardingAdvancedModeView: View {
                 }
 
                 VStack(spacing: 8) {
-                    Text("Mode Avancé IA locale")
+                    Text("Choisissez un modèle de formatage local")
                         .font(.system(size: 26, weight: .bold))
                         .foregroundColor(zText)
 
-                    Text("Optionnel — vous pouvez l'activer plus tard dans les Réglages")
+                    Text("Vous pouvez en installer un maintenant, puis en changer plus tard dans les Réglages.")
                         .font(.system(size: 13))
                         .foregroundColor(zTextDim)
                         .multilineTextAlignment(.center)
                 }
             }
 
-            Spacer().frame(height: 32)
+            Spacer().frame(height: 24)
 
-            // Feature card
-            VStack(alignment: .leading, spacing: 14) {
-                AdvFeatureRow(icon: "wand.and.stars",
-                              color: Color(hex: "#AF52DE"),
-                              title: "Détection automatique",
-                              subtitle: "Détecte et formate les identifiants sans mot-clé déclencheur")
-                Divider().background(Color(hex: "#F0F0EE"))
-                AdvFeatureRow(icon: "cpu",
-                              color: Color(hex: "#007AFF"),
-                              title: "100% local · Metal / ANE",
-                              subtitle: "Tourne sur votre Apple Silicon — aucune donnée ne quitte votre Mac")
-                Divider().background(Color(hex: "#F0F0EE"))
-                AdvFeatureRow(icon: "arrow.down.circle",
-                              color: Color(hex: "#34C759"),
-                              title: "Téléchargement unique",
-                              subtitle: "Zphyr-v1 (fine-tuned) · ~1,1 Go · stocké en cache local")
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(FormattingModelID.allCases) { modelID in
+                    FormatterChoiceCard(
+                        modelID: modelID,
+                        isSelected: modelID == selectedModel,
+                        statusText: modelID == selectedModel ? statusText : nil
+                    )
+                    .onTapGesture {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.8)) {
+                            selectedModel = modelID
+                        }
+                    }
+                }
             }
-            .padding(20)
-            .background(zSurface)
-            .cornerRadius(16)
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(zBorder, lineWidth: 1))
-            .shadow(color: .black.opacity(0.04), radius: 10, x: 0, y: 4)
             .padding(.horizontal, 32)
 
-            Spacer().frame(height: 32)
+            Spacer().frame(height: 24)
 
-            // Buttons
-            VStack(spacing: 12) {
-                // Install button
-                Button(action: onInstall) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Label(selectedSizeLabel, systemImage: "internaldrive")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(zTextSub)
+                    Text("•")
+                        .foregroundColor(zTextDim)
+                    Text(selectedModel.recommendedUsage(for: lang))
+                        .font(.system(size: 11))
+                        .foregroundColor(zTextSub)
+                        .lineLimit(2)
+                }
+
+                Button(action: onPrimaryAction) {
                     HStack(spacing: 10) {
-                        Image(systemName: "arrow.down.circle.fill")
+                        Image(systemName: status.isInstalled ? "checkmark.circle.fill" : "arrow.down.circle.fill")
                             .font(.system(size: 16, weight: .semibold))
-                        Text("Installer maintenant (~1,1 Go)")
+                        Text(primaryTitle)
                             .font(.system(size: 15, weight: .semibold))
                     }
                     .foregroundColor(.white)
@@ -96,19 +122,19 @@ struct OnboardingAdvancedModeView: View {
                     .frame(height: 48)
                     .background(
                         RoundedRectangle(cornerRadius: 13)
-                            .fill(zAccent)
-                            .shadow(color: zAccent.opacity(isHoveringInstall ? 0.45 : 0.25),
-                                    radius: isHoveringInstall ? 12 : 8, x: 0, y: 4)
+                            .fill(primaryEnabled ? zAccent : Color(hex: "#C8C8C3"))
+                            .shadow(color: zAccent.opacity(primaryEnabled && isHoveringPrimary ? 0.45 : 0.18),
+                                    radius: primaryEnabled && isHoveringPrimary ? 12 : 8, x: 0, y: 4)
                     )
-                    .scaleEffect(isHoveringInstall ? 1.01 : 1.0)
-                    .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isHoveringInstall)
+                    .scaleEffect(primaryEnabled && isHoveringPrimary ? 1.01 : 1.0)
+                    .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isHoveringPrimary)
                 }
                 .buttonStyle(.plain)
-                .onHover { isHoveringInstall = $0 }
+                .disabled(!primaryEnabled)
+                .onHover { isHoveringPrimary = $0 }
 
-                // Skip button
                 Button(action: onSkip) {
-                    Text("Non merci — mode Normal seulement")
+                    Text("Installer plus tard")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(isHoveringSkip ? zText : zTextSub)
                         .frame(maxWidth: .infinity)
@@ -130,39 +156,85 @@ struct OnboardingAdvancedModeView: View {
     }
 }
 
-// MARK: - Feature row helper
+private struct FormatterChoiceCard: View {
+    let modelID: FormattingModelID
+    let isSelected: Bool
+    let statusText: String?
 
-private struct AdvFeatureRow: View {
-    let icon: String
-    let color: Color
-    let title: String
-    let subtitle: String
+    private var lang: String { AppState.shared.uiDisplayLanguage.rawValue }
+
+    private var sizeLabel: String {
+        ByteCountFormatter.string(
+            fromByteCount: FormattingModelCatalog.descriptor(for: modelID).approximateBytes,
+            countStyle: .file
+        )
+    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(color.opacity(0.1))
-                    .frame(width: 34, height: 34)
-                Image(systemName: icon)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(color)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 11)
+                        .fill(isSelected ? Color(hex: "#22D3B8").opacity(0.12) : Color(hex: "#F8F8F6"))
+                        .frame(width: 40, height: 40)
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(isSelected ? Color(hex: "#22D3B8") : Color(hex: "#AAAAAA"))
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(modelID.displayName(for: lang))
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(Color(hex: "#1A1A1A"))
+                        Text(sizeLabel)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(Color(hex: "#666660"))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color(hex: "#F0F0EE"))
+                            .cornerRadius(6)
+                        if let statusText, !statusText.isEmpty {
+                            Text(statusText)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(Color(hex: "#007AFF"))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Color(hex: "#007AFF").opacity(0.08))
+                                .cornerRadius(6)
+                        }
+                    }
+                    Text(modelID.shortDescription(for: lang))
+                        .font(.system(size: 12))
+                        .foregroundColor(Color(hex: "#666660"))
+                    Text(modelID.recommendedUsage(for: lang))
+                        .font(.system(size: 11))
+                        .foregroundColor(Color(hex: "#888880"))
+                        .lineSpacing(1)
+                }
+
+                Spacer()
             }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Color(hex: "#1A1A1A"))
-                Text(subtitle)
-                    .font(.system(size: 12))
-                    .foregroundColor(Color(hex: "#666660"))
-                    .lineSpacing(1)
-            }
-            Spacer()
         }
+        .padding(16)
+        .background(Color(hex: "#FFFFFF"))
+        .cornerRadius(16)
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(isSelected ? Color(hex: "#22D3B8") : Color(hex: "#E5E5E0"), lineWidth: isSelected ? 1.5 : 1)
+        )
+        .shadow(color: .black.opacity(isSelected ? 0.06 : 0.03), radius: isSelected ? 10 : 6, x: 0, y: 4)
     }
 }
 
 #Preview {
-    OnboardingAdvancedModeView(onInstall: {}, onSkip: {})
-        .frame(width: 560, height: 520)
+    OnboardingAdvancedModeView(
+        selectedModel: .constant(.qwen3_4b),
+        status: .notInstalled,
+        primaryTitle: "Installer Qwen3.5-4B",
+        primaryEnabled: true,
+        onPrimaryAction: {},
+        onSkip: {}
+    )
+    .frame(width: 640, height: 640)
 }

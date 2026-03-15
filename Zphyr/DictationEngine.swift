@@ -61,9 +61,22 @@ final class DictationEngine {
 
     private let overlayController = DictationOverlayController()
 
+    private struct RetryPayload {
+        let audioSamples: [Float]
+        let capturedSampleCount: Int
+        let languageCode: String?
+        let targetBundleID: String?
+    }
+
     /// The app that was frontmost when the user started dictating.
     /// We restore focus to it before injecting text.
     private var targetApp: NSRunningApplication?
+    private var lastRetryPayload: RetryPayload? {
+        didSet {
+            AppState.shared.retryLastSessionAvailable = lastRetryPayload != nil
+        }
+    }
+    private var cancelledSessionIDs: Set<UUID> = []
     private var correctionMonitorTask: Task<Void, Never>?
     private var modelLoadTask: Task<Void, Never>?
     private var lastTranscriptionBackendName: String = "unknown"
@@ -297,6 +310,14 @@ final class DictationEngine {
                 state.downloadStats.bytesReceived = totalBytes
                 state.modelStatus = .ready
                 Self.modelLogger.notice("[ModelLoad] backend already installed and loaded")
+                if AppState.shared.advancedModeInstalled,
+                   AppState.shared.formattingMode != .trigger,
+                   !AdvancedLLMFormatter.shared.isModelLoaded {
+                    Task {
+                        await AdvancedLLMFormatter.shared.loadIfInstalled()
+                        await AdvancedLLMFormatter.shared.warmup()
+                    }
+                }
                 return
             }
 
@@ -339,7 +360,7 @@ final class DictationEngine {
                 if !backend.isInstalling {
                     break
                 }
-                try await Task.sleep(for: .milliseconds(250))
+                try await Task.sleep(for: .milliseconds(500))
             }
 
             await installTask.value
@@ -368,6 +389,14 @@ final class DictationEngine {
 
             let elapsed = Date().timeIntervalSince(startedAt)
             Self.modelLogger.notice("[ModelLoad] backend ready in \(elapsed, privacy: .public)s")
+            if AppState.shared.advancedModeInstalled,
+               AppState.shared.formattingMode != .trigger,
+               !AdvancedLLMFormatter.shared.isModelLoaded {
+                Task {
+                    await AdvancedLLMFormatter.shared.loadIfInstalled()
+                    await AdvancedLLMFormatter.shared.warmup()
+                }
+            }
         } catch {
             if Task.isCancelled || error is CancellationError {
                 Self.modelLogger.notice("[ModelLoad] cancelled")
@@ -388,6 +417,15 @@ final class DictationEngine {
         guard !isProcessing else { return }
 
         let state = AppState.shared
+        targetApp = NSWorkspace.shared.frontmostApplication
+        let transcriptionPlan = asrOrchestrator.liveTranscriptionPlan(for: asrBackend)
+        let outputProfile = state.activeOutputProfile(for: targetApp?.bundleIdentifier)
+        state.beginDictationSession(
+            targetBundleID: targetApp?.bundleIdentifier,
+            transcriptionMode: transcriptionPlan.mode,
+            outputProfile: outputProfile
+        )
+        overlayController.show()
 
         // ── Guard: microphone ─────────────────────────────────────────────────
         // Only show the system dialog when permission is unknown/denied.
@@ -405,11 +443,26 @@ final class DictationEngine {
                     ja: "マイクへのアクセスが拒否されました。システム設定 → プライバシーとセキュリティ → マイク で Zphyr を許可してください。",
                     ru: "Доступ к микрофону запрещен. Разрешите Zphyr в Системных настройках → Конфиденциальность и безопасность → Микрофон."
                 )
+                state.finishCurrentDictationSession(
+                    phase: .failure,
+                    note: "microphone_access_denied",
+                    errorMessage: state.error
+                )
+                overlayController.hide()
+                targetApp = nil
                 return
             }
             // After the async permission check, verify the key is still held.
             // The user may have released it while the dialog was showing.
-            guard ShortcutManager.shared.isHolding else { return }
+            guard ShortcutManager.shared.isHolding else {
+                state.finishCurrentDictationSession(
+                    phase: .cancelled,
+                    note: "key_released_during_arming"
+                )
+                overlayController.hide()
+                targetApp = nil
+                return
+            }
         }
 
         // ── Guard: ASR backend ready ──────────────────────────────────────────
@@ -423,26 +476,33 @@ final class DictationEngine {
                 ja: "音声入力バックエンドはまだ準備できていません。",
                 ru: "Бэкенд диктовки еще не готов."
             )
+            state.finishCurrentDictationSession(
+                phase: .failure,
+                note: "backend_not_ready",
+                errorMessage: state.error
+            )
+            overlayController.hide()
+            targetApp = nil
             return
         }
 
         isDictating = true
 
-        // Capture the frontmost app BEFORE we start (it may lose focus once we activate)
-        targetApp = NSWorkspace.shared.frontmostApplication
         Self.pipelineLogger.notice("[Dictation] start; target app=\(self.targetApp?.bundleIdentifier ?? "nil", privacy: .public)")
 
-        state.dictationState = .listening
-        overlayController.show()
         guard audioCaptureService.startCapture(onLevels: { [weak self] levels in
             Task { @MainActor in self?.updateHUDLevels(levels) }
-        }) else {
+        }, onAudioChunk: nil) else {
             isDictating = false
             targetApp = nil
-            state.dictationState = .idle
+            state.finishCurrentDictationSession(
+                phase: .failure,
+                note: "audio_capture_start_failed"
+            )
             overlayController.hide()
             return
         }
+        state.transitionCurrentDictationSession(to: .recording)
         playDictationStartSound()
     }
 
@@ -452,48 +512,245 @@ final class DictationEngine {
         isProcessing = true
 
         let state = AppState.shared
+        let speechEndedAt = Date()
         audioCaptureService.stopCapture()
         // Give CoreAudio a brief moment to flush the last callback before snapshotting.
         try? await Task.sleep(nanoseconds: 30_000_000) // 30 ms
-        state.dictationState = .processing
         let capturedSamples = audioCaptureService.sampleCount
+        let audioSnapshot = audioCaptureService.snapshotSamples()
+        let languages = state.selectedLanguages
+        let languageCode: String? = languages.count > 1 ? nil : (languages.first?.id ?? "fr")
+        lastRetryPayload = audioSnapshot.isEmpty ? nil : RetryPayload(
+            audioSamples: audioSnapshot,
+            capturedSampleCount: capturedSamples,
+            languageCode: languageCode,
+            targetBundleID: targetApp?.bundleIdentifier
+        )
+        let sessionID = state.currentDictationSession?.id
         Self.pipelineLogger.notice("[Dictation] stop; captured samples=\(capturedSamples)")
+        await processCapturedAudioSession(
+            audioSnapshot: audioSnapshot,
+            capturedSamples: capturedSamples,
+            language: languageCode,
+            sessionID: sessionID,
+            isRetry: false,
+            speechEndedAt: speechEndedAt
+        )
+    }
+
+    func cancelCurrentSession(source: String = "unspecified") {
+        let state = AppState.shared
+        guard let session = state.currentDictationSession else { return }
+        let currentEventSummary = Self.currentEventDebugSummary()
+
+        // Log the call stack to debug unexpected cancellations
+        let callStack = Thread.callStackSymbols.prefix(8).joined(separator: "\n  ")
+        Self.pipelineLogger.notice(
+            "[Dictation] cancelCurrentSession id=\(session.id.uuidString, privacy: .public) phase=\(session.phase.rawValue, privacy: .public) source=\(source, privacy: .public) isDictating=\(self.isDictating, privacy: .public) isProcessing=\(self.isProcessing, privacy: .public) target=\(self.targetApp?.bundleIdentifier ?? "nil", privacy: .public) event=\(currentEventSummary, privacy: .public)\n  caller stack:\n  \(callStack, privacy: .public)"
+        )
+
+        // Guard: if transcription/formatting is in-flight (isProcessing == true,
+        // isDictating == false), reject the cancel to prevent the LiveDictationBanner's
+        // X button from accidentally killing a running pipeline.
+        if isProcessing && !isDictating {
+            Self.pipelineLogger.warning("[Dictation] cancelCurrentSession BLOCKED — pipeline is processing; ignoring cancel request")
+            return
+        }
+
+        cancelledSessionIDs.insert(session.id)
+
+        if isDictating {
+            audioCaptureService.stopCapture()
+            audioCaptureService.resetBuffer()
+            isDictating = false
+            isProcessing = false
+        }
+
+        state.finishCurrentDictationSession(
+            phase: .cancelled,
+            note: "user_cancelled"
+        )
+        playDictationEndSound()
+        overlayController.hide()
+        targetApp = nil
+    }
+
+    private static func currentEventDebugSummary() -> String {
+        guard let event = NSApp.currentEvent else { return "none" }
+        let characters = event.charactersIgnoringModifiers?.replacingOccurrences(of: "\n", with: "\\n") ?? "nil"
+        return "type=\(event.type.rawValue) keyCode=\(event.keyCode) chars=\(characters) clickCount=\(event.clickCount) window=\(event.windowNumber)"
+    }
+
+    func retryLastSession() async {
+        let state = AppState.shared
+        guard !isDictating, !isProcessing else {
+            state.error = L10n.ui(
+                for: state.selectedLanguage.id,
+                fr: "Une dictée est déjà en cours.",
+                en: "A dictation session is already running.",
+                es: "Ya hay una sesión de dictado en curso.",
+                zh: "已有听写会话正在进行中。",
+                ja: "すでに音声入力セッションが実行中です。",
+                ru: "Сеанс диктовки уже выполняется."
+            )
+            return
+        }
+        guard let payload = lastRetryPayload else {
+            state.error = L10n.ui(
+                for: state.selectedLanguage.id,
+                fr: "Aucun buffer audio disponible pour relancer la dernière dictée.",
+                en: "No audio buffer is available to retry the last dictation.",
+                es: "No hay buffer de audio disponible para reintentar el último dictado.",
+                zh: "没有可用于重试上次听写的音频缓冲区。",
+                ja: "前回の音声入力を再試行するための音声バッファがありません。",
+                ru: "Нет аудиобуфера для повторного запуска последней диктовки."
+            )
+            return
+        }
+
+        isProcessing = true
+        targetApp = payload.targetBundleID.flatMap {
+            NSRunningApplication.runningApplications(withBundleIdentifier: $0).first
+        } ?? NSWorkspace.shared.frontmostApplication
+
+        let transcriptionPlan = asrOrchestrator.liveTranscriptionPlan(for: asrBackend)
+        state.beginDictationSession(
+            targetBundleID: payload.targetBundleID ?? targetApp?.bundleIdentifier,
+            transcriptionMode: transcriptionPlan.mode,
+            outputProfile: state.activeOutputProfile(for: payload.targetBundleID ?? targetApp?.bundleIdentifier)
+        )
+        state.transitionCurrentDictationSession(to: .retrying, note: "retry_last_session")
+        overlayController.show()
+
+        await processCapturedAudioSession(
+            audioSnapshot: payload.audioSamples,
+            capturedSamples: payload.capturedSampleCount,
+            language: payload.languageCode,
+            sessionID: state.currentDictationSession?.id,
+            isRetry: true
+        )
+    }
+
+    private func processCapturedAudioSession(
+        audioSnapshot: [Float],
+        capturedSamples: Int,
+        language: String?,
+        sessionID: UUID?,
+        isRetry: Bool,
+        speechEndedAt: Date? = nil
+    ) async {
+        let state = AppState.shared
+        let transcriptionPlan = asrOrchestrator.liveTranscriptionPlan(for: asrBackend)
+        let effectiveTranscriptionMode: ASRTranscriptionMode = {
+            if transcriptionPlan.mode == .streamingPartials,
+               asrOrchestrator.makeStreamingSession(for: asrBackend, language: language) != nil {
+                return .streamingPartials
+            }
+            return .finalOnly
+        }()
+
+        state.updateCurrentLiveTranscription(clearPartialText: true, mode: effectiveTranscriptionMode)
+        state.transitionCurrentDictationSession(to: .transcribing)
 
         var metrics = DictationSessionMetrics()
+        metrics.sessionID = sessionID ?? metrics.sessionID
         metrics.capturedSampleCount = capturedSamples
+        metrics.transcriptionMode = effectiveTranscriptionMode
+        metrics.partialUpdatesCount = 0
+        metrics.retriedFromBuffer = isRetry
+        metrics.speechEndedAt = speechEndedAt
 
+        if shouldAbortProcessing(for: sessionID) {
+            return
+        }
+
+        metrics.asrStartedAt = Date()
+        Self.pipelineLogger.notice(
+            "[Latency] session=\(metrics.sessionID.uuidString, privacy: .public) stage=asr_start speechToAsr=\(metrics.speechEndToASRStartMs, privacy: .public)ms"
+        )
         let asrStartedAt = CFAbsoluteTimeGetCurrent()
-        let rawText = await runASRTranscription()
+        let rawText = await runASRTranscription(audioSnapshot: audioSnapshot, language: language)
         Self.pipelineLogger.notice(
             "[Dictation] ASR raw preview=\"\(Self.debugPreview(rawText), privacy: .public)\""
         )
+        metrics.rawTranscriptReadyAt = Date()
         metrics.asrDurationMs = Int((CFAbsoluteTimeGetCurrent() - asrStartedAt) * 1_000)
+        Self.pipelineLogger.notice(
+            "[Latency] session=\(metrics.sessionID.uuidString, privacy: .public) stage=raw_transcript_ready asrToRaw=\(metrics.asrToRawTranscriptMs, privacy: .public)ms"
+        )
         metrics.rawCharacterCount = rawText.count
         metrics.backendName = lastTranscriptionBackendName
+        metrics.outputProfile = state.currentDictationSession?.outputProfile.rawValue ?? ""
+        state.updateCurrentLiveTranscription(
+            clearPartialText: true,
+            finalText: rawText,
+            mode: effectiveTranscriptionMode
+        )
 
-        // ── Post-ASR formatting pipeline ────────────────────────────────────
+        if shouldAbortProcessing(for: sessionID) {
+            return
+        }
+
         let pipelineInput = TranscriptionInput(
             rawText: rawText,
             languageCode: state.selectedLanguage.id,
             targetBundleID: targetApp?.bundleIdentifier
         )
+        if !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            state.transitionCurrentDictationSession(to: .formatting)
+        }
         let pipelineResult = await formattingPipeline.run(pipelineInput)
 
+        if shouldAbortProcessing(for: sessionID) {
+            return
+        }
+
+        metrics.formattingCompletedAt = Date()
         let finalText = pipelineResult.finalText
-        metrics.stabilizeDurationMs = Int(pipelineResult.totalDurationMs)
+        let formatterDurationMs = Int(
+            pipelineResult.trace
+                .filter(\.isModelBased)
+                .map(\.durationMs)
+                .reduce(0, +)
+                .rounded()
+        )
+        metrics.stabilizeDurationMs = max(0, Int(pipelineResult.totalDurationMs.rounded()) - formatterDurationMs)
         metrics.listBlocksDetected = pipelineResult.listBlocksCount
-        metrics.formatterDurationMs = 0  // subsumed into pipeline total
+        metrics.formatterDurationMs = formatterDurationMs
         metrics.finalCharacterCount = finalText.count
         metrics.formatterMode = state.formattingMode.rawValue
+        metrics.pipelineDecision = pipelineResult.decision
+        metrics.pipelineFallbackReason = pipelineResult.fallbackReason
+        metrics.usedFormatterFallback = pipelineResult.decision == .deterministicFallback
+        Self.pipelineLogger.notice(
+            "[Latency] session=\(metrics.sessionID.uuidString, privacy: .public) stage=formatting_complete rawToFinal=\(metrics.rawTranscriptToFormattingFinalMs, privacy: .public)ms"
+        )
+        state.updateCurrentDictationSession(
+            pipelineDecision: pipelineResult.decision,
+            pipelineFallbackReason: pipelineResult.fallbackReason,
+            pipelineTrace: pipelineResult.trace,
+            finalTextPreview: finalText
+        )
 
-        // Handle commands extracted by the pipeline
         let recognizedCommand = pipelineResult.extractedCommand
         if recognizedCommand == .cancelLast {
             Self.pipelineLogger.notice("[Dictation] cancel command detected — discarding")
+            metrics.sessionCompletedAt = Date()
+            Self.pipelineLogger.notice(
+                "[Latency] session=\(metrics.sessionID.uuidString, privacy: .public) stage=session_complete e2e=\(metrics.endToEndDurationMs, privacy: .public)ms speechToAsr=\(metrics.speechEndToASRStartMs, privacy: .public)ms asrToRaw=\(metrics.asrToRawTranscriptMs, privacy: .public)ms rawToFinal=\(metrics.rawTranscriptToFormattingFinalMs, privacy: .public)ms finalToInsert=\(metrics.formattingFinalToInsertionMs, privacy: .public)ms"
+            )
+            LocalMetricsRecorder.shared.record(metrics)
+            state.finishCurrentDictationSession(
+                phase: .cancelled,
+                note: "cancel_command_detected",
+                finalTextPreview: finalText,
+                pipelineDecision: pipelineResult.decision,
+                pipelineFallbackReason: pipelineResult.fallbackReason,
+                pipelineTrace: pipelineResult.trace
+            )
             targetApp = nil
             playDictationEndSound()
             overlayController.hide()
-            state.dictationState = .idle
             isProcessing = false
             return
         }
@@ -501,26 +758,58 @@ final class DictationEngine {
         Self.pipelineLogger.notice(
             "[Dictation] pipeline completed preview=\"\(Self.debugPreview(finalText), privacy: .public)\" dur=\(String(format: "%.1f", pipelineResult.totalDurationMs), privacy: .public)ms stages=\(pipelineResult.trace.count, privacy: .public)"
         )
+        Self.pipelineLogger.notice(
+            "[Dictation] pipeline decision=\(pipelineResult.decision.rawValue, privacy: .public) fallbackReason=\(pipelineResult.fallbackReason?.rawValue ?? "none", privacy: .public)"
+        )
         Self.pipelineLogger.notice("[Dictation] transcription lengths raw=\(rawText.count) final=\(finalText.count)")
-        LocalMetricsRecorder.shared.record(metrics)
 
         state.lastTranscription = finalText
-        state.dictationState = .done(text: finalText)
 
         if !finalText.isEmpty {
             let shouldCopyOnly = recognizedCommand == .copyOnly || !state.autoInsert
+            let insertionStartedAt = CFAbsoluteTimeGetCurrent()
+            let insertionOutcome: InsertionOutcome
+            state.transitionCurrentDictationSession(to: .inserting)
             if shouldCopyOnly {
-                copyTextToClipboard(finalText)
+                insertionOutcome = insertionEngineService.copyToClipboard(
+                    finalText,
+                    strategy: .clipboardOnly
+                )
                 Self.pipelineLogger.notice("[Dictation] copied to clipboard (\(recognizedCommand == .copyOnly ? "copyOnly command" : "autoInsert=off", privacy: .public))")
             } else {
-                await insertIntoTargetApp(finalText)
+                insertionOutcome = await insertionEngineService.insert(finalText, into: targetApp)
             }
+
+            if shouldAbortProcessing(for: sessionID) {
+                return
+            }
+
+            metrics.insertionDurationMs = Int((CFAbsoluteTimeGetCurrent() - insertionStartedAt) * 1_000)
+            metrics.insertionCompletedAt = Date()
+            metrics.insertionTargetFamily = insertionOutcome.targetFamily.rawValue
+            metrics.insertionStrategy = insertionOutcome.strategy.rawValue
+            metrics.insertionFallbackReason = insertionOutcome.fallbackReason
+            Self.pipelineLogger.notice(
+                "[Latency] session=\(metrics.sessionID.uuidString, privacy: .public) stage=insertion_complete finalToInsert=\(metrics.formattingFinalToInsertionMs, privacy: .public)ms"
+            )
+            state.updateCurrentDictationSession(
+                insertionStrategy: insertionOutcome.strategy,
+                insertionFallbackReason: insertionOutcome.fallbackReason
+            )
+            state.finishCurrentDictationSession(
+                phase: .success,
+                finalTextPreview: finalText,
+                pipelineDecision: pipelineResult.decision,
+                pipelineFallbackReason: pipelineResult.fallbackReason,
+                pipelineTrace: pipelineResult.trace,
+                insertionStrategy: insertionOutcome.strategy,
+                insertionFallbackReason: insertionOutcome.fallbackReason
+            )
         } else {
-            let bufferCount = capturedSamples
-            Self.pipelineLogger.notice("[Dictation] no transcription text — bufferCount=\(bufferCount, privacy: .public) rawText.count=\(rawText.count, privacy: .public)")
-            if bufferCount < 1600 {
-                // Buffer too short: less than 0.1s of audio at 16kHz
-                state.error = L10n.ui(
+            Self.pipelineLogger.notice("[Dictation] no transcription text — bufferCount=\(capturedSamples, privacy: .public) rawText.count=\(rawText.count, privacy: .public)")
+            let errorMessage: String
+            if capturedSamples < 1600 {
+                errorMessage = L10n.ui(
                     for: state.selectedLanguage.id,
                     fr: "Enregistrement trop court. Maintiens la touche et parle, puis relâche.",
                     en: "Recording too short. Hold the key while speaking, then release.",
@@ -530,25 +819,49 @@ final class DictationEngine {
                     ru: "Запись слишком короткая. Удерживайте клавишу пока говорите."
                 )
             } else {
-                state.error = L10n.ui(
+                errorMessage = L10n.ui(
                     for: state.selectedLanguage.id,
-                    fr: "Aucun texte détecté (\(bufferCount/16)ms audio). Parle plus fort ou plus longtemps.",
-                    en: "No text detected (\(bufferCount/16)ms audio). Speak louder or longer.",
-                    es: "No se detectó texto (\(bufferCount/16)ms audio). Habla más fuerte o más tiempo.",
-                    zh: "未检测到文本（\(bufferCount/16)ms 音频）。请说得更大声或更长。",
-                    ja: "テキストが検出されませんでした（\(bufferCount/16)ms の音声）。もっと大きく、または長く話してください。",
-                    ru: "Текст не распознан (\(bufferCount/16) мс аудио). Говорите громче или дольше."
+                    fr: "Aucun texte détecté (\(capturedSamples/16)ms audio). Parle plus fort ou plus longtemps.",
+                    en: "No text detected (\(capturedSamples/16)ms audio). Speak louder or longer.",
+                    es: "No se detectó texto (\(capturedSamples/16)ms audio). Habla más fuerte o más tiempo.",
+                    zh: "未检测到文本（\(capturedSamples/16)ms 音频）。请说得更大声或更长。",
+                    ja: "テキストが検出されませんでした（\(capturedSamples/16)ms の音声）。もっと大きく、または長く話してください。",
+                    ru: "Текст не распознан (\(capturedSamples/16) мс аудио). Говорите громче или дольше."
                 )
             }
+            state.error = errorMessage
+            state.finishCurrentDictationSession(
+                phase: .failure,
+                note: "empty_final_text",
+                pipelineDecision: pipelineResult.decision,
+                pipelineFallbackReason: pipelineResult.fallbackReason,
+                pipelineTrace: pipelineResult.trace,
+                errorMessage: errorMessage
+            )
         }
 
+        metrics.sessionCompletedAt = Date()
+        Self.pipelineLogger.notice(
+            "[Latency] session=\(metrics.sessionID.uuidString, privacy: .public) stage=session_complete e2e=\(metrics.endToEndDurationMs, privacy: .public)ms speechToAsr=\(metrics.speechEndToASRStartMs, privacy: .public)ms asrToRaw=\(metrics.asrToRawTranscriptMs, privacy: .public)ms rawToFinal=\(metrics.rawTranscriptToFormattingFinalMs, privacy: .public)ms finalToInsert=\(metrics.formattingFinalToInsertionMs, privacy: .public)ms"
+        )
+        LocalMetricsRecorder.shared.record(metrics)
         targetApp = nil
         playDictationEndSound()
         overlayController.hide()
 
         try? await Task.sleep(for: .milliseconds(600))
-        state.dictationState = .idle
+        state.resetLegacyDictationState()
         isProcessing = false
+    }
+
+    private func shouldAbortProcessing(for sessionID: UUID?) -> Bool {
+        guard let sessionID else { return false }
+        guard cancelledSessionIDs.contains(sessionID) else { return false }
+        cancelledSessionIDs.remove(sessionID)
+        Self.pipelineLogger.notice("[Dictation] aborted processing for cancelled session id=\(sessionID.uuidString, privacy: .public)")
+        targetApp = nil
+        isProcessing = false
+        return true
     }
 
     // MARK: - Text Formatter Pipeline
@@ -574,14 +887,17 @@ final class DictationEngine {
             preferred: state.formattingMode,
             profile: state.performanceProfile
         )
-        let llmRuntimeLoaded = AdvancedLLMFormatter.shared.isModelLoaded
+        let llmRuntimeLoaded = AdvancedLLMFormatter.shared.isModelLoaded(modelID: state.activeFormattingModel)
         Self.pipelineLogger.notice(
-            "[Formatting] mode selection preferred=\(state.formattingMode.rawValue, privacy: .public) effective=\(effectiveMode.rawValue, privacy: .public) proUnlocked=\(state.isProModeUnlocked, privacy: .public) advancedInstalled=\(state.advancedModeInstalled, privacy: .public) llmLoaded=\(llmRuntimeLoaded, privacy: .public) tier=\(state.performanceProfile.tier.rawValue, privacy: .public)"
+            "[Formatting] mode selection preferred=\(state.formattingMode.rawValue, privacy: .public) effective=\(effectiveMode.rawValue, privacy: .public) formatterModel=\(state.activeFormattingModel.rawValue, privacy: .public) proUnlocked=\(state.isProModeUnlocked, privacy: .public) advancedInstalled=\(state.advancedModeInstalled, privacy: .public) llmLoaded=\(llmRuntimeLoaded, privacy: .public) tier=\(state.performanceProfile.tier.rawValue, privacy: .public)"
         )
         let context = TextFormatterContext(
             rawASRText: rawASRText,
             normalizedText: normalizedText,
             languageCode: state.selectedLanguage.id,
+            outputProfile: state.activeOutputProfile(for: targetApp?.bundleIdentifier),
+            formattingModelID: state.activeFormattingModel,
+            protectedTerms: DictionaryStore.shared.sortedProtectedTerms,
             defaultCodeStyle: state.defaultCodeStyle,
             preferredMode: effectiveMode
         )
@@ -668,7 +984,14 @@ final class DictationEngine {
         let audioSnapshot = audioCaptureService.snapshotSamples()
         let languages = AppState.shared.selectedLanguages
         let lang: String? = languages.count > 1 ? nil : (languages.first?.id ?? "fr")
-        return await transcribeAudioSamples(audioSnapshot, language: lang)
+        return await runASRTranscription(audioSnapshot: audioSnapshot, language: lang)
+    }
+
+    private func runASRTranscription(
+        audioSnapshot: [Float],
+        language lang: String?
+    ) async -> String {
+        await transcribeAudioSamples(audioSnapshot, language: lang)
     }
 
     func transcribeAudioFile(at url: URL, language: WhisperLanguage) async -> String {
@@ -806,6 +1129,13 @@ final class DictationEngine {
                     Self.pipelineLogger.notice("[Dictation] fallback backend succeeded primary=\(primaryName, privacy: .public) used=\(descriptor.displayName, privacy: .public)")
                 }
                 Self.pipelineLogger.notice("[Dictation] backend result chars=\(result.count, privacy: .public)")
+                if qualityIssue == nil {
+                    lastTranscriptionBackendName = descriptor.displayName
+                    Self.pipelineLogger.notice(
+                        "[Dictation] accepting candidate immediately backend=\(descriptor.displayName, privacy: .public) reason=clean_result"
+                    )
+                    return result
+                }
                 successfulCandidates.append(
                     TranscriptionCandidate(
                         text: result,
@@ -861,13 +1191,26 @@ final class DictationEngine {
     }
 
     private func transcriptionCandidatesForCurrentRequest() -> [any ASRService] {
-        guard asrBackend.descriptor.kind == .whisperKit, AppleSpeechAnalyzerBackend.isRuntimeSupported else {
+        let kind = asrBackend.descriptor.kind
+        // Parakeet: native inference not yet implemented.
+        // Prefer WhisperKit (high quality, long-form) if already loaded,
+        // then Apple Speech Analyzer, then Parakeet itself as last resort.
+        if kind == .parakeet {
+            var candidates: [any ASRService] = []
+            if WhisperKitBackend.shared.isLoaded {
+                candidates.append(WhisperKitBackend.shared)
+            }
+            if AppleSpeechAnalyzerBackend.isRuntimeSupported {
+                candidates.append(AppleSpeechAnalyzerBackend())
+            }
+            candidates.append(asrBackend)
+            return candidates
+        }
+        // Whisper is primary — Apple Speech Analyzer is fallback only (it truncates at ~30s).
+        guard kind == .whisperKit, AppleSpeechAnalyzerBackend.isRuntimeSupported else {
             return [asrBackend]
         }
-
-        // Whisper fallback strategy: prioritize Apple Speech when available,
-        // then keep Whisper as backup.
-        return [AppleSpeechAnalyzerBackend(), asrBackend]
+        return [asrBackend, AppleSpeechAnalyzerBackend()]
     }
 
     private func transcribeWithTimeout(
@@ -875,20 +1218,12 @@ final class DictationEngine {
         audio: [Float],
         timeoutSeconds: Double
     ) async throws -> String {
-        let timeoutNanos = UInt64(max(1.0, timeoutSeconds) * 1_000_000_000)
-        return try await withThrowingTaskGroup(of: String.self, returning: String.self) { group in
-            group.addTask {
-                try await backend.transcribe(audioBuffer: audio)
-            }
-            group.addTask {
-                try await Task.sleep(nanoseconds: timeoutNanos)
-                throw TranscriptionAttemptError.timedOut(seconds: timeoutSeconds)
-            }
-            guard let firstCompleted = try await group.next() else {
-                throw ASRBackendError.transcriptionFailed("No transcription result produced.")
-            }
-            group.cancelAll()
-            return firstCompleted
+        try await ASRTranscriptionRunner.transcribe(
+            backend: backend,
+            audio: audio,
+            timeoutSeconds: timeoutSeconds
+        ) {
+            TranscriptionAttemptError.timedOut(seconds: timeoutSeconds)
         }
     }
 
@@ -903,6 +1238,8 @@ final class DictationEngine {
             return min(120.0, max(whisperBaseTranscriptionTimeoutSeconds, audioSeconds * 2.2 + 8.0))
         case .appleSpeechAnalyzer:
             return min(60.0, max(15.0, audioSeconds * 1.4 + 6.0))
+        case .parakeet:
+            return min(90.0, max(15.0, audioSeconds * 1.8 + 6.0))
         }
     }
 
@@ -1919,7 +2256,10 @@ final class DictationEngine {
         return trimmed
     }
 
-    // MARK: - Text Injection
+    // MARK: - Legacy Text Injection
+
+    // These helpers are no longer on the live runtime path.
+    // InsertionEngine is the source of truth for runtime insertion behavior.
 
     /// Activates the target app, waits for it to become frontmost, then inserts text via synthesized key events.
     private func insertIntoTargetApp(_ text: String) async {

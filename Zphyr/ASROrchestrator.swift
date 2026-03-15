@@ -13,6 +13,12 @@ import os
 
 @MainActor
 final class ASROrchestrator {
+    struct LiveTranscriptionPlan: Equatable, Sendable {
+        let mode: ASRTranscriptionMode
+        let supportsPartials: Bool
+        let supportsCancellation: Bool
+        let supportsRetryFromBuffer: Bool
+    }
 
     struct TranscriptionCandidate {
         let text: String
@@ -39,6 +45,24 @@ final class ASROrchestrator {
     private let whisperBaseTranscriptionTimeoutSeconds: Double = 20.0
 
     // MARK: - Main Entry
+
+    func liveTranscriptionPlan(for backend: any ASRService) -> LiveTranscriptionPlan {
+        let support = backend.transcriptionSupport
+        return LiveTranscriptionPlan(
+            mode: support.mode,
+            supportsPartials: support.mode == .streamingPartials,
+            supportsCancellation: support.supportsCancellation,
+            supportsRetryFromBuffer: support.supportsRetryFromBuffer
+        )
+    }
+
+    func makeStreamingSession(
+        for backend: any ASRService,
+        language: String?,
+        sampleRate: Double = 16_000
+    ) -> (any ASRStreamingSession)? {
+        backend.makeStreamingSession(language: language, sampleRate: sampleRate)
+    }
 
     /// Apply VAD then transcribe audio through the primary backend (with fallback candidates).
     func transcribe(
@@ -126,6 +150,12 @@ final class ASROrchestrator {
                     log.notice("[ASROrchestrator] fallback backend succeeded primary=\(primaryBackendName, privacy: .public) used=\(descriptor.displayName, privacy: .public)")
                 }
                 log.notice("[ASROrchestrator] backend result chars=\(result.count, privacy: .public)")
+                if issue == nil {
+                    log.notice(
+                        "[ASROrchestrator] accepting candidate immediately backend=\(descriptor.displayName, privacy: .public) reason=clean_result"
+                    )
+                    return result
+                }
                 successfulCandidates.append(
                     TranscriptionCandidate(
                         text: result,
@@ -168,7 +198,8 @@ final class ASROrchestrator {
     // MARK: - Candidate Selection
 
     private func transcriptionCandidates(primaryBackend: any ASRService) -> [any ASRService] {
-        guard primaryBackend.descriptor.kind == .whisperKit, AppleSpeechAnalyzerBackend.isRuntimeSupported else {
+        let kind = primaryBackend.descriptor.kind
+        guard kind == .whisperKit, AppleSpeechAnalyzerBackend.isRuntimeSupported else {
             return [primaryBackend]
         }
         return [AppleSpeechAnalyzerBackend(), primaryBackend]
@@ -181,20 +212,12 @@ final class ASROrchestrator {
         audio: [Float],
         timeoutSeconds: Double
     ) async throws -> String {
-        let timeoutNanos = UInt64(max(1.0, timeoutSeconds) * 1_000_000_000)
-        return try await withThrowingTaskGroup(of: String.self, returning: String.self) { group in
-            group.addTask {
-                try await backend.transcribe(audioBuffer: audio)
-            }
-            group.addTask {
-                try await Task.sleep(nanoseconds: timeoutNanos)
-                throw AttemptError.timedOut(seconds: timeoutSeconds)
-            }
-            guard let firstCompleted = try await group.next() else {
-                throw ASRBackendError.transcriptionFailed("No transcription result produced.")
-            }
-            group.cancelAll()
-            return firstCompleted
+        try await ASRTranscriptionRunner.transcribe(
+            backend: backend,
+            audio: audio,
+            timeoutSeconds: timeoutSeconds
+        ) {
+            AttemptError.timedOut(seconds: timeoutSeconds)
         }
     }
 
@@ -208,6 +231,9 @@ final class ASROrchestrator {
             return min(120.0, max(whisperBaseTranscriptionTimeoutSeconds, audioSeconds * 2.2 + 8.0))
         case .appleSpeechAnalyzer:
             return min(60.0, max(15.0, audioSeconds * 1.4 + 6.0))
+        case .parakeet:
+            // Parakeet is not user-selectable (unimplemented stub). Treat same as Whisper.
+            return min(90.0, max(15.0, audioSeconds * 1.8 + 6.0))
         }
     }
 

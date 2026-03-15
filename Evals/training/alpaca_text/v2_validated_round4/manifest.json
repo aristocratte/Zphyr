@@ -1,0 +1,136 @@
+{
+  "system_prompt_file": "Evals/training/system_prompt.txt",
+  "system_prompt_length": 482,
+  "dataset_format": "alpaca_text",
+  "splits": {
+    "train": {
+      "input_file": "Evals/datasets/splits/v2_validated_round4/train.jsonl",
+      "output_file": "Evals/training/alpaca_text/v2_validated_round4/train.jsonl",
+      "row_count": 1781,
+      "categories": {
+        "commands": 355,
+        "corrections": 459,
+        "lists": 248,
+        "multilingual": 112,
+        "prose": 105,
+        "short": 112,
+        "technical": 390
+      },
+      "subcategories": {
+        "ambiguous_command_content": 287,
+        "bulleted_spoken": 45,
+        "config_env_vars": 38,
+        "email_body": 105,
+        "filler_removal": 41,
+        "formatting_commands": 8,
+        "fr_primary_en_terms": 112,
+        "inline_enumeration": 42,
+        "intentional_repetition": 369,
+        "navigation_commands": 60,
+        "near_empty": 14,
+        "no_list_ambiguous": 37,
+        "numbered_spoken": 124,
+        "package_names": 36,
+        "protected_terms_pairs": 150,
+        "short_sentence": 91,
+        "single_word_phrase": 7,
+        "terminal_commands": 154,
+        "version_numbers": 12,
+        "word_repetition": 49
+      },
+      "languages": {
+        "fr": 1533,
+        "mixed": 248
+      },
+      "protected_term_rows": 504
+    },
+    "val": {
+      "input_file": "Evals/datasets/splits/v2_validated/val.jsonl",
+      "output_file": "Evals/training/alpaca_text/v2_validated_round4/val.jsonl",
+      "row_count": 167,
+      "categories": {
+        "commands": 24,
+        "corrections": 24,
+        "lists": 21,
+        "multilingual": 24,
+        "prose": 20,
+        "short": 24,
+        "technical": 30
+      },
+      "subcategories": {
+        "ambiguous_command_content": 9,
+        "bulleted_spoken": 1,
+        "config_env_vars": 4,
+        "email_body": 20,
+        "filler_removal": 8,
+        "formatting_commands": 4,
+        "fr_primary_en_terms": 24,
+        "inline_enumeration": 1,
+        "intentional_repetition": 5,
+        "navigation_commands": 11,
+        "near_empty": 3,
+        "no_list_ambiguous": 2,
+        "numbered_spoken": 17,
+        "package_names": 2,
+        "short_sentence": 18,
+        "single_word_phrase": 3,
+        "spoken_restart": 3,
+        "terminal_commands": 23,
+        "version_numbers": 1,
+        "word_repetition": 8
+      },
+      "languages": {
+        "fr": 113,
+        "mixed": 54
+      },
+      "protected_term_rows": 54
+    },
+    "valid": {
+      "input_file": "Evals/datasets/splits/v2_validated/val.jsonl",
+      "output_file": "Evals/training/alpaca_text/v2_validated_round4/valid.jsonl",
+      "row_count": 167,
+      "alias_of": "val"
+    },
+    "test": {
+      "input_file": "Evals/datasets/splits/v2_validated/test.jsonl",
+      "output_file": "Evals/training/alpaca_text/v2_validated_round4/test.jsonl",
+      "row_count": 167,
+      "categories": {
+        "commands": 21,
+        "corrections": 22,
+        "lists": 21,
+        "multilingual": 24,
+        "prose": 25,
+        "short": 24,
+        "technical": 30
+      },
+      "subcategories": {
+        "ambiguous_command_content": 8,
+        "bulleted_spoken": 1,
+        "config_env_vars": 3,
+        "email_body": 25,
+        "filler_removal": 7,
+        "formatting_commands": 4,
+        "fr_primary_en_terms": 24,
+        "inline_enumeration": 1,
+        "intentional_repetition": 5,
+        "navigation_commands": 9,
+        "near_empty": 3,
+        "no_list_ambiguous": 1,
+        "numbered_spoken": 18,
+        "package_names": 3,
+        "short_sentence": 18,
+        "single_word_phrase": 3,
+        "spoken_restart": 3,
+        "terminal_commands": 23,
+        "version_numbers": 1,
+        "word_repetition": 7
+      },
+      "languages": {
+        "fr": 113,
+        "mixed": 54
+      },
+      "protected_term_rows": 54
+    }
+  }
+}

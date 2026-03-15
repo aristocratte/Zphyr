@@ -136,9 +136,14 @@ final class AudioCaptureService {
     /// Starts capturing audio from the default input device, resampling to 16 kHz mono.
     /// - Parameter onLevels: Called on the main actor with an array of HUD level values (~28 bands)
     ///   at roughly 100 ms intervals for waveform visualization.
+    /// - Parameter onAudioChunk: Optional callback receiving resampled 16 kHz mono chunks.
+    ///   Used to prepare future streaming / partial transcription paths.
     /// - Returns: `true` if capture started successfully, `false` on failure.
     @discardableResult
-    func startCapture(onLevels: @escaping ([Float]) -> Void) -> Bool {
+    func startCapture(
+        onLevels: @escaping ([Float]) -> Void,
+        onAudioChunk: (([Float]) -> Void)? = nil
+    ) -> Bool {
         // Always tear down any previous engine (safety net for race conditions).
         stopCapture()
 
@@ -221,6 +226,8 @@ final class AudioCaptureService {
                 guard frameCount > 0 else { return }
                 let samplePointer = UnsafeBufferPointer(start: channelData, count: frameCount)
                 let appendStatus = buffer.append(samplePointer, maxSamples: captureMaxSamples)
+                let chunk = Array(samplePointer)
+                onAudioChunk?(chunk)
                 if appendStatus != .appended && limitFlag.setIfNeeded() {
                     if appendStatus == .truncated {
                         AudioCaptureService.logger.warning("[AudioCapture] reached max duration (\(Int(captureMaxDuration), privacy: .public)s); truncating additional samples")

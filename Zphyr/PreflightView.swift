@@ -142,6 +142,12 @@ struct PreflightView: View {
     private var lang: String                 { AppState.shared.uiDisplayLanguage.rawValue }
     private var asrDescriptor: ASRBackendDescriptor { DictationEngine.shared.currentASRDescriptor }
     private var asrRequiresInstall: Bool { asrDescriptor.requiresModelInstall }
+    private var formattingModelBinding: Binding<FormattingModelID> {
+        Binding(
+            get: { AppState.shared.activeFormattingModel },
+            set: { AppState.shared.activeFormattingModel = $0 }
+        )
+    }
     private var isProModeUnlocked: Bool { AppState.shared.isProModeUnlocked }
     private var performanceProfile: PerformanceProfile { AppState.shared.performanceProfile }
     private var isPreparingModelDownload: Bool {
@@ -594,9 +600,10 @@ struct PreflightView: View {
                     label: t("Continuer", "Continue", "Continuar", "继续", "続ける", "Продолжить"),
                     icon: "arrow.right"
                 ) { advance() }
-            } else if AdvancedLLMFormatter.shared.isInstalling {
+            } else if AdvancedLLMFormatter.shared.isInstalling &&
+                        AdvancedLLMFormatter.shared.installingModelID == AppState.shared.activeFormattingModel {
                 EmptyView()
-            } else if AppState.shared.advancedModeInstalled && AdvancedLLMFormatter.resolveInstallURL() != nil {
+            } else if AdvancedLLMFormatter.shared.installStatus(for: AppState.shared.activeFormattingModel).isInstalled {
                 PFPrimaryButton(
                     label: t("Continuer", "Continue", "Continuar", "继续", "続ける", "Продолжить"),
                     icon: "arrow.right"
@@ -654,6 +661,11 @@ struct PreflightView: View {
     @ViewBuilder
     private var advancedModeSlide: some View {
         let formatter = AdvancedLLMFormatter.shared
+        let selectedModel = AppState.shared.activeFormattingModel
+        let selectedDescriptor = FormattingModelCatalog.descriptor(for: selectedModel)
+        let selectedName = selectedModel.displayName(for: lang)
+        let selectedSize = ByteCountFormatter.string(fromByteCount: selectedDescriptor.approximateBytes, countStyle: .file)
+        let installStatus = formatter.installStatus(for: selectedModel)
         if !isProModeUnlocked {
             VStack(spacing: 18) {
                 ZStack {
@@ -688,7 +700,7 @@ struct PreflightView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.zBg)
-        } else if formatter.isInstalling {
+        } else if formatter.isInstalling && formatter.installingModelID == selectedModel {
             // Installing — show progress ring
             VStack(spacing: 28) {
                 ZStack {
@@ -711,7 +723,7 @@ struct PreflightView: View {
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundColor(Color.zText)
 
-                    Text("Zphyr-v1 (fine-tuned) · ~1.1 GB")
+                    Text("\(selectedName) · \(selectedSize)")
                         .font(.system(size: 13))
                         .foregroundColor(Color.zTextDim)
 
@@ -754,7 +766,7 @@ struct PreflightView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.zBg)
-        } else if AppState.shared.advancedModeInstalled && AdvancedLLMFormatter.resolveInstallURL() != nil {
+        } else if installStatus.isInstalled {
             VStack(spacing: 20) {
                 ZStack {
                     Circle()
@@ -767,7 +779,7 @@ struct PreflightView: View {
                 Text(t("Mode IA installé !", "AI mode installed!", "¡Modo IA instalado!", "AI 模式已安装！", "AI モードがインストールされました！", "Режим ИИ установлен!"))
                     .font(.system(size: 22, weight: .bold))
                     .foregroundColor(Color.zText)
-                Text("Zphyr-v1 (fine-tuned) · prêt")
+                Text("\(selectedName) · prêt")
                     .font(.system(size: 13))
                     .foregroundColor(Color.zTextDim)
             }
@@ -776,9 +788,41 @@ struct PreflightView: View {
         } else {
             // Default — show OnboardingAdvancedModeView with callbacks
             OnboardingAdvancedModeView(
-                onInstall: {
+                selectedModel: formattingModelBinding,
+                status: installStatus,
+                primaryTitle: {
+                    switch installStatus {
+                    case .installed:
+                        return t("Utiliser ce modèle", "Use this model", "Usar este modelo", "使用此模型", "このモデルを使う", "Использовать эту модель")
+                    case .unavailable:
+                        return t("Indisponible sur cette build", "Unavailable in this build", "No disponible en esta build", "此构建不可用", "このビルドでは利用不可", "Недоступно в этой сборке")
+                    case .error:
+                        return t("Réessayer l’installation", "Retry install", "Reintentar la instalación", "重试安装", "再インストール", "Повторить установку")
+                    default:
+                        return t("Installer \(selectedName) (\(selectedSize))", "Install \(selectedName) (\(selectedSize))", "Instalar \(selectedName) (\(selectedSize))", "安装 \(selectedName)（\(selectedSize)）", "\(selectedName) をインストール (\(selectedSize))", "Установить \(selectedName) (\(selectedSize))")
+                    }
+                }(),
+                primaryEnabled: {
+                    if case .unavailable = installStatus {
+                        return false
+                    }
+                    return true
+                }(),
+                onPrimaryAction: {
+                    if installStatus.isInstalled {
+                        AppState.shared.formattingMode = PerformanceRouter.shared.effectiveFormattingMode(
+                            preferred: .advanced,
+                            profile: AppState.shared.performanceProfile
+                        )
+                        advance()
+                        return
+                    }
                     advancedModeInstallTask = Task {
-                        await AdvancedLLMFormatter.shared.installModel()
+                        AppState.shared.formattingMode = PerformanceRouter.shared.effectiveFormattingMode(
+                            preferred: .advanced,
+                            profile: AppState.shared.performanceProfile
+                        )
+                        await AdvancedLLMFormatter.shared.installModel(modelID: AppState.shared.activeFormattingModel)
                     }
                 },
                 onSkip: {
@@ -1939,6 +1983,23 @@ struct PreflightView: View {
     private var modelSlide: some View {
         VStack(spacing: 0) {
             Spacer()
+
+            // ── ASR backend picker ─────────────────────────────────────
+            PFASRBackendPicker(
+                selected: AppState.shared.preferredASRBackend,
+                isDownloading: {
+                    if case .downloading = modelStatus { return true }
+                    return false
+                }(),
+                onChange: { newBackend in
+                    AppState.shared.preferredASRBackend = newBackend
+                    DictationEngine.shared.refreshASRBackendSelection()
+                    Task { await DictationEngine.shared.loadModel() }
+                }
+            )
+            .padding(.bottom, 20)
+            .opacity(modelReveal >= 1 ? 1 : 0)
+            .animation(.spring(response: 0.5, dampingFraction: 0.82), value: modelReveal)
 
             // ── Ring + center ─────────────────────────────────────────
             ZStack {
@@ -3549,6 +3610,29 @@ private struct PFReadyChip: View {
         .background(color.opacity(0.09))
         .cornerRadius(20)
         .overlay(Capsule().stroke(color.opacity(0.3), lineWidth: 1))
+    }
+}
+
+// MARK: ASR Backend Picker
+
+private struct PFASRBackendPicker: View {
+    let selected: ASRBackendKind
+    let isDownloading: Bool
+    let onChange: (ASRBackendKind) -> Void
+
+    var body: some View {
+        // Only Whisper is available — display as a static selected chip (no picker needed)
+        Text("Whisper Large v3 Turbo")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(Color.zAccent)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(Color.zAccent.opacity(0.12))
+            .cornerRadius(9)
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(Color.zAccent.opacity(0.45), lineWidth: 1)
+            )
     }
 }
 

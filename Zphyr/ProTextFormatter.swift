@@ -3,13 +3,21 @@ import os
 
 @MainActor
 struct ProTextFormatter: TextFormatter {
+    private enum Round2BaselinePolicy {
+        static let baselineID = "round2"
+    }
+
+    private struct OutputProfilePolicy {
+        let allowsRewrite: Bool
+        let minRecall: Double
+        let minLengthRatio: Double
+        let maxLengthRatio: Double
+        let strictProtectedTerms: Bool
+    }
+
     private let deterministicFormatter = EcoTextFormatter()
     private let integrityVerifier = TextIntegrityVerifier()
     private let log = Logger(subsystem: "com.zphyr.app", category: "ProFormatter")
-    private let integrityValidationMode: TextIntegrityVerifier.ValidationMode = .trustFormatterOutput(
-        reason: "AdvancedLLMFormatter/custom MLX local formatter"
-    )
-    private let trustedFormatterDecision = "trusted_local_mlx_formatter_output"
 
     func format(_ context: TextFormatterContext) async -> TextFormatterResult {
         let deterministic = await deterministicFormatter.format(
@@ -17,10 +25,35 @@ struct ProTextFormatter: TextFormatter {
                 rawASRText: context.rawASRText,
                 normalizedText: context.normalizedText,
                 languageCode: context.languageCode,
+                outputProfile: context.outputProfile,
+                formattingModelID: context.formattingModelID,
+                protectedTerms: context.protectedTerms,
                 defaultCodeStyle: context.defaultCodeStyle,
                 preferredMode: .advanced
             )
         )
+        let profilePolicy = policy(for: context.outputProfile)
+
+        guard profilePolicy.allowsRewrite else {
+            log.notice(
+                "[ProFormatter] skipping rewrite baseline=\(Round2BaselinePolicy.baselineID, privacy: .public) profile=\(context.outputProfile.rawValue, privacy: .public) reason=verbatim_profile"
+            )
+            return TextFormatterResult(
+                text: deterministic.text,
+                usedDeterministicFallback: false,
+                pipelineDecision: .deterministicOnly,
+                fallbackReason: .profileRewriteDisabledVerbatim,
+                rejectedIntroducedTokens: [],
+                llmInputLength: nil,
+                llmOutputLength: nil,
+                llmRecall: nil,
+                llmValidationDecision: "skipped_profile_verbatim"
+            )
+        }
+        let integrityValidationMode: TextIntegrityVerifier.ValidationMode = .strict(
+            minRecall: profilePolicy.minRecall
+        )
+        let acceptedFormatterDecision = "accepted_baseline_round2_\(context.outputProfile.rawValue)_\(context.formattingModelID.rawValue)"
 
         let constraints = LLMFormattingConstraints.strict
         let llmInput = Self.llmInput(for: context)
@@ -31,6 +64,8 @@ struct ProTextFormatter: TextFormatter {
             return TextFormatterResult(
                 text: deterministic.text,
                 usedDeterministicFallback: true,
+                pipelineDecision: .deterministicFallback,
+                fallbackReason: .rewriteSanitizedInputEmpty,
                 rejectedIntroducedTokens: [],
                 llmInputLength: 0,
                 llmOutputLength: nil,
@@ -39,12 +74,13 @@ struct ProTextFormatter: TextFormatter {
             )
         }
         log.notice(
-            "[ProFormatter] invoking LLM sanitizedRawPreview=\"\(Self.debugPreview(llmInput), privacy: .public)\" rawPreview=\"\(Self.debugPreview(context.rawASRText), privacy: .public)\" normalizedPreview=\"\(Self.debugPreview(context.normalizedText), privacy: .public)\""
+            "[ProFormatter] invoking baseline=\(Round2BaselinePolicy.baselineID, privacy: .public) formatterModel=\(context.formattingModelID.rawValue, privacy: .public) profile=\(context.outputProfile.rawValue, privacy: .public) minRecall=\(profilePolicy.minRecall, privacy: .public) protectedTerms=\(context.protectedTerms.count, privacy: .public) sanitizedRawPreview=\"\(Self.debugPreview(llmInput), privacy: .public)\" rawPreview=\"\(Self.debugPreview(context.rawASRText), privacy: .public)\" normalizedPreview=\"\(Self.debugPreview(context.normalizedText), privacy: .public)\""
         )
         guard let llmCandidate = await AdvancedLLMFormatter.shared.format(
             llmInput,
             style: context.defaultCodeStyle,
-            constraints: constraints
+            constraints: constraints,
+            modelID: context.formattingModelID
         ) else {
             log.notice(
                 "[ProFormatter] LLM returned nil → deterministic fallback preview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
@@ -52,6 +88,8 @@ struct ProTextFormatter: TextFormatter {
             return TextFormatterResult(
                 text: deterministic.text,
                 usedDeterministicFallback: true,
+                pipelineDecision: .deterministicFallback,
+                fallbackReason: .rewriteModelReturnedNil,
                 rejectedIntroducedTokens: [],
                 llmInputLength: llmInput.count,
                 llmOutputLength: nil,
@@ -65,36 +103,76 @@ struct ProTextFormatter: TextFormatter {
         let noOpAgainstLLMInput = sanitizedCandidate == llmInput
         let exactMatchRaw = llmCandidate == context.rawASRText
         let exactMatchNormalized = llmCandidate == context.normalizedText
+        let lengthRatio = Double(llmCandidate.count) / max(1.0, Double(context.rawASRText.count))
         log.notice(
-            "[ProFormatter] LLM candidate received integrityMode=\"\(integrityValidationMode.description, privacy: .public)\" noOpAgainstSanitizedInput=\(noOpAgainstLLMInput, privacy: .public) exactMatchRaw=\(exactMatchRaw, privacy: .public) exactMatchNormalized=\(exactMatchNormalized, privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recallIfStrict=\(recall, privacy: .public) candidatePreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\""
+            "[ProFormatter] LLM candidate received baseline=\(Round2BaselinePolicy.baselineID, privacy: .public) profile=\(context.outputProfile.rawValue, privacy: .public) integrityMode=\"\(integrityValidationMode.description, privacy: .public)\" noOpAgainstSanitizedInput=\(noOpAgainstLLMInput, privacy: .public) exactMatchRaw=\(exactMatchRaw, privacy: .public) exactMatchNormalized=\(exactMatchNormalized, privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recall=\(recall, privacy: .public) lengthRatio=\(lengthRatio, privacy: .public) candidatePreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\""
         )
 
-        switch integrityVerifier.validate(
-            rawASRText: context.rawASRText,
-            formattedText: llmCandidate,
-            mode: integrityValidationMode
-        ) {
-        case .valid:
-            log.notice(
-                "[ProFormatter] LLM text accepted (integrity bypass active for local MLX formatter) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recallIfStrict=\(recall, privacy: .public) noOpAgainstSanitizedInput=\(noOpAgainstLLMInput, privacy: .public) outputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\""
-            )
-            return TextFormatterResult(
-                text: llmCandidate,
-                usedDeterministicFallback: false,
-                rejectedIntroducedTokens: [],
-                llmInputLength: llmInput.count,
-                llmOutputLength: llmCandidate.count,
-                llmRecall: recall,
-                llmValidationDecision: trustedFormatterDecision
-            )
-
-        case .invalidIntroducedTokens(let introducedTokens):
+        guard lengthRatio >= profilePolicy.minLengthRatio,
+              lengthRatio <= profilePolicy.maxLengthRatio else {
             log.warning(
-                "[ProFormatter] integrity check failed (introduced tokens) → deterministic fallback (rejected=\(introducedTokens.joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recall=\(recall, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
+                "[ProFormatter] baseline=\(Round2BaselinePolicy.baselineID, privacy: .public) profile=\(context.outputProfile.rawValue, privacy: .public) rejected candidate for lengthRatio=\(lengthRatio, privacy: .public) expectedRange=\(profilePolicy.minLengthRatio, privacy: .public)...\(profilePolicy.maxLengthRatio, privacy: .public)"
             )
             return TextFormatterResult(
                 text: deterministic.text,
                 usedDeterministicFallback: true,
+                pipelineDecision: .deterministicFallback,
+                fallbackReason: .profileValidationRejected,
+                rejectedIntroducedTokens: [],
+                llmInputLength: llmInput.count,
+                llmOutputLength: llmCandidate.count,
+                llmRecall: recall,
+                llmValidationDecision: "rejected_profile_length_ratio"
+            )
+        }
+
+        switch integrityVerifier.validate(
+            rawASRText: context.rawASRText,
+            formattedText: llmCandidate,
+            protectedTerms: profilePolicy.strictProtectedTerms ? context.protectedTerms : [],
+            mode: integrityValidationMode
+        ) {
+        case .valid:
+            log.notice(
+                "[ProFormatter] baseline=\(Round2BaselinePolicy.baselineID, privacy: .public) profile=\(context.outputProfile.rawValue, privacy: .public) accepted LLM text llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recall=\(recall, privacy: .public) noOpAgainstSanitizedInput=\(noOpAgainstLLMInput, privacy: .public) outputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\""
+            )
+            return TextFormatterResult(
+                text: llmCandidate,
+                usedDeterministicFallback: false,
+                pipelineDecision: .acceptedBaselineRound2,
+                fallbackReason: nil,
+                rejectedIntroducedTokens: [],
+                llmInputLength: llmInput.count,
+                llmOutputLength: llmCandidate.count,
+                llmRecall: recall,
+                llmValidationDecision: acceptedFormatterDecision
+            )
+
+        case .invalidProtectedTerms(let missingTerms):
+            log.warning(
+                "[ProFormatter] baseline=\(Round2BaselinePolicy.baselineID, privacy: .public) profile=\(context.outputProfile.rawValue, privacy: .public) integrity check failed (protected terms) → deterministic fallback missing=\(missingTerms.joined(separator: ","), privacy: .public)"
+            )
+            return TextFormatterResult(
+                text: deterministic.text,
+                usedDeterministicFallback: true,
+                pipelineDecision: .deterministicFallback,
+                fallbackReason: .profileProtectedTermsRejected,
+                rejectedIntroducedTokens: missingTerms,
+                llmInputLength: llmInput.count,
+                llmOutputLength: llmCandidate.count,
+                llmRecall: recall,
+                llmValidationDecision: "rejected_protected_terms"
+            )
+
+        case .invalidIntroducedTokens(let introducedTokens):
+            log.warning(
+                "[ProFormatter] baseline=\(Round2BaselinePolicy.baselineID, privacy: .public) profile=\(context.outputProfile.rawValue, privacy: .public) integrity check failed (introduced tokens) → deterministic fallback (rejected=\(introducedTokens.joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recall=\(recall, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
+            )
+            return TextFormatterResult(
+                text: deterministic.text,
+                usedDeterministicFallback: true,
+                pipelineDecision: .deterministicFallback,
+                fallbackReason: .rewriteIntroducedTokens,
                 rejectedIntroducedTokens: introducedTokens,
                 llmInputLength: llmInput.count,
                 llmOutputLength: llmCandidate.count,
@@ -104,11 +182,13 @@ struct ProTextFormatter: TextFormatter {
 
         case .invalidDroppedContent(let recall, let missingTokens):
             log.warning(
-                "[ProFormatter] integrity check failed (dropped content) → deterministic fallback (mode=\"\(integrityValidationMode.description, privacy: .public)\" recall=\(recall, privacy: .public) missing=\(missingTokens.prefix(12).joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
+                "[ProFormatter] baseline=\(Round2BaselinePolicy.baselineID, privacy: .public) profile=\(context.outputProfile.rawValue, privacy: .public) integrity check failed (dropped content) → deterministic fallback (mode=\"\(integrityValidationMode.description, privacy: .public)\" recall=\(recall, privacy: .public) missing=\(missingTokens.prefix(12).joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
             )
             return TextFormatterResult(
                 text: deterministic.text,
                 usedDeterministicFallback: true,
+                pipelineDecision: .deterministicFallback,
+                fallbackReason: .profileValidationRejected,
                 rejectedIntroducedTokens: missingTokens,
                 llmInputLength: llmInput.count,
                 llmOutputLength: llmCandidate.count,
@@ -154,6 +234,43 @@ struct ProTextFormatter: TextFormatter {
         return normalized
             .split(whereSeparator: { $0.isWhitespace })
             .map(String.init)
+    }
+
+    private func policy(for outputProfile: OutputProfile) -> OutputProfilePolicy {
+        switch outputProfile {
+        case .verbatim:
+            return OutputProfilePolicy(
+                allowsRewrite: false,
+                minRecall: 1.0,
+                minLengthRatio: 0.95,
+                maxLengthRatio: 1.05,
+                strictProtectedTerms: true
+            )
+        case .clean:
+            return OutputProfilePolicy(
+                allowsRewrite: true,
+                minRecall: 0.97,
+                minLengthRatio: 0.60,
+                maxLengthRatio: 1.30,
+                strictProtectedTerms: false
+            )
+        case .technical:
+            return OutputProfilePolicy(
+                allowsRewrite: true,
+                minRecall: 0.995,
+                minLengthRatio: 0.80,
+                maxLengthRatio: 1.15,
+                strictProtectedTerms: true
+            )
+        case .email:
+            return OutputProfilePolicy(
+                allowsRewrite: true,
+                minRecall: 0.96,
+                minLengthRatio: 0.70,
+                maxLengthRatio: 1.25,
+                strictProtectedTerms: false
+            )
+        }
     }
 
     private func counts(_ tokens: [String]) -> [String: Int] {

@@ -96,7 +96,7 @@ enum FormattingMode: String, CaseIterable, Identifiable {
         case .trigger:
             return L10n.ui(for: lang, fr: "Normal (Trigger explicite)", en: "Normal (Explicit trigger)", es: "Normal (disparador)", zh: "普通（显式触发）", ja: "通常（明示的トリガー）", ru: "Обычный (триггер)")
         case .advanced:
-            return L10n.ui(for: lang, fr: "Avancé (IA locale Zphyr-v1)", en: "Advanced (local AI Zphyr-v1)", es: "Avanzado (IA local Zphyr-v1)", zh: "高级（本地 AI Zphyr-v1）", ja: "高度（ローカル AI Zphyr-v1）", ru: "Расширенный (локальный ИИ Zphyr-v1)")
+            return L10n.ui(for: lang, fr: "Avancé (IA locale)", en: "Advanced (local AI)", es: "Avanzado (IA local)", zh: "高级（本地 AI）", ja: "高度（ローカル AI）", ru: "Расширенный (локальный ИИ)")
         }
     }
 
@@ -105,7 +105,7 @@ enum FormattingMode: String, CaseIterable, Identifiable {
         case .trigger:
             return L10n.ui(for: lang, fr: "Dites «camel get user» → getUserProfile", en: "Say «camel get user» → getUserProfile", es: "Di «camel get user» → getUserProfile", zh: "说「camel get user」→ getUserProfile", ja: "「camel get user」→ getUserProfile", ru: "«camel get user» → getUserProfile")
         case .advanced:
-            return L10n.ui(for: lang, fr: "Zphyr-v1 détecte les identifiants sans mot-clé (~1,1 Go, local)", en: "Zphyr-v1 auto-detects identifiers without trigger (~1.1 GB, local)", es: "Zphyr-v1 detecta identificadores sin disparador (~1,1 GB, local)", zh: "Zphyr-v1 自动检测标识符无需触发词（~1.1 GB，本地）", ja: "Zphyr-v1 がトリガーなしで自動検出（~1.1 GB、ローカル）", ru: "Zphyr-v1 автоопределяет идентификаторы без триггера (~1,1 ГБ, локально)")
+            return L10n.ui(for: lang, fr: "Utilise le modèle de formatage local sélectionné pour aller au-delà des règles déterministes.", en: "Uses the selected local formatting model beyond deterministic rules.", es: "Usa el modelo local de formateo seleccionado más allá de las reglas deterministas.", zh: "使用所选本地格式化模型，超出确定性规则。", ja: "選択したローカル整形モデルで決定論ルールを拡張します。", ru: "Использует выбранную локальную модель форматирования поверх детерминированных правил.")
         }
     }
 }
@@ -158,6 +158,88 @@ enum DictationState: Equatable {
     case done(text: String)
 }
 
+enum DictationSessionPhase: String, CaseIterable, Equatable, Codable, Sendable {
+    case arming
+    case recording
+    case retrying
+    case transcribing
+    case formatting
+    case inserting
+    case success
+    case failure
+    case cancelled
+
+    var isTerminal: Bool {
+        switch self {
+        case .success, .failure, .cancelled:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+struct LiveTranscriptionState: Equatable, Codable, Sendable {
+    var mode: ASRTranscriptionMode
+    var partialText: String?
+    var finalText: String?
+    var lastPartialAt: Date?
+    var lastFinalAt: Date?
+
+    var displayText: String? {
+        let partial = partialText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let partial, !partial.isEmpty { return partial }
+        let final = finalText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let final, !final.isEmpty { return final }
+        return nil
+    }
+}
+
+struct DictationSessionTransition: Identifiable, Equatable, Codable, Sendable {
+    let id: UUID
+    let phase: DictationSessionPhase
+    let timestamp: Date
+    let note: String?
+
+    init(
+        id: UUID = UUID(),
+        phase: DictationSessionPhase,
+        timestamp: Date = Date(),
+        note: String? = nil
+    ) {
+        self.id = id
+        self.phase = phase
+        self.timestamp = timestamp
+        self.note = note
+    }
+}
+
+struct DictationSession: Identifiable, Codable, Sendable {
+    let id: UUID
+    let startedAt: Date
+    var updatedAt: Date
+    var endedAt: Date?
+    var targetBundleID: String?
+    var phase: DictationSessionPhase
+    var outputProfile: OutputProfile
+    var liveTranscription: LiveTranscriptionState
+    var pipelineDecision: PipelineDecision?
+    var pipelineFallbackReason: FallbackReason?
+    var pipelineTrace: [StageTrace]
+    var insertionStrategy: InsertionStrategy?
+    var insertionFallbackReason: FallbackReason?
+    var finalTextPreview: String?
+    var finalFormattedText: String?
+    var errorMessage: String?
+    var transitions: [DictationSessionTransition]
+
+    var isActive: Bool { !phase.isTerminal }
+
+    var latestFallbackReason: FallbackReason? {
+        insertionFallbackReason ?? pipelineFallbackReason
+    }
+}
+
 // MARK: - Mic permission status
 enum MicPermission {
     case undetermined, granted, denied
@@ -176,11 +258,17 @@ final class AppState {
     static let shared = AppState()
     private nonisolated static let dictionaryLogger = Logger(subsystem: "com.zphyr.app", category: "DictionarySuggestion")
     private nonisolated static let settingsLogger = Logger(subsystem: "com.zphyr.app", category: "SettingsRouting")
+    private nonisolated static let sessionLogger = Logger(subsystem: "com.zphyr.app", category: "DictationSession")
     private static let stylePersonalKey = "zphyr.style.personal"
     private static let styleWorkKey = "zphyr.style.work"
     private static let styleEmailKey = "zphyr.style.email"
     private static let styleOtherKey = "zphyr.style.other"
+    private static let outputProfilePersonalKey = "zphyr.outputProfile.personal"
+    private static let outputProfileWorkKey = "zphyr.outputProfile.work"
+    private static let outputProfileEmailKey = "zphyr.outputProfile.email"
+    private static let outputProfileOtherKey = "zphyr.outputProfile.other"
     private static let preferredASRBackendKey = "zphyr.asr.preferredBackend"
+    private static let activeFormattingModelKey = "zphyr.formatter.activeModel"
     private var isApplyingPerformanceRouting = false
 
     // Snippets defaults keys
@@ -214,7 +302,11 @@ final class AppState {
     var isDownloadPaused: Bool = false
     var preferredASRBackend: ASRBackendKind = {
         let raw = UserDefaults.standard.string(forKey: AppState.preferredASRBackendKey)
-        return ASRBackendKind(rawValue: raw ?? "") ?? .whisperKit
+        let decoded = ASRBackendKind(rawValue: raw ?? "") ?? .whisperKit
+        // Migration: Parakeet is no longer a user-selectable backend (stub, unimplemented).
+        // If the user had it stored, silently reset to Whisper.
+        if decoded == .parakeet { return .whisperKit }
+        return decoded
     }() {
         didSet {
             UserDefaults.standard.set(preferredASRBackend.rawValue, forKey: AppState.preferredASRBackendKey)
@@ -231,9 +323,14 @@ final class AppState {
     var whisperInstalled: Bool = UserDefaults.standard.bool(forKey: "zphyr.whisperInstalled") {
         didSet { UserDefaults.standard.set(whisperInstalled, forKey: "zphyr.whisperInstalled") }
     }
-
+    var parakeetInstalled: Bool = UserDefaults.standard.bool(forKey: "zphyr.parakeetInstalled") {
+        didSet { UserDefaults.standard.set(parakeetInstalled, forKey: "zphyr.parakeetInstalled") }
+    }
     // Dictation
     var dictationState: DictationState = .idle
+    var currentDictationSession: DictationSession?
+    var lastCompletedDictationSession: DictationSession?
+    var retryLastSessionAvailable: Bool = false
 
     // Audio levels for spectrum HUD
     var audioLevels: [CGFloat] = Array(repeating: 0.15, count: 28)
@@ -253,7 +350,9 @@ final class AppState {
         }
         // Fall back to old single-language key
         let savedSingle = UserDefaults.standard.string(forKey: "zphyr.dictation.language") ?? "fr"
-        return [WhisperLanguage.all.first(where: { $0.id == savedSingle }) ?? WhisperLanguage.all.first(where: { $0.id == "fr" })!]
+        return [WhisperLanguage.all.first(where: { $0.id == savedSingle })
+            ?? WhisperLanguage.all.first(where: { $0.id == "fr" })
+            ?? WhisperLanguage.all[0]]
     }() {
         didSet {
             let ids = selectedLanguages.map(\.id).joined(separator: ",")
@@ -265,7 +364,7 @@ final class AppState {
 
     // Convenience: primary dictation language
     var selectedLanguage: WhisperLanguage {
-        selectedLanguages.first ?? WhisperLanguage.all.first(where: { $0.id == "fr" })!
+        selectedLanguages.first ?? WhisperLanguage.all.first(where: { $0.id == "fr" }) ?? WhisperLanguage.all[0]
     }
 
     // Settings — UI display language (independent from dictation language)
@@ -322,6 +421,24 @@ final class AppState {
         }
     }
 
+    var activeFormattingModel: FormattingModelID = {
+        // Deprecated raw values (legacy_zphyr_v1, smollm3_3b, gemma3_4b) decode as nil → migrate to .qwen3_4b
+        let saved = UserDefaults.standard.string(forKey: AppState.activeFormattingModelKey) ?? FormattingModelID.qwen3_4b.rawValue
+        return FormattingModelID(rawValue: saved) ?? .qwen3_4b
+    }() {
+        didSet {
+            UserDefaults.standard.set(activeFormattingModel.rawValue, forKey: AppState.activeFormattingModelKey)
+            if activeFormattingModel != oldValue {
+                Self.settingsLogger.notice(
+                    "[Settings] activeFormattingModel changed from \(oldValue.rawValue, privacy: .public) to \(self.activeFormattingModel.rawValue, privacy: .public)"
+                )
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.syncActiveFormattingModelInstallState()
+            }
+        }
+    }
+
     // Settings — launch at login (backed by SMAppService)
     private var isSyncingLaunchAtLogin = false
     var launchAtLogin: Bool = (SMAppService.mainApp.status == .enabled) {
@@ -363,6 +480,15 @@ final class AppState {
         L10n.advancedFeaturesNotice(languageCode: uiDisplayLanguage.rawValue)
     }
 
+    var defaultOutputProfile: OutputProfile {
+        get { outputProfileOther }
+        set { outputProfileOther = newValue }
+    }
+
+    var activeFormattingModelDescriptor: FormattingModelDescriptor {
+        FormattingModelCatalog.descriptor(for: activeFormattingModel)
+    }
+
     // Writing style per context
     var stylePersonal: WritingTone = AppState.loadWritingTone(forKey: AppState.stylePersonalKey, fallback: .casual) {
         didSet { UserDefaults.standard.set(stylePersonal.rawValue, forKey: AppState.stylePersonalKey) }
@@ -375,6 +501,30 @@ final class AppState {
     }
     var styleOther: WritingTone = AppState.loadWritingTone(forKey: AppState.styleOtherKey, fallback: .casual) {
         didSet { UserDefaults.standard.set(styleOther.rawValue, forKey: AppState.styleOtherKey) }
+    }
+    var outputProfilePersonal: OutputProfile = AppState.loadOutputProfile(
+        forKey: AppState.outputProfilePersonalKey,
+        fallback: .clean
+    ) {
+        didSet { UserDefaults.standard.set(outputProfilePersonal.rawValue, forKey: AppState.outputProfilePersonalKey) }
+    }
+    var outputProfileWork: OutputProfile = AppState.loadOutputProfile(
+        forKey: AppState.outputProfileWorkKey,
+        fallback: .technical
+    ) {
+        didSet { UserDefaults.standard.set(outputProfileWork.rawValue, forKey: AppState.outputProfileWorkKey) }
+    }
+    var outputProfileEmail: OutputProfile = AppState.loadOutputProfile(
+        forKey: AppState.outputProfileEmailKey,
+        fallback: .email
+    ) {
+        didSet { UserDefaults.standard.set(outputProfileEmail.rawValue, forKey: AppState.outputProfileEmailKey) }
+    }
+    var outputProfileOther: OutputProfile = AppState.loadOutputProfile(
+        forKey: AppState.outputProfileOtherKey,
+        fallback: .clean
+    ) {
+        didSet { UserDefaults.standard.set(outputProfileOther.rawValue, forKey: AppState.outputProfileOtherKey) }
     }
 
     // Transient error to surface in UI
@@ -389,10 +539,22 @@ final class AppState {
         performanceProfile.allowsWhisperASR
     }
 
+    var latestDictationSession: DictationSession? {
+        currentDictationSession ?? lastCompletedDictationSession
+    }
+
     private init() {
         refreshPerformanceProfile()
         refreshMicPermission()
         refreshAccessibility()
+        syncActiveFormattingModelInstallState()
+    }
+
+    func syncActiveFormattingModelInstallState() {
+        let installed = AdvancedLLMFormatter.resolveInstallURL(for: activeFormattingModel) != nil
+        if advancedModeInstalled != installed {
+            advancedModeInstalled = installed
+        }
     }
 
     func refreshPerformanceProfile() {
@@ -441,6 +603,14 @@ final class AppState {
         return tone
     }
 
+    private static func loadOutputProfile(forKey key: String, fallback: OutputProfile) -> OutputProfile {
+        guard let raw = UserDefaults.standard.string(forKey: key),
+              let profile = OutputProfile(rawValue: raw) else {
+            return fallback
+        }
+        return profile
+    }
+
     // MARK: - Permission checks
 
     func refreshMicPermission() {
@@ -482,6 +652,220 @@ final class AppState {
         let mapped = levels.prefix(28).map { CGFloat($0) }
         let padded = mapped + Array(repeating: 0.15, count: max(0, 28 - mapped.count))
         audioLevels = padded
+    }
+
+    // MARK: - Dictation session flow
+
+    @discardableResult
+    func beginDictationSession(
+        targetBundleID: String?,
+        transcriptionMode: ASRTranscriptionMode = .finalOnly,
+        outputProfile: OutputProfile = .clean
+    ) -> UUID {
+        let session = DictationSession(
+            id: UUID(),
+            startedAt: Date(),
+            updatedAt: Date(),
+            endedAt: nil,
+            targetBundleID: targetBundleID,
+            phase: .arming,
+            outputProfile: outputProfile,
+            liveTranscription: LiveTranscriptionState(
+                mode: transcriptionMode,
+                partialText: nil,
+                finalText: nil,
+                lastPartialAt: nil,
+                lastFinalAt: nil
+            ),
+            pipelineDecision: nil,
+            pipelineFallbackReason: nil,
+            pipelineTrace: [],
+            insertionStrategy: nil,
+            insertionFallbackReason: nil,
+            finalTextPreview: nil,
+            finalFormattedText: nil,
+            errorMessage: nil,
+            transitions: [DictationSessionTransition(phase: .arming)]
+        )
+        currentDictationSession = session
+        syncLegacyDictationState(for: .arming, preview: nil)
+        Self.sessionLogger.notice(
+            "[Session] began id=\(session.id.uuidString, privacy: .public) target=\(targetBundleID ?? "nil", privacy: .public) transcriptionMode=\(transcriptionMode.rawValue, privacy: .public) outputProfile=\(outputProfile.rawValue, privacy: .public)"
+        )
+        return session.id
+    }
+
+    func transitionCurrentDictationSession(
+        to phase: DictationSessionPhase,
+        note: String? = nil
+    ) {
+        guard var session = currentDictationSession else { return }
+        if session.phase == phase && note == nil { return }
+        let now = Date()
+        session.phase = phase
+        session.updatedAt = now
+        session.transitions.append(
+            DictationSessionTransition(phase: phase, timestamp: now, note: note)
+        )
+        currentDictationSession = session
+        syncLegacyDictationState(for: phase, preview: session.finalTextPreview)
+        Self.sessionLogger.notice(
+            "[Session] transition id=\(session.id.uuidString, privacy: .public) phase=\(phase.rawValue, privacy: .public) note=\(note ?? "none", privacy: .public)"
+        )
+    }
+
+    func updateCurrentDictationSession(
+        pipelineDecision: PipelineDecision? = nil,
+        pipelineFallbackReason: FallbackReason? = nil,
+        pipelineTrace: [StageTrace]? = nil,
+        insertionStrategy: InsertionStrategy? = nil,
+        insertionFallbackReason: FallbackReason? = nil,
+        finalTextPreview: String? = nil,
+        errorMessage: String? = nil
+    ) {
+        guard var session = currentDictationSession else { return }
+        session.updatedAt = Date()
+        if let pipelineDecision {
+            session.pipelineDecision = pipelineDecision
+        }
+        if let pipelineFallbackReason {
+            session.pipelineFallbackReason = pipelineFallbackReason
+        }
+        if let pipelineTrace {
+            session.pipelineTrace = pipelineTrace
+        }
+        if let insertionStrategy {
+            session.insertionStrategy = insertionStrategy
+        }
+        if let insertionFallbackReason {
+            session.insertionFallbackReason = insertionFallbackReason
+        }
+        if let finalTextPreview {
+            session.finalFormattedText = finalTextPreview
+            session.finalTextPreview = String(finalTextPreview.prefix(140))
+        }
+        if let errorMessage {
+            session.errorMessage = errorMessage
+        }
+        currentDictationSession = session
+    }
+
+    func updateCurrentLiveTranscription(
+        partialText: String? = nil,
+        clearPartialText: Bool = false,
+        finalText: String? = nil,
+        mode: ASRTranscriptionMode? = nil
+    ) {
+        guard var session = currentDictationSession else { return }
+        let now = Date()
+        if let mode {
+            session.liveTranscription.mode = mode
+        }
+        if clearPartialText {
+            session.liveTranscription.partialText = nil
+            session.liveTranscription.lastPartialAt = nil
+        } else if let partialText {
+            let trimmed = partialText.trimmingCharacters(in: .whitespacesAndNewlines)
+            session.liveTranscription.partialText = trimmed.isEmpty ? nil : trimmed
+            session.liveTranscription.lastPartialAt = trimmed.isEmpty ? nil : now
+        }
+        if let finalText {
+            let trimmed = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+            session.liveTranscription.finalText = trimmed.isEmpty ? nil : trimmed
+            session.liveTranscription.lastFinalAt = trimmed.isEmpty ? nil : now
+        }
+        session.updatedAt = now
+        currentDictationSession = session
+    }
+
+    func finishCurrentDictationSession(
+        phase: DictationSessionPhase,
+        note: String? = nil,
+        finalTextPreview: String? = nil,
+        pipelineDecision: PipelineDecision? = nil,
+        pipelineFallbackReason: FallbackReason? = nil,
+        pipelineTrace: [StageTrace]? = nil,
+        insertionStrategy: InsertionStrategy? = nil,
+        insertionFallbackReason: FallbackReason? = nil,
+        errorMessage: String? = nil
+    ) {
+        guard var session = currentDictationSession else { return }
+        let now = Date()
+        session.phase = phase
+        session.updatedAt = now
+        session.endedAt = now
+        if let pipelineDecision {
+            session.pipelineDecision = pipelineDecision
+        }
+        if let pipelineFallbackReason {
+            session.pipelineFallbackReason = pipelineFallbackReason
+        }
+        if let pipelineTrace {
+            session.pipelineTrace = pipelineTrace
+        }
+        if let insertionStrategy {
+            session.insertionStrategy = insertionStrategy
+        }
+        if let insertionFallbackReason {
+            session.insertionFallbackReason = insertionFallbackReason
+        }
+        if let finalTextPreview {
+            session.finalFormattedText = finalTextPreview
+            session.finalTextPreview = String(finalTextPreview.prefix(140))
+        }
+        if let errorMessage {
+            session.errorMessage = errorMessage
+        }
+        session.transitions.append(
+            DictationSessionTransition(phase: phase, timestamp: now, note: note)
+        )
+        lastCompletedDictationSession = session
+        currentDictationSession = nil
+        syncLegacyDictationState(for: phase, preview: session.finalTextPreview)
+        Self.sessionLogger.notice(
+            "[Session] finished id=\(session.id.uuidString, privacy: .public) phase=\(phase.rawValue, privacy: .public) decision=\(session.pipelineDecision?.rawValue ?? "none", privacy: .public) insertion=\(session.insertionStrategy?.rawValue ?? "none", privacy: .public) fallback=\(session.latestFallbackReason?.rawValue ?? "none", privacy: .public)"
+        )
+    }
+
+    func resetLegacyDictationState() {
+        dictationState = .idle
+    }
+
+    func activeOutputProfile(for bundleID: String?) -> OutputProfile {
+        guard let bundleID else { return outputProfileOther }
+        let lower = bundleID.lowercased()
+        if lower.contains("mail") || lower.contains("outlook") ||
+            lower.contains("mimestream") || lower.contains("spark") || lower.contains("airmail") {
+            return outputProfileEmail
+        }
+        if lower.contains("messages") || lower.contains("whatsapp") ||
+            lower.contains("telegram") || lower.contains("signal") || lower.contains("discord") {
+            return outputProfilePersonal
+        }
+        if lower.contains("xcode") || lower.contains("code") ||
+            lower.contains("jetbrains") || lower.contains("iterm") || lower.contains("terminal") ||
+            lower.contains("warp") || lower.contains("zed") || lower.contains("cursor") ||
+            lower.contains("nova") || lower.contains("slack") || lower.contains("teams") ||
+            lower.contains("notion") || lower.contains("linear") || lower.contains("jira") ||
+            lower.contains("confluence") || lower.contains("zoom") {
+            return outputProfileWork
+        }
+        return outputProfileOther
+    }
+
+    private func syncLegacyDictationState(for phase: DictationSessionPhase, preview: String?) {
+        switch phase {
+        case .arming, .retrying, .transcribing, .inserting:
+            dictationState = .processing
+        case .recording:
+            dictationState = .listening
+        case .formatting:
+            dictationState = .formatting
+        case .success:
+            dictationState = .done(text: preview ?? "")
+        case .failure, .cancelled:
+            dictationState = .idle
+        }
     }
 
     // MARK: - Dictionary suggestion flow

@@ -7,6 +7,8 @@ enum ASRBackendFactory {
             return AppleSpeechAnalyzerBackend.isRuntimeSupported ? .appleSpeechAnalyzer : .whisperKit
         case .whisperKit:
             return .whisperKit
+        case .parakeet:
+            return .parakeet
         }
     }
 
@@ -17,6 +19,8 @@ enum ASRBackendFactory {
             return AppleSpeechAnalyzerBackend()
         case .whisperKit:
             return WhisperKitBackend.shared
+        case .parakeet:
+            return ParakeetBackend.shared
         }
     }
 }

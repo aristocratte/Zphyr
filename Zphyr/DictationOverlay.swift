@@ -29,8 +29,8 @@ final class DictationOverlayController: NSObject {
         guard let screen = NSScreen.main else { return }
 
         // Compact pill size
-        let width: CGFloat  = 180
-        let height: CGFloat = 44
+        let width: CGFloat  = 280
+        let height: CGFloat = 56
 
         // Position just above the Dock (visually between dock and content)
         let dockHeight: CGFloat = 80
@@ -206,8 +206,10 @@ private struct DictionarySuggestionOverlayView: View {
 // MARK: - Overlay View
 
 struct DictationOverlayView: View {
-    var state: DictationState { AppState.shared.dictationState }
-    var levels: [CGFloat]     { AppState.shared.audioLevels }
+    private var session: DictationSession? { AppState.shared.latestDictationSession }
+    private var phase: DictationSessionPhase? { session?.phase }
+    private var transcriptText: String? { session?.liveTranscription.displayText }
+    var levels: [CGFloat] { AppState.shared.audioLevels }
 
     @State private var appear = false
 
@@ -229,8 +231,20 @@ struct DictationOverlayView: View {
 
     @ViewBuilder
     private var pillContent: some View {
-        switch state {
-        case .listening:
+        switch phase {
+        case .arming:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .scaleEffect(0.65)
+                    .tint(.white)
+                Text(t("Préparation…", "Preparing…", "Preparando…", "准备中…", "準備中…", "Подготовка…"))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.85))
+            }
+            .padding(.horizontal, 20)
+            .transition(.opacity)
+
+        case .recording:
             // Animated dots spectrum
             HStack(spacing: 3) {
                 ForEach(0..<9, id: \.self) { i in
@@ -240,41 +254,102 @@ struct DictationOverlayView: View {
             .padding(.horizontal, 20)
             .transition(.opacity)
 
-        case .processing:
-            HStack(spacing: 8) {
-                ProgressView()
-                    .scaleEffect(0.65)
-                    .tint(.white)
-                Text(t("Transcription…", "Transcribing…", "Transcribiendo…", "转写中…", "文字起こし中…", "Транскрибация…"))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.white.opacity(0.85))
-            }
-            .padding(.horizontal, 20)
-            .transition(.opacity)
+        case .retrying:
+            liveTranscriptRow(
+                icon: "arrow.clockwise",
+                iconColor: Color(hex: "#A9A7FF"),
+                title: t("Relance…", "Retrying…", "Reintentando…", "重试中…", "再試行中…", "Повтор…")
+            )
+
+        case .transcribing:
+            liveTranscriptRow(
+                icon: "waveform.and.magnifyingglass",
+                iconColor: .white,
+                title: t("Transcription…", "Transcribing…", "Transcribiendo…", "转写中…", "文字起こし中…", "Транскрибация…")
+            )
 
         case .formatting:
-            HStack(spacing: 8) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(Color(hex: "#22D3B8"))
-                    .symbolEffect(.pulse)
-                Text(t("Formatage IA…", "AI formatting…", "Formateando IA…", "AI 格式化…", "AI フォーマット中…", "ИИ форматирует…"))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.white.opacity(0.85))
+            liveTranscriptRow(
+                icon: "sparkles",
+                iconColor: Color(hex: "#22D3B8"),
+                title: t("Formatage IA…", "AI formatting…", "Formateando IA…", "AI 格式化…", "AI フォーマット中…", "ИИ форматирует…")
+            )
+
+        case .inserting:
+            liveTranscriptRow(
+                icon: "arrow.up.doc",
+                iconColor: Color(hex: "#0A84FF"),
+                title: t("Insertion…", "Inserting…", "Insertando…", "插入中…", "挿入中…", "Вставка…")
+            )
+
+        case .success:
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.white)
+                    Text((session?.finalTextPreview).flatMap { $0.isEmpty ? nil : $0 } ?? t("Terminé", "Done", "Hecho", "完成", "完了", "Готово"))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(0.85))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text(session?.outputProfile.rawValue.uppercased() ?? "CLEAN")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white.opacity(0.62))
+                    if let profileFallbackBadge {
+                        Text(profileFallbackBadge)
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(Color(hex: "#FFB4A8"))
+                    }
+                }
+                if let friendlyFallbackText {
+                    Text(friendlyFallbackText)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.white.opacity(0.62))
+                        .lineLimit(1)
+                }
             }
             .padding(.horizontal, 20)
             .transition(.opacity)
 
-        case .done(let text):
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark")
+        case .failure:
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(Color(hex: "#FFB4A8"))
+                    Text(session?.errorMessage ?? t("Échec de la dictée", "Dictation failed", "Falló el dictado", "听写失败", "音声入力に失敗", "Сбой диктовки"))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(0.88))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text(session?.outputProfile.rawValue.uppercased() ?? "CLEAN")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white.opacity(0.62))
+                    if let profileFallbackBadge {
+                        Text(profileFallbackBadge)
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(Color(hex: "#FFB4A8"))
+                    }
+                }
+                if let friendlyFallbackText {
+                    Text(friendlyFallbackText)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.white.opacity(0.62))
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 20)
+            .transition(.opacity)
+
+        case .cancelled:
+            HStack(spacing: 8) {
+                Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundColor(.white)
-                Text(text.isEmpty ? t("Terminé", "Done", "Hecho", "完成", "完了", "Готово") : text)
+                Text(t("Dictée annulée", "Dictation cancelled", "Dictado cancelado", "听写已取消", "音声入力をキャンセル", "Диктовка отменена"))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.white.opacity(0.85))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
             }
             .padding(.horizontal, 20)
             .transition(.opacity)
@@ -282,6 +357,70 @@ struct DictationOverlayView: View {
         default:
             EmptyView()
         }
+    }
+
+    @ViewBuilder
+    private func liveTranscriptRow(icon: String, iconColor: Color, title: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(iconColor)
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.88))
+                    Text(session?.outputProfile.rawValue.uppercased() ?? "CLEAN")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white.opacity(0.62))
+                    if let profileFallbackBadge {
+                        Text(profileFallbackBadge)
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(Color(hex: "#FFB4A8"))
+                    }
+                }
+                if let transcriptText, !transcriptText.isEmpty {
+                    Text(transcriptText)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(.white.opacity(0.68))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                } else if let friendlyFallbackText {
+                    Text(friendlyFallbackText)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(.white.opacity(0.68))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .transition(.opacity)
+    }
+
+    private var profileFallbackBadge: String? {
+        switch session?.latestFallbackReason {
+        case .profileRewriteDisabledVerbatim:
+            return "VERBATIM"
+        case .profileProtectedTermsRejected:
+            return "GLOSSARY"
+        case .profileValidationRejected:
+            return "PROFILE"
+        default:
+            return nil
+        }
+    }
+
+    private var friendlyFallbackText: String? {
+        guard let session else { return nil }
+        return SessionPresentation.fallbackMessage(
+            pipelineFallbackReason: session.pipelineFallbackReason,
+            insertionFallbackReason: session.insertionFallbackReason,
+            outputProfile: session.outputProfile,
+            languageCode: AppState.shared.uiDisplayLanguage.rawValue
+        )
     }
 
     // MARK: - Pill background
@@ -326,7 +465,8 @@ private struct DotBar: View {
                 .padding(.bottom, 40)
                 .task {
                     await MainActor.run {
-                        AppState.shared.dictationState = .listening
+                        AppState.shared.beginDictationSession(targetBundleID: nil)
+                        AppState.shared.transitionCurrentDictationSession(to: .recording)
                     }
                     while !Task.isCancelled {
                         await MainActor.run {

@@ -97,7 +97,7 @@ struct SidebarView: View {
                 Spacer()
 
                 // Version badge
-                Text("β 0.1")
+                Text("β 1.0")
                     .font(.system(size: 9.5, weight: .semibold))
                     .foregroundColor(Color(hex: "#22D3B8"))
                     .padding(.horizontal, 6)
@@ -123,6 +123,28 @@ struct SidebarView: View {
                         }
                     }
                 }
+
+                // ── Meeting teaser (coming soon) ─────────────────────
+                HStack(spacing: 9) {
+                    Image(systemName: "person.2.wave.2")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundColor(Color(hex: "#C0C0B8"))
+                        .frame(width: 18)
+                    Text("Meeting")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundColor(Color(hex: "#C0C0B8"))
+                    Spacer()
+                    Text("Soon")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundColor(Color(hex: "#22D3B8"))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2.5)
+                        .background(Color(hex: "#22D3B8").opacity(0.12))
+                        .clipShape(Capsule())
+                        .overlay(Capsule().strokeBorder(Color(hex: "#22D3B8").opacity(0.20), lineWidth: 0.5))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
             }
             .padding(.horizontal, 8)
 

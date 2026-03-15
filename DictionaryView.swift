@@ -39,7 +39,9 @@ final class DictionaryStore {
     private nonisolated static let logger = Logger(subsystem: "com.zphyr.app", category: "DictionaryStore")
 
     static let storageKey = "zphyr.dictionary.entries"
+    static let protectedTermsStorageKey = "zphyr.dictionary.protectedTerms"
     var entries: [DictionaryEntry] = []
+    var protectedTerms: [String] = []
     private var cachedPronunciationRules: [PronunciationReplacementRule]?
 
     private init() {
@@ -92,8 +94,10 @@ final class DictionaryStore {
 
     func clearAll() {
         entries = []
+        protectedTerms = []
         invalidateCaches()
         SecureLocalDataStore.removeValue(forKey: Self.storageKey)
+        SecureLocalDataStore.removeValue(forKey: Self.protectedTermsStorageKey)
     }
 
     func reloadFromDisk() {
@@ -103,13 +107,21 @@ final class DictionaryStore {
     /// Returns all words/phrases for injection into the Whisper prompt.
     var wordsForPrompt: [String] {
         var seen = Set<String>()
-        return entries.compactMap { entry in
+        let entryWords: [String] = entries.compactMap { entry -> String? in
             let value = entry.word.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty else { return nil }
             let key = value.lowercased()
             guard seen.insert(key).inserted else { return nil }
             return value
         }
+        let glossaryWords = protectedTerms.compactMap { term -> String? in
+            let value = term.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return nil }
+            let key = value.lowercased()
+            guard seen.insert(key).inserted else { return nil }
+            return value
+        }
+        return glossaryWords + entryWords
     }
 
     /// Returns pronunciation hints like "spoken form -> written form" for prompting.
@@ -166,9 +178,38 @@ final class DictionaryStore {
         return false
     }
 
+    func addProtectedTerm(_ raw: String) {
+        let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        guard !protectedTerms.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame }) else { return }
+        protectedTerms.append(cleaned)
+        protectedTerms.sort {
+            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
+        saveProtectedTerms()
+        Self.logger.notice("[DictionaryStore] added protectedTerm=\(cleaned, privacy: .private(mask: .hash))")
+    }
+
+    func removeProtectedTerms(at offsets: IndexSet) {
+        protectedTerms.remove(atOffsets: offsets)
+        saveProtectedTerms()
+    }
+
+    var sortedProtectedTerms: [String] {
+        protectedTerms.sorted {
+            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
+    }
+
     private func save() {
         if let data = try? JSONEncoder().encode(entries) {
             _ = SecureLocalDataStore.save(data, forKey: Self.storageKey)
+        }
+    }
+
+    private func saveProtectedTerms() {
+        if let data = try? JSONEncoder().encode(protectedTerms) {
+            _ = SecureLocalDataStore.save(data, forKey: Self.protectedTermsStorageKey)
         }
     }
 
@@ -176,11 +217,22 @@ final class DictionaryStore {
         guard let data = SecureLocalDataStore.load(forKey: Self.storageKey),
               let decoded = try? JSONDecoder().decode([DictionaryEntry].self, from: data) else {
             entries = []
+            loadProtectedTerms()
             invalidateCaches()
             return
         }
         entries = decoded
+        loadProtectedTerms()
         invalidateCaches()
+    }
+
+    private func loadProtectedTerms() {
+        guard let data = SecureLocalDataStore.load(forKey: Self.protectedTermsStorageKey),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            protectedTerms = []
+            return
+        }
+        protectedTerms = decoded
     }
 
     private func invalidateCaches() {
@@ -203,6 +255,7 @@ struct DictionaryView: View {
     @State private var showAddSheet = false
     @State private var editingEntry: DictionaryEntry?
     @State private var searchText = ""
+    @State private var newProtectedTerm = ""
 
     private var filteredEntries: [DictionaryEntry] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -303,8 +356,75 @@ struct DictionaryView: View {
                 .padding(.bottom, 12)
             }
 
-            if store.entries.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(t("Protected terms", "Protected terms", "Términos protegidos", "保护术语", "保護用語", "Защищенные термины"))
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(Color(hex: "#1A1A1A"))
+
+                HStack(spacing: 8) {
+                    TextField(
+                        t("Ajouter un terme à préserver strictement", "Add a term to preserve strictly", "Añadir un término a preservar estrictamente", "添加需要严格保留的术语", "厳密に保持する用語を追加", "Добавить термин для строгого сохранения"),
+                        text: $newProtectedTerm
+                    )
+                    .textFieldStyle(.roundedBorder)
+
+                    Button {
+                        let trimmed = newProtectedTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { return }
+                        store.addProtectedTerm(trimmed)
+                        newProtectedTerm = ""
+                    } label: {
+                        Text(t("Ajouter", "Add", "Añadir", "添加", "追加", "Добавить"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(Color(hex: "#0A84FF"))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if store.sortedProtectedTerms.isEmpty {
+                    Text(t("Aucun terme protégé défini.", "No protected terms defined.", "No hay términos protegidos.", "未定义保护术语。", "保護用語は未設定です。", "Защищенные термины не заданы."))
+                        .font(.system(size: 12))
+                        .foregroundColor(Color(hex: "#AAAAAA"))
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(store.sortedProtectedTerms, id: \.self) { term in
+                            HStack {
+                                Text(term)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(Color(hex: "#1A1A1A"))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Button {
+                                    if let index = store.protectedTerms.firstIndex(where: { $0 == term }) {
+                                        store.removeProtectedTerms(at: IndexSet(integer: index))
+                                    }
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(Color(hex: "#AAAAAA"))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.white)
+                            .cornerRadius(10)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.bottom, 12)
+
+            if store.entries.isEmpty && store.sortedProtectedTerms.isEmpty {
                 emptyState
+            } else if store.entries.isEmpty {
+                Spacer()
             } else if filteredEntries.isEmpty {
                 // No results state
                 VStack(spacing: 10) {

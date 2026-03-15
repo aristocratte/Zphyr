@@ -182,7 +182,6 @@ final class TranscriptCleanupStageTests: XCTestCase {
 
 // MARK: - Disfluency Removal Stage Tests
 
-@MainActor
 final class DisfluencyRemovalStageTests: XCTestCase {
 
     func testRemoveEnglishFillers() {
@@ -244,11 +243,24 @@ final class DisfluencyRemovalStageTests: XCTestCase {
         XCTAssertTrue(result.text.contains("JSON"))
         XCTAssertTrue(result.text.contains("HTTPS"))
     }
+
+    func testRemovePureEnglishFillerUtterance() {
+        let stage = DisfluencyRemovalStage()
+        let io = makeIO("um er", languageCode: "en")
+        let result = stage.process(io)
+        XCTAssertEqual(result.text, "")
+    }
+
+    func testPreserveUppercaseAcronymThatLooksLikeFiller() {
+        let stage = DisfluencyRemovalStage()
+        let io = makeIO("ER", languageCode: "en")
+        let result = stage.process(io)
+        XCTAssertEqual(result.text, "ER")
+    }
 }
 
 // MARK: - Punctuation & Capitalization Stage Tests
 
-@MainActor
 final class PunctuationCapitalizationStageTests: XCTestCase {
 
     func testSpokenPunctuation_French_virgule() {
@@ -379,6 +391,8 @@ final class StageTraceTests: XCTestCase {
         let result = PipelineResult(
             finalText: "Hello world",
             extractedCommand: .none,
+            decision: .deterministicOnly,
+            fallbackReason: nil,
             trace: [
                 StageTrace.record(name: "S1", index: 0, input: "a", output: "b", durationMs: 0.5)
             ],
@@ -413,6 +427,43 @@ final class ShortUtteranceTests: XCTestCase {
     }
 }
 
+@MainActor
+final class ShortPipelineRegressionTests: XCTestCase {
+
+    override func setUp() async throws {
+        try await super.setUp()
+        AppState.shared.formattingMode = .trigger
+        AppState.shared.styleOther = .casual
+    }
+
+    func testAddsPeriodToShortConversationalPhrase() async {
+        let pipeline = FormattingPipeline()
+        let result = await pipeline.run(TranscriptionInput(rawText: "see you tomorrow", languageCode: "en", targetBundleID: nil))
+        XCTAssertEqual(result.finalText, "See you tomorrow.")
+    }
+
+    func testAddsPeriodToSingleWordAcknowledgementButNotAcronym() async {
+        let pipeline = FormattingPipeline()
+        let thanks = await pipeline.run(TranscriptionInput(rawText: "thanks", languageCode: "en", targetBundleID: nil))
+        XCTAssertEqual(thanks.finalText, "Thanks.")
+
+        let api = await pipeline.run(TranscriptionInput(rawText: "API", languageCode: "en", targetBundleID: nil))
+        XCTAssertEqual(api.finalText, "API")
+    }
+
+    func testPreservesLowercaseVersionReference() async {
+        let pipeline = FormattingPipeline()
+        let result = await pipeline.run(TranscriptionInput(rawText: "version 2.0", languageCode: "en", targetBundleID: nil))
+        XCTAssertEqual(result.finalText, "version 2.0")
+    }
+
+    func testAddsPeriodWithoutChangingShortOkPhraseMeaning() async {
+        let pipeline = FormattingPipeline()
+        let result = await pipeline.run(TranscriptionInput(rawText: "OK sounds good", languageCode: "en", targetBundleID: nil))
+        XCTAssertEqual(result.finalText, "OK sounds good.")
+    }
+}
+
 // MARK: - Edge Case Tests
 
 @MainActor
@@ -444,7 +495,6 @@ final class PipelineEdgeCaseTests: XCTestCase {
 
 // MARK: - Helper
 
-@MainActor
 private func makeIO(_ text: String, languageCode: String = "en") -> StageIO {
     StageIO(
         text: text,
@@ -453,6 +503,9 @@ private func makeIO(_ text: String, languageCode: String = "en") -> StageIO {
             languageCode: languageCode,
             targetBundleID: nil,
             tone: .casual,
+            outputProfile: .clean,
+            formattingModelID: .qwen3_4b,
+            protectedTerms: [],
             defaultCodeStyle: .camel,
             formattingMode: .trigger,
             isProModeUnlocked: false,

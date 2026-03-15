@@ -31,14 +31,15 @@ _URL_RE = re.compile(
     re.IGNORECASE,
 )
 _EMAIL_RE = re.compile(
-    r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}',
+    r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
 )
 _NUMBER_RE = re.compile(
-    r'\b\d+(?:[.,]\d+)*(?:\.\d+)?\b',
+    r"\b\d+(?:[.,]\d+)*(?:\.\d+)?\b",
 )
 
 
 # ── Result types ──────────────────────────────────────────────────────────────
+
 
 @dataclass
 class HardCheckResult:
@@ -52,6 +53,7 @@ class HardCheckResult:
 
 
 # ── Protected term checks ─────────────────────────────────────────────────────
+
 
 def check_protected_terms(
     case_id: str,
@@ -82,6 +84,7 @@ def check_protected_terms(
 
 # ── URL integrity ─────────────────────────────────────────────────────────────
 
+
 def check_url_integrity(
     case_id: str,
     final_text: str,
@@ -93,19 +96,23 @@ def check_url_integrity(
     """
     failures = []
     for term in protected_terms:
-        if not term.lower().startswith("http"):
+        if not term.lower().startswith("http") or "://" not in term:
             continue
         if term not in final_text:
             failures.append(f"malformedURL:missing:{term!r}")
             continue
         # Structural validity: must be matched by the URL regex
         matches = _URL_RE.findall(final_text)
-        if not any(m == term or final_text[final_text.index(term):].startswith(term) for m in matches):
+        if not any(
+            m == term or final_text[final_text.index(term) :].startswith(term)
+            for m in matches
+        ):
             failures.append(f"malformedURL:invalid:{term!r}")
     return failures
 
 
 # ── Email integrity ───────────────────────────────────────────────────────────
+
 
 def check_email_integrity(
     case_id: str,
@@ -124,7 +131,7 @@ def check_email_integrity(
             failures.append(f"malformedEmail:missing:{term!r}")
             continue
         matches = _EMAIL_RE.findall(final_text)
-        if term not in matches:
+        if term not in matches and not any(term.startswith(match) for match in matches):
             failures.append(f"malformedEmail:invalid:{term!r}")
     return failures
 
@@ -139,7 +146,7 @@ def _extract_numbers(text: str) -> set[str]:
     """Extract digit sequences and version-like patterns from text."""
     raw = set(_NUMBER_RE.findall(text))
     # Also strip thousand separators for comparison
-    normalized = {re.sub(r'[,\s]', '', n) for n in raw}
+    normalized = {re.sub(r"[,\s]", "", n) for n in raw}
     return raw | normalized
 
 
@@ -160,13 +167,14 @@ def check_numeric_integrity(
     final_nums = _extract_numbers(final_text)
     failures = []
     for num in raw_nums:
-        clean = re.sub(r'[,\s]', '', num)
+        clean = re.sub(r"[,\s]", "", num)
         if clean not in final_nums and num not in final_nums:
             failures.append(f"numericCorruption:{num!r} missing in final text")
     return failures
 
 
 # ── Command accuracy ──────────────────────────────────────────────────────────
+
 
 def check_command_accuracy(
     case_id: str,
@@ -178,7 +186,9 @@ def check_command_accuracy(
     - If no command expected and one was extracted → spuriousCommand (hard fail).
     - If command expected and wrong type extracted → commandMismatch (hard fail).
     """
-    actual_norm = None if actual_command in ("none", "null", "", None) else actual_command
+    actual_norm = (
+        None if actual_command in ("none", "null", "", None) else actual_command
+    )
     if expected_command is None and actual_norm is not None:
         return [f"spuriousCommand:got={actual_norm!r}"]
     if expected_command is not None and actual_norm != expected_command:
@@ -189,10 +199,22 @@ def check_command_accuracy(
 # ── Rewrite gate ──────────────────────────────────────────────────────────────
 
 # Common filler words removed by deterministic disfluency stage
-_FILLERS = frozenset({
-    "uh", "um", "er", "ah", "like", "so", "basically", "you know",
-    "euh", "voilà", "alors", "bah",
-})
+_FILLERS = frozenset(
+    {
+        "uh",
+        "um",
+        "er",
+        "ah",
+        "like",
+        "so",
+        "basically",
+        "you know",
+        "euh",
+        "voilà",
+        "alors",
+        "bah",
+    }
+)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -218,7 +240,7 @@ def check_rewrite_gate(
     if rewrite_allowed_level != "none":
         return []
 
-    raw_tokens   = set(_tokenize(raw_text))
+    raw_tokens = set(_tokenize(raw_text))
     final_tokens = set(_tokenize(final_text))
 
     # Words in final that were not in raw → potential forbidden insertion
@@ -234,19 +256,20 @@ def check_rewrite_gate(
 
 # ── Main check runner ─────────────────────────────────────────────────────────
 
+
 def run_hard_checks(record: dict) -> HardCheckResult:
     """
     Run all hard checks for a single EvalRunRecord (dict from JSON).
     Returns a HardCheckResult with all failure codes.
     """
-    case_id      = record.get("caseID", "unknown")
-    raw_text     = record.get("rawAsrText", "")
-    final_text   = record.get("finalText", "")
-    terms        = record.get("protectedTerms", [])
-    ctx_type     = record.get("contextType", "")
+    case_id = record.get("caseID", "unknown")
+    raw_text = record.get("rawAsrText", "")
+    final_text = record.get("finalText", "")
+    terms = record.get("protectedTerms", [])
+    ctx_type = record.get("contextType", "")
     expected_cmd = record.get("expectedCommand")
-    actual_cmd   = record.get("actualCommand", "none")
-    rw_level     = record.get("rewriteAllowedLevel", "light")
+    actual_cmd = record.get("actualCommand", "none")
+    rw_level = record.get("rewriteAllowedLevel", "light")
 
     result = HardCheckResult(case_id=case_id)
 
@@ -284,10 +307,21 @@ def run_hard_checks(record: dict) -> HardCheckResult:
         result.hard_failures.append("forbiddenRewrite")
         result.details["rewrite_gate"] = f
 
+    # Eval artifacts may already contain hard-failure reasons computed by the
+    # Swift harness. Treat those as authoritative so Python summaries stay in
+    # sync with the run artifact even when parity gaps exist between engines.
+    for failure in record.get("hardFailureReasons", []):
+        key = str(failure)
+        if key and key not in result.hard_failures:
+            result.hard_failures.append(key)
+    if record.get("hardFailureReasons"):
+        result.details["swift_recorded_failures"] = ",".join(record.get("hardFailureReasons", []))
+
     return result
 
 
 # ── Batch runner ──────────────────────────────────────────────────────────────
+
 
 def run_all_hard_checks(records: list[dict]) -> list[HardCheckResult]:
     """Run hard checks over all records. Use in zphyr_eval.py."""
@@ -297,6 +331,7 @@ def run_all_hard_checks(records: list[dict]) -> list[HardCheckResult]:
 def hard_failure_summary(results: list[HardCheckResult]) -> dict:
     """Aggregate hard check results by failure type and category."""
     from collections import Counter
+
     total = len(results)
     failed = [r for r in results if not r.passed]
     failure_types = Counter(f for r in failed for f in r.hard_failures)

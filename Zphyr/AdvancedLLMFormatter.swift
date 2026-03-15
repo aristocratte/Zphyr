@@ -32,6 +32,20 @@ struct LLMFormattingConstraints: Sendable {
     )
 }
 
+enum FormattingModelInstallStatus: Equatable, Sendable {
+    case installed
+    case notInstalled
+    case downloading(progress: Double)
+    case preparing
+    case unavailable(String)
+    case error(String)
+
+    var isInstalled: Bool {
+        if case .installed = self { return true }
+        return false
+    }
+}
+
 #if canImport(MLXLLM)
 import MLX
 import MLXLLM
@@ -55,34 +69,45 @@ final class AdvancedLLMFormatter {
     }
 
     static let shared     = AdvancedLLMFormatter()
-    static let modelId    = "arhesstide/zphyr_qwen_v1-MLX-4bit"
-    static let modelBytes: Double = 1_100 * 1_024 * 1_024  // ~1.1 GB
-    static var overrideInstallURL: URL?
+    static let modelId    = FormattingModelCatalog.descriptor(for: .qwen3_4b).huggingFaceModelID
+    static var overrideInstallURL: URL? {
+        get { overrideInstallURLs[.qwen3_4b] }
+        set { overrideInstallURLs[.qwen3_4b] = newValue }
+    }
+    static var overrideInstallURLs: [FormattingModelID: URL] = [:]
     private static let extraStopTokens: Set<String> = ["<think>", "</think>"]
 
-    private static func preferredExplicitInstallURL() -> URL? {
-        if let overrideInstallURL {
-            return overrideInstallURL
+    private static func preferredExplicitInstallURL(for modelID: FormattingModelID) -> URL? {
+        if let explicitURL = overrideInstallURLs[modelID] {
+            return explicitURL
+        }
+        let envSuffix = modelID.rawValue.uppercased()
+            .replacingOccurrences(of: "-", with: "_")
+        if let overridePath = ProcessInfo.processInfo.environment["ZPHYR_FORMATTER_MODEL_PATH_\(envSuffix)"],
+           !overridePath.isEmpty {
+            return URL(fileURLWithPath: overridePath, isDirectory: true)
         }
         if let overridePath = ProcessInfo.processInfo.environment["ZPHYR_FORMATTER_MODEL_PATH"],
-           !overridePath.isEmpty {
+           !overridePath.isEmpty,
+           modelID == AppState.shared.activeFormattingModel {
             return URL(fileURLWithPath: overridePath, isDirectory: true)
         }
         return nil
     }
 
     /// Best-effort discovery of the local cache directory for the formatting model.
-    static func resolveInstallURL() -> URL? {
+    static func resolveInstallURL(for modelID: FormattingModelID) -> URL? {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
+        let descriptor = FormattingModelCatalog.descriptor(for: modelID)
 
-        if let explicitURL = preferredExplicitInstallURL() {
+        if let explicitURL = preferredExplicitInstallURL(for: modelID) {
             return directoryContainsModelFiles(explicitURL) ? explicitURL : nil
         }
 
         // MLX Swift caches models at ~/Library/Caches/models/<org>/<model>/
         let mlxDirect = home
-            .appendingPathComponent("Library/Caches/models/arhesstide/zphyr_qwen_v1-MLX-4bit")
+            .appendingPathComponent("Library/Caches/models/\(descriptor.cacheNamespace)/\(descriptor.cacheSlug)")
         if fm.fileExists(atPath: mlxDirect.path),
            directoryContainsModelFiles(mlxDirect) {
             return mlxDirect
@@ -105,8 +130,9 @@ final class AdvancedLLMFormatter {
 
             for entry in entries {
                 let name = entry.lastPathComponent.lowercased()
-                let isMatch = name.contains("models--arhesstide--zphyr_qwen_v1-mlx-4bit")
-                    || name.contains("zphyr_qwen_v1-mlx-4bit")
+                let isMatch = descriptor.cacheMatchHints.contains { hint in
+                    name.contains(hint.lowercased())
+                }
                 guard isMatch else { continue }
 
                 let snapshots = entry.appendingPathComponent("snapshots")
@@ -140,6 +166,10 @@ final class AdvancedLLMFormatter {
         })
     }
 
+    static func resolveInstallURL() -> URL? {
+        resolveInstallURL(for: AppState.shared.activeFormattingModel)
+    }
+
     /// Returns `true` only when the directory contains actual model weight files.
     private static func directoryContainsModelFiles(_ url: URL) -> Bool {
         guard let contents = try? FileManager.default.contentsOfDirectory(
@@ -158,6 +188,9 @@ final class AdvancedLLMFormatter {
     var downloadedMB: String      = ""   // e.g. "312 / 625 MB"
 
     private var container: ModelContainer?
+    private(set) var loadedModelID: FormattingModelID?
+    private(set) var installingModelID: FormattingModelID?
+    private(set) var installErrorModelID: FormattingModelID?
     private var installTask: Task<Void, Never>?
     private let log = Logger(subsystem: "com.zphyr.app", category: "AdvancedLLM")
     var isModelLoaded: Bool { container != nil }
@@ -168,19 +201,40 @@ final class AdvancedLLMFormatter {
 
     private init() {
         // Reconcile UserDefaults flag with actual disk state on startup.
-        let installedOnDisk = Self.resolveInstallURL() != nil
+        let installedOnDisk = Self.resolveInstallURL(for: AppState.shared.activeFormattingModel) != nil
         if AppState.shared.advancedModeInstalled != installedOnDisk {
             AppState.shared.advancedModeInstalled = installedOnDisk
         }
+    }
+
+    func isModelLoaded(modelID: FormattingModelID) -> Bool {
+        container != nil && loadedModelID == modelID
+    }
+
+    func installStatus(for modelID: FormattingModelID) -> FormattingModelInstallStatus {
+        if let installError, installErrorModelID == modelID {
+            return .error(installError)
+        }
+        if isInstalling, installingModelID == modelID {
+            return downloadProgress > 0 ? .downloading(progress: downloadProgress) : .preparing
+        }
+        if Self.resolveInstallURL(for: modelID) != nil {
+            return .installed
+        }
+        return .notInstalled
     }
 
     // MARK: - Installation
 
     /// Downloads the model from HuggingFace and loads it into memory.
     /// Sets `AppState.shared.advancedModeInstalled = true` on success.
-    func installModel() async {
+    func installModel(modelID: FormattingModelID? = nil) async {
         guard !isInstalling else { return }
+        let targetModelID = modelID ?? AppState.shared.activeFormattingModel
+        let descriptor = FormattingModelCatalog.descriptor(for: targetModelID)
         isInstalling      = true
+        installingModelID = targetModelID
+        installErrorModelID = nil
         installError      = nil
         downloadProgress  = 0
         downloadSpeed     = ""
@@ -188,9 +242,16 @@ final class AdvancedLLMFormatter {
         lastBytes         = 0
         lastSpeedUpdate   = Date()
 
+        if loadedModelID != nil, loadedModelID != targetModelID {
+            unload()
+        }
+
         let task = Task<Void, Never> {
             do {
-                let config = ModelConfiguration(id: Self.modelId)
+                let config = ModelConfiguration(
+                    id: descriptor.huggingFaceModelID,
+                    extraEOSTokens: Self.extraStopTokens.union(descriptor.extraEOSTokens)
+                )
                 let result = try await LLMModelFactory.shared.loadContainer(
                     configuration: config,
                     progressHandler: { [weak self] progress in
@@ -203,10 +264,10 @@ final class AdvancedLLMFormatter {
                                 // Use real bytes from Progress if available, else estimate
                                 let totalBytes = progress.totalUnitCount > 0
                                     ? progress.totalUnitCount
-                                    : Int64(Self.modelBytes)
+                                    : descriptor.approximateBytes
                                 let completedBytes = progress.completedUnitCount > 0
                                     ? progress.completedUnitCount
-                                    : Int64(p * Self.modelBytes)
+                                    : Int64(p * Double(descriptor.approximateBytes))
                                 let deltaBytes = completedBytes - self.lastBytes
                                 let bps        = deltaBytes > 0 ? Double(deltaBytes) / dt : 0
                                 self.downloadSpeed   = bps > 0 ? Self.formatSpeed(bps) : ""
@@ -224,21 +285,26 @@ final class AdvancedLLMFormatter {
                 )
                 if !Task.isCancelled {
                     self.container        = result
+                    self.loadedModelID    = targetModelID
                     self.downloadProgress = 1.0
                     self.downloadSpeed    = ""
                     self.downloadedMB     = ""
+                    AppState.shared.activeFormattingModel = targetModelID
                     AppState.shared.advancedModeInstalled = true
-                    self.log.notice("[AdvancedLLM] installation complete")
+                    self.installErrorModelID = nil
+                    self.log.notice("[AdvancedLLM] installation complete model=\(targetModelID.rawValue, privacy: .public)")
                 }
             } catch is CancellationError {
-                self.log.notice("[AdvancedLLM] install cancelled")
+                self.log.notice("[AdvancedLLM] install cancelled model=\(targetModelID.rawValue, privacy: .public)")
             } catch {
                 if !Task.isCancelled {
                     self.installError = error.localizedDescription
-                    self.log.error("[AdvancedLLM] install error: \(error.localizedDescription)")
+                    self.installErrorModelID = targetModelID
+                    self.log.error("[AdvancedLLM] install error model=\(targetModelID.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
             }
             self.isInstalling  = false
+            self.installingModelID = nil
             self.installTask   = nil
         }
         installTask = task
@@ -250,6 +316,8 @@ final class AdvancedLLMFormatter {
         installTask?.cancel()
         installTask      = nil
         isInstalling     = false
+        installingModelID = nil
+        installErrorModelID = nil
         downloadProgress = 0
         downloadSpeed    = ""
         downloadedMB     = ""
@@ -257,68 +325,112 @@ final class AdvancedLLMFormatter {
     }
 
     /// Silently loads an already-downloaded model from the local cache (no network).
-    func loadIfInstalled() async {
-        guard container == nil else { return }
-        guard let installURL = Self.resolveInstallURL() else {
-            if AppState.shared.advancedModeInstalled {
+    func loadIfInstalled(modelID: FormattingModelID? = nil) async {
+        let targetModelID = modelID ?? AppState.shared.activeFormattingModel
+        let descriptor = FormattingModelCatalog.descriptor(for: targetModelID)
+
+        if container != nil, loadedModelID == targetModelID {
+            return
+        }
+
+        if container != nil, loadedModelID != targetModelID {
+            unload()
+        }
+
+        guard let installURL = Self.resolveInstallURL(for: targetModelID) else {
+            if AppState.shared.activeFormattingModel == targetModelID,
+               AppState.shared.advancedModeInstalled {
                 AppState.shared.advancedModeInstalled = false
             }
-            if let explicitURL = Self.preferredExplicitInstallURL() {
-                log.error("[AdvancedLLM] load skipped: explicit model path invalid or incomplete: \(explicitURL.path, privacy: .public)")
+            if let explicitURL = Self.preferredExplicitInstallURL(for: targetModelID) {
+                log.error("[AdvancedLLM] load skipped: explicit model path invalid or incomplete model=\(targetModelID.rawValue, privacy: .public) path=\(explicitURL.path, privacy: .public)")
             } else {
-                log.notice("[AdvancedLLM] load skipped: model not present on disk")
+                log.notice("[AdvancedLLM] load skipped: model not present on disk model=\(targetModelID.rawValue, privacy: .public)")
             }
             return
         }
-        if !AppState.shared.advancedModeInstalled {
+        if AppState.shared.activeFormattingModel == targetModelID,
+           !AppState.shared.advancedModeInstalled {
             AppState.shared.advancedModeInstalled = true
         }
         let configuration: ModelConfiguration
-        if Self.preferredExplicitInstallURL() != nil {
+        if Self.preferredExplicitInstallURL(for: targetModelID) != nil {
             configuration = ModelConfiguration(
                 directory: installURL,
-                extraEOSTokens: Self.extraStopTokens
+                extraEOSTokens: Self.extraStopTokens.union(descriptor.extraEOSTokens)
             )
-            log.notice("[AdvancedLLM] loading explicit local model from \(installURL.path, privacy: .public)")
+            log.notice("[AdvancedLLM] loading explicit local model model=\(targetModelID.rawValue, privacy: .public) path=\(installURL.path, privacy: .public)")
         } else {
             configuration = ModelConfiguration(
-                id: Self.modelId,
-                extraEOSTokens: Self.extraStopTokens
+                id: descriptor.huggingFaceModelID,
+                extraEOSTokens: Self.extraStopTokens.union(descriptor.extraEOSTokens)
             )
-            log.notice("[AdvancedLLM] loading cached model using id=\(Self.modelId, privacy: .public) resolvedPath=\(installURL.path, privacy: .public)")
+            log.notice("[AdvancedLLM] loading cached model using id=\(descriptor.huggingFaceModelID, privacy: .public) resolvedPath=\(installURL.path, privacy: .public)")
         }
 
         do {
             container = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
         } catch {
             container = nil
-            AppState.shared.advancedModeInstalled = false
-            log.error("[AdvancedLLM] load failed from \(installURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            loadedModelID = nil
+            if AppState.shared.activeFormattingModel == targetModelID {
+                AppState.shared.advancedModeInstalled = false
+            }
+            log.error("[AdvancedLLM] load failed model=\(targetModelID.rawValue, privacy: .public) path=\(installURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return
         }
 
         if container != nil {
-            log.notice("[AdvancedLLM] loaded model successfully from \(installURL.path, privacy: .public)")
+            loadedModelID = targetModelID
+            installErrorModelID = nil
+            log.notice("[AdvancedLLM] loaded model successfully model=\(targetModelID.rawValue, privacy: .public) path=\(installURL.path, privacy: .public)")
         } else {
-            AppState.shared.advancedModeInstalled = false
-            log.warning("[AdvancedLLM] load returned nil container for path \(installURL.path, privacy: .public)")
+            loadedModelID = nil
+            if AppState.shared.activeFormattingModel == targetModelID {
+                AppState.shared.advancedModeInstalled = false
+            }
+            log.warning("[AdvancedLLM] load returned nil container model=\(targetModelID.rawValue, privacy: .public) path=\(installURL.path, privacy: .public)")
         }
     }
 
     /// Unloads the model from memory to free GPU/RAM when not needed.
     func unload() {
         container = nil
+        loadedModelID = nil
         log.notice("[AdvancedLLM] model unloaded")
     }
 
-    /// Deletes all cached model files for zphyr_qwen_v1-MLX-4bit from disk.
-    static func removeModelFromDisk() {
+    /// Runs a silent 1-token generation to trigger Metal shader compilation.
+    /// Call once after `loadIfInstalled()` to eliminate first-inference latency.
+    func warmup() async {
+        guard let container, loadedModelID != nil else { return }
+        let warmupStart = CFAbsoluteTimeGetCurrent()
+        log.notice("[AdvancedLLM] warmup start")
+        do {
+            let tokens = await container.encode("a")
+            let input = LMInput(tokens: MLXArray(tokens))
+            let stream = try await container.generate(
+                input: input,
+                parameters: GenerateParameters(maxTokens: 1, temperature: 0)
+            )
+            for await _ in stream {}
+            let elapsed = CFAbsoluteTimeGetCurrent() - warmupStart
+            log.notice("[AdvancedLLM] warmup complete in \(String(format: "%.2f", elapsed), privacy: .public)s")
+        } catch {
+            log.warning("[AdvancedLLM] warmup failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Deletes all cached model files for the selected formatter from disk.
+    static func removeModelFromDisk(modelID: FormattingModelID? = nil) {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
+        let targetModelID = modelID ?? AppState.shared.activeFormattingModel
+        let descriptor = FormattingModelCatalog.descriptor(for: targetModelID)
 
-        // MLX Swift cache: ~/Library/Caches/models/arhesstide/zphyr_qwen_v1-MLX-4bit/
+        // MLX Swift cache: ~/Library/Caches/models/<org>/<model>/
         let mlxDirect = home
-            .appendingPathComponent("Library/Caches/models/arhesstide/zphyr_qwen_v1-MLX-4bit")
+            .appendingPathComponent("Library/Caches/models/\(descriptor.cacheNamespace)/\(descriptor.cacheSlug)")
         if fm.fileExists(atPath: mlxDirect.path) {
             try? fm.removeItem(at: mlxDirect)
         }
@@ -335,8 +447,7 @@ final class AdvancedLLMFormatter {
             ) else { continue }
             for entry in entries {
                 let name = entry.lastPathComponent.lowercased()
-                if name.contains("models--arhesstide--zphyr_qwen_v1-mlx-4bit")
-                    || name.contains("zphyr_qwen_v1-mlx-4bit") {
+                if descriptor.cacheMatchHints.contains(where: { name.contains($0.lowercased()) }) {
                     try? fm.removeItem(at: entry)
                 }
             }
@@ -347,22 +458,34 @@ final class AdvancedLLMFormatter {
 
     /// Formats code identifiers in `text` using the local LLM.
     /// Returns `nil` on any failure — callers must fall back to `CodeFormatter`.
-    func format(_ text: String, style: CodeStyle, constraints: LLMFormattingConstraints) async -> String? {
-        if container == nil, AppState.shared.advancedModeInstalled {
-            log.notice("[AdvancedLLM] container missing while advancedModeInstalled=true; trying lazy load from disk cache")
-            await loadIfInstalled()
+    func format(
+        _ text: String,
+        style: CodeStyle,
+        constraints: LLMFormattingConstraints,
+        modelID: FormattingModelID? = nil
+    ) async -> String? {
+        let targetModelID = modelID ?? AppState.shared.activeFormattingModel
+
+        if (container == nil || loadedModelID != targetModelID),
+           Self.resolveInstallURL(for: targetModelID) != nil {
+            log.notice("[AdvancedLLM] container missing or mismatched; trying lazy load model=\(targetModelID.rawValue, privacy: .public)")
+            await loadIfInstalled(modelID: targetModelID)
         }
 
-        guard let container else {
+        guard let container, loadedModelID == targetModelID else {
             log.notice(
-                "[AdvancedLLM] skipped: model not loaded (container=nil advancedModeInstalled=\(AppState.shared.advancedModeInstalled, privacy: .public))"
+                "[AdvancedLLM] skipped: model not loaded model=\(targetModelID.rawValue, privacy: .public) loadedModel=\(self.loadedModelID?.rawValue ?? "none", privacy: .public)"
             )
             return nil
         }
 
         let inputWords = text.split(whereSeparator: \.isWhitespace).count
+        // Scale token budget to input length — voice dictation output is never much
+        // longer than the input. Capping avoids spending 20+ seconds on 512-token
+        // budgets when the actual output is 10-60 tokens.
+        let dynamicMaxTokens = max(64, min(constraints.maxTokens, inputWords * 4 + 48))
         log.notice(
-            "[AdvancedLLM] generating… input=\(inputWords, privacy: .public) words style=\(String(describing: style), privacy: .public) preview=\"\(Self.debugPreview(text), privacy: .public)\""
+            "[AdvancedLLM] generating… input=\(inputWords, privacy: .public) words maxTokens=\(dynamicMaxTokens, privacy: .public) style=\(String(describing: style), privacy: .public) preview=\"\(Self.debugPreview(text), privacy: .public)\""
         )
         let startTime = CFAbsoluteTimeGetCurrent()
         var promptMode = "unprepared"
@@ -392,7 +515,8 @@ final class AdvancedLLMFormatter {
             let prepared = try await prepareInput(
                 for: text,
                 systemPrompt: systemPrompt,
-                container: container
+                container: container,
+                modelID: targetModelID
             )
             promptMode = prepared.path.rawValue
             let lmInput = prepared.input
@@ -409,7 +533,7 @@ final class AdvancedLLMFormatter {
             let stream  = try await container.generate(
                 input: lmInput,
                 parameters: GenerateParameters(
-                    maxTokens: constraints.maxTokens,
+                    maxTokens: dynamicMaxTokens,
                     temperature: constraints.temperature
                 )
             )
@@ -496,9 +620,10 @@ final class AdvancedLLMFormatter {
     private func prepareInput(
         for text: String,
         systemPrompt: String,
-        container: ModelContainer
+        container: ModelContainer,
+        modelID: FormattingModelID
     ) async throws -> (input: LMInput, path: PromptPreparationPath) {
-        if await shouldUseRawAlpacaPrompt(container: container) {
+        if await shouldUseRawAlpacaPrompt(container: container, modelID: modelID) {
             let prompt = Self.alpacaPrompt(for: text)
 #if DEBUG
             log.notice(
@@ -522,14 +647,16 @@ final class AdvancedLLMFormatter {
         return (input, .chatTemplate)
     }
 
-    private func shouldUseRawAlpacaPrompt(container: ModelContainer) async -> Bool {
-        if Self.preferredExplicitInstallURL() != nil {
-            return true
-        }
+    private func shouldUseRawAlpacaPrompt(
+        container: ModelContainer,
+        modelID: FormattingModelID
+    ) async -> Bool {
+        let descriptor = FormattingModelCatalog.descriptor(for: modelID)
+        guard descriptor.prefersRawAlpacaPrompt else { return false }
         let configuration = await container.configuration
         let normalizedName = configuration.name.lowercased()
-        return normalizedName == Self.modelId.lowercased()
-            || normalizedName.contains("zphyr_qwen_v1-mlx-4bit")
+        return normalizedName == descriptor.huggingFaceModelID.lowercased()
+            || normalizedName.contains(descriptor.cacheSlug.lowercased())
     }
 
     nonisolated static func alpacaPrompt(for text: String) -> String {
@@ -704,15 +831,26 @@ final class AdvancedLLMFormatter {
 @MainActor
 final class AdvancedLLMFormatter {
     static let shared          = AdvancedLLMFormatter()
-    static let modelId         = "arhesstide/zphyr_qwen_v1-MLX-4bit"
-    static var overrideInstallURL: URL?
+    static let modelId         = FormattingModelCatalog.descriptor(for: .qwen3_4b).huggingFaceModelID
+    static var overrideInstallURL: URL? {
+        get { overrideInstallURLs[.qwen3_4b] }
+        set { overrideInstallURLs[.qwen3_4b] = newValue }
+    }
+    static var overrideInstallURLs: [FormattingModelID: URL] = [:]
     struct SanitizedGenerationOutput: Sendable {
         let rawText: String
         let cleanedText: String?
         let fallbackReason: String?
         let strippedReasoningTags: Bool
     }
-    static func resolveInstallURL() -> URL? { nil }
+    static func resolveInstallURL(for modelID: FormattingModelID) -> URL? {
+        if let override = overrideInstallURLs[modelID],
+           FileManager.default.fileExists(atPath: override.path) {
+            return override
+        }
+        return nil
+    }
+    static func resolveInstallURL() -> URL? { resolveInstallURL(for: AppState.shared.activeFormattingModel) }
     nonisolated static func sanitizeGeneratedOutput(
         _ rawOutput: String,
         requiredTerms: [String] = []
@@ -743,14 +881,29 @@ final class AdvancedLLMFormatter {
     var downloadSpeed: String    = ""
     var downloadedMB: String     = ""
     var isModelLoaded: Bool      = false
+    private(set) var loadedModelID: FormattingModelID?
+    private(set) var installingModelID: FormattingModelID?
     private let log = Logger(subsystem: "com.zphyr.app", category: "AdvancedLLMStub")
     private init() {}
-    func installModel()    async {}
+    func isModelLoaded(modelID: FormattingModelID) -> Bool { isModelLoaded && loadedModelID == modelID }
+    func installStatus(for modelID: FormattingModelID) -> FormattingModelInstallStatus {
+        if let installError {
+            return .unavailable(installError)
+        }
+        return Self.resolveInstallURL(for: modelID) != nil ? .installed : .notInstalled
+    }
+    func installModel(modelID: FormattingModelID? = nil) async {}
     func cancelInstall()         {}
-    func loadIfInstalled() async {}
-    func unload()                {}
-    static func removeModelFromDisk() {}
-    func format(_ text: String, style: CodeStyle, constraints: LLMFormattingConstraints) async -> String? {
+    func loadIfInstalled(modelID: FormattingModelID? = nil) async {}
+    func warmup() async          {}
+    func unload()                { loadedModelID = nil }
+    static func removeModelFromDisk(modelID: FormattingModelID? = nil) {}
+    func format(
+        _ text: String,
+        style: CodeStyle,
+        constraints: LLMFormattingConstraints,
+        modelID: FormattingModelID? = nil
+    ) async -> String? {
         log.error("[AdvancedLLMStub] format called but MLXLLM is unavailable; returning nil")
         return nil
     }

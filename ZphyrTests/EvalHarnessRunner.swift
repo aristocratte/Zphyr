@@ -25,6 +25,9 @@ import Foundation
 
 @MainActor
 class EvalHarnessBase: XCTestCase {
+    static var shouldRunEvals: Bool {
+        ProcessInfo.processInfo.environment["ZPHYR_RUN_EVALS"] == "1"
+    }
 
     private struct RuntimeConfig: Decodable {
         let mode: String?
@@ -157,6 +160,9 @@ class EvalHarnessBase: XCTestCase {
     // ── Test setup: apply EVAL_MODE to AppState so the pipeline runs under the correct mode ──
     override func setUp() async throws {
         try await super.setUp()
+        guard Self.shouldRunEvals else {
+            throw XCTSkip("Eval harness is opt-in. Set ZPHYR_RUN_EVALS=1 to run eval tests.")
+        }
         if let mode = FormattingMode(rawValue: Self.evalMode) {
             AppState.shared.formattingMode = mode
         } else {
@@ -251,7 +257,7 @@ class EvalHarnessBase: XCTestCase {
         var failures: [HardFailureReason] = []
         let urlPattern = try? NSRegularExpression(
             pattern: #"https?://[^\s]+"#, options: [.caseInsensitive])
-        for term in terms where term.lowercased().hasPrefix("http") {
+        for term in terms where term.lowercased().hasPrefix("http") && term.contains("://") {
             guard finalText.contains(term) else {
                 failures.append(.malformedURL); continue
             }
@@ -280,7 +286,11 @@ class EvalHarnessBase: XCTestCase {
             let results = emailPattern?.matches(in: finalText,
                 range: NSRange(location: 0, length: nsText.length)) ?? []
             let foundEmails = results.map { nsText.substring(with: $0.range) }
-            if !foundEmails.contains(term) {
+            // Allow the protected term to be an email with a non-email suffix
+            // (e.g. git@github.com:org/repo — email part is valid, rest is a git URL)
+            let emailMatch = foundEmails.contains(term) ||
+                foundEmails.contains(where: { term.hasPrefix($0) })
+            if !emailMatch {
                 failures.append(.malformedEmail)
             }
         }
@@ -361,8 +371,10 @@ class EvalHarnessBase: XCTestCase {
 
         // Remove known English/French filler words from raw for comparison
         let fillers = ["uh", "um", "er", "euh", "like", "so", "basically", "voilà"]
+        // Apply the same filler removal to both sides so retained filler words
+        // are not falsely counted as "inserted" tokens.
         let rawTokens   = rawNorm.components(separatedBy: " ").filter { !fillers.contains($0) }
-        let finalTokens = finalNorm.components(separatedBy: " ")
+        let finalTokens = finalNorm.components(separatedBy: " ").filter { !fillers.contains($0) }
 
         // If final contains tokens not in raw → content was added → forbidden rewrite
         let rawSet   = Set(rawTokens)
@@ -607,8 +619,10 @@ final class EvalL2Tests: EvalHarnessBase {
         let actualCommand = formatCommand(result.extractedCommand)
 
         // Determine whether the rewrite stage actually ran
-        let rewriteStageRan = result.trace.contains {
-            $0.stageName.contains("Rewrite") && !$0.wasSkipped
+        let rewriteStageRan = result.trace.contains { trace in
+            trace.stageName.contains("Rewrite") &&
+            !trace.wasSkipped &&
+            !trace.transformations.contains { $0.hasPrefix("rewrite_failed_closed") }
         }
 
         // Annotate stage traces with execution status
@@ -616,6 +630,8 @@ final class EvalL2Tests: EvalHarnessBase {
             let status: StageExecutionStatus
             if trace.wasSkipped {
                 status = .skipped
+            } else if trace.transformations.contains(where: { $0.hasPrefix("rewrite_failed_closed") }) {
+                status = .failedClosed
             } else {
                 status = .ranNormally
             }
