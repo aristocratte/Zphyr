@@ -29,6 +29,15 @@ __pycache__/
 # Local tooling metadata
 .claude/
 
-# Eval harness artifacts
-Evals/reports/
-Evals/metrics/.venv/
+# Build & release outputs
+output/
+dist/
+*.dmg
+*.zip
+
+# Xcode derived data (lowercase)
+.derivedData/
+
+# Eval harness (excluded from repo)
+Evals/
+*.py
