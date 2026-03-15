@@ -121,6 +121,9 @@ struct PreflightView: View {
     @State private var shortcutReveal: Int = 0
     @State private var shortcutKeyPressed: Bool = false
 
+    // Observe AppState so SwiftUI invalidates this view when mic/accessibility state changes
+    @State private var appState = AppState.shared
+
     @State private var permissionPollTask: Task<Void, Never>? = nil
     @State private var featTask: Task<Void, Never>? = nil
     @State private var advancedModeInstallTask: Task<Void, Never>? = nil
@@ -2339,7 +2342,6 @@ struct PreflightView: View {
             .padding(.bottom, 24)
             .padding(.horizontal, 44)
 
-            let appState = AppState.shared
             VStack(spacing: 10) {
                 // Microphone
                 PFPermissionCard(

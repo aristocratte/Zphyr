@@ -159,6 +159,11 @@ struct HomeView: View {
                     ModelStatCard()
                 }
 
+                // ── Update banner ─────────────────────────────────────
+                if UpdateChecker.shared.state.hasUpdate {
+                    UpdateBanner()
+                }
+
                 // ── Live dictation banner ─────────────────────────────
                 if appState.currentDictationSession != nil {
                     LiveDictationBanner()
@@ -773,6 +778,92 @@ let mockTranscriptions: [TranscriptionEntry] = [
         date: "28 fév, 16h11", duration: "4m 22s", wordCount: 318, language: "MD"
     ),
 ]
+
+// MARK: - Update Banner
+
+private struct UpdateBanner: View {
+    @State private var checker = UpdateChecker.shared
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(Color(hex: "#22D3B8"))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(bannerTitle)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Color(hex: "#111111"))
+                Text(bannerSubtitle)
+                    .font(.system(size: 11))
+                    .foregroundColor(Color(hex: "#6A6A65"))
+            }
+
+            Spacer()
+
+            if case .updateAvailable = checker.state {
+                Button {
+                    checker.downloadAndInstall()
+                } label: {
+                    Text(t("Installer", "Install", "Instalar", "安装", "インストール", "Установить"))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(Color(hex: "#22D3B8"))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            } else if let progress = checker.state.downloadProgress {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .frame(width: 80)
+                    .tint(Color(hex: "#22D3B8"))
+            } else if case .installing = checker.state {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .scaleEffect(0.7)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(hex: "#22D3B8").opacity(0.08))
+                .overlay(RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color(hex: "#22D3B8").opacity(0.25), lineWidth: 1))
+        )
+    }
+
+    private var bannerTitle: String {
+        if let v = checker.state.latestVersion {
+            return t("Zphyr \(v) disponible", "Zphyr \(v) available",
+                     "Zphyr \(v) disponible", "Zphyr \(v) 可用",
+                     "Zphyr \(v) が利用可能", "Доступна Zphyr \(v)")
+        }
+        if checker.state.downloadProgress != nil {
+            return t("Téléchargement…", "Downloading…", "Descargando…", "下载中…", "ダウンロード中…", "Загрузка…")
+        }
+        return t("Installation…", "Installing…", "Instalando…", "安装中…", "インストール中…", "Установка…")
+    }
+
+    private var bannerSubtitle: String {
+        if checker.state.downloadProgress != nil {
+            return t("La mise à jour sera appliquée automatiquement.",
+                     "The update will be applied automatically.",
+                     "La actualización se aplicará automáticamente.",
+                     "更新将自动应用。",
+                     "アップデートは自動的に適用されます。",
+                     "Обновление будет применено автоматически.")
+        }
+        return t("Mise à jour automatique disponible.",
+                 "Automatic update available.",
+                 "Actualización automática disponible.",
+                 "有自动更新可用。",
+                 "自動アップデートが利用可能です。",
+                 "Доступно автоматическое обновление.")
+    }
+}
 
 #Preview {
     HomeView()

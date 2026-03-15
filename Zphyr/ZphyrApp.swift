@@ -85,6 +85,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             ShortcutManager.shared.startListening()
         }
 
+        // Check for updates in background (delayed to not slow down launch)
+        if hasCompletedPreflight {
+            UpdateChecker.shared.checkInBackground()
+        }
+
         // Eagerly preload the formatter model in the background so the first
         // dictation doesn't pay the cold-load + shader compilation cost.
         if hasCompletedPreflight && AppState.shared.advancedModeInstalled
@@ -143,6 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             ShortcutManager.shared.startListening()
+            UpdateChecker.shared.checkInBackground()
         }
     }
 

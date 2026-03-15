@@ -54,6 +54,8 @@ final class DictationEngine {
 
     /// Prevents overlapping dictation sessions (start/stop race conditions).
     private var isDictating: Bool = false
+    /// Prevents re-entrant calls to startDictation() during the async mic-permission check.
+    private var isArming: Bool = false
 
     /// True while a previous transcription/insertion is still in-flight.
     /// Prevents a new dictation from starting until the pipeline is fully done.
@@ -412,9 +414,12 @@ final class DictationEngine {
 
     func startDictation() async {
         // ── Guard: no overlapping sessions ───────────────────────────────────
-        guard !isDictating else { return }
+        guard !isDictating, !isArming else { return }
         // ── Guard: previous transcription still in-flight ────────────────────
         guard !isProcessing else { return }
+        // Claim the slot immediately to prevent re-entry across async suspension points
+        isArming = true
+        defer { isArming = false }
 
         let state = AppState.shared
         targetApp = NSWorkspace.shared.frontmostApplication
