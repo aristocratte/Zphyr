@@ -12,17 +12,22 @@ import Observation
 // MARK: - Overlay Window Controller
 
 final class DictationOverlayController: NSObject {
-    private var overlayWindow: NSWindow?
+    private var overlayWindow: DictationOverlayPanel?
+    private var pendingHideWorkItem: DispatchWorkItem?
 
     func show() {
+        pendingHideWorkItem?.cancel()
         if overlayWindow == nil { createWindow() }
         overlayWindow?.orderFrontRegardless()
     }
 
-    func hide() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            self.overlayWindow?.orderOut(nil)
+    func hide(after delay: TimeInterval = 0.6) {
+        pendingHideWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.overlayWindow?.orderOut(nil)
         }
+        pendingHideWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func createWindow() {
@@ -37,12 +42,14 @@ final class DictationOverlayController: NSObject {
         let x = screen.frame.midX - width / 2
         let y = screen.frame.minY + dockHeight
 
-        let window = NSWindow(
+        let window = DictationOverlayPanel(
             contentRect: NSRect(x: x, y: y, width: width, height: height),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
+        window.isFloatingPanel = true
+        window.hidesOnDeactivate = false
         window.level = .screenSaver   // above everything, including dock
         window.backgroundColor = .clear
         window.isOpaque = false
@@ -56,6 +63,11 @@ final class DictationOverlayController: NSObject {
         window.contentView?.addSubview(hostingView)
         overlayWindow = window
     }
+}
+
+private final class DictationOverlayPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
 }
 
 // MARK: - Dictionary Suggestion Popup
@@ -302,8 +314,8 @@ struct DictationOverlayView: View {
                             .foregroundColor(Color(hex: "#FFB4A8"))
                     }
                 }
-                if let friendlyFallbackText {
-                    Text(friendlyFallbackText)
+                if let overlayDetailText {
+                    Text(overlayDetailText)
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.white.opacity(0.62))
                         .lineLimit(1)
@@ -386,8 +398,8 @@ struct DictationOverlayView: View {
                         .foregroundColor(.white.opacity(0.68))
                         .lineLimit(1)
                         .truncationMode(.tail)
-                } else if let friendlyFallbackText {
-                    Text(friendlyFallbackText)
+                } else if let overlayDetailText {
+                    Text(overlayDetailText)
                         .font(.system(size: 10.5, weight: .medium))
                         .foregroundColor(.white.opacity(0.68))
                         .lineLimit(1)
@@ -421,6 +433,13 @@ struct DictationOverlayView: View {
             outputProfile: session.outputProfile,
             languageCode: AppState.shared.uiDisplayLanguage.rawValue
         )
+    }
+
+    private var overlayDetailText: String? {
+        if let errorMessage = session?.errorMessage, !errorMessage.isEmpty {
+            return errorMessage
+        }
+        return friendlyFallbackText
     }
 
     // MARK: - Pill background

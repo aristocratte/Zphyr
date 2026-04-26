@@ -41,6 +41,18 @@ private enum PreflightSlide: Int, CaseIterable {
     case shortcut     = 8
     case ready        = 9
 
+    static let flow: [PreflightSlide] = [
+        .welcome,
+        .speed,
+        .features,
+        .demos,
+        .language,
+        .model,
+        .permissions,
+        .shortcut,
+        .ready,
+    ]
+
     func stepLabel(for lang: String) -> String {
         switch self {
         case .welcome:
@@ -74,7 +86,6 @@ struct PreflightView: View {
 
     @State private var currentSlide: PreflightSlide = .welcome
     @State private var goingForward: Bool = true
-    @State private var didStartModel: Bool = false
     @State private var glowPulse: CGFloat = 1.0
     @State private var glowOpacity: Double = 0.14
     @State private var waveOffset: CGFloat = 0
@@ -121,14 +132,15 @@ struct PreflightView: View {
     @State private var shortcutReveal: Int = 0
     @State private var shortcutKeyPressed: Bool = false
 
-    // Observe AppState so SwiftUI invalidates this view when mic/accessibility state changes
-    @State private var appState = AppState.shared
+    // Explicit permission state — @State guarantees SwiftUI re-render when changed
+    @State private var micGranted = false
+    @State private var micDenied  = false
+    @State private var axGranted  = false
 
     @State private var permissionPollTask: Task<Void, Never>? = nil
     @State private var featTask: Task<Void, Never>? = nil
     @State private var advancedModeInstallTask: Task<Void, Never>? = nil
     @State private var welcomeRevealTask: Task<Void, Never>? = nil
-    @State private var modelAutoAdvanceTask: Task<Void, Never>? = nil
     @State private var advancedModeAutoAdvanceTask: Task<Void, Never>? = nil
     @State private var modelRevealTask: Task<Void, Never>? = nil
     @State private var demoRevealTask: Task<Void, Never>? = nil
@@ -139,6 +151,14 @@ struct PreflightView: View {
     @State private var speedTypingTask: Task<Void, Never>? = nil
     @State private var speedVoiceTask: Task<Void, Never>? = nil
     @State private var showModelTest = false
+    @State private var preferredPreflightASRBackend: ASRBackendKind = .appleSpeechAnalyzer
+    @State private var selectedASRBackendsForInstall: Set<ASRBackendKind> = []
+    @State private var selectedFormattingModelsForInstall: Set<FormattingModelID> = []
+    @State private var preflightModelInstallTask: Task<Void, Never>? = nil
+    @State private var installingASRBackend: ASRBackendKind? = nil
+    @State private var installingFormattingModel: FormattingModelID? = nil
+    @State private var didInitializeModelSelection = false
+    @State private var modelSelectionNotice: String? = nil
 
     private var modelStatus: ModelStatus    { AppState.shared.modelStatus }
     private var downloadStats: DownloadStats { AppState.shared.downloadStats }
@@ -158,6 +178,41 @@ struct PreflightView: View {
         guard case .downloading = modelStatus else { return false }
         guard !AppState.shared.isDownloadPaused else { return false }
         return downloadStats.bytesReceived < 256_000 && downloadStats.speedBytesPerSec < 20_000
+    }
+    private var preflightInstallPlan: PreflightModelInstallPlan {
+        PreflightModelInstallPlan(
+            preferredASRBackend: preferredPreflightASRBackend,
+            selectedASRBackends: selectedASRBackendsForInstall,
+            selectedFormattingModels: selectedFormattingModelsForInstall,
+            availableASRDescriptors: ASRBackendCatalog.descriptorsByKind,
+            availableFormattingModels: FormattingModelID.allCases
+        )
+    }
+    private var isPreflightModelInstalling: Bool {
+        preflightModelInstallTask != nil || AdvancedLLMFormatter.shared.isInstalling || {
+            if case .downloading = modelStatus { return true }
+            if case .loading = modelStatus { return true }
+            return false
+        }()
+    }
+    private var selectedModelDownloadBytes: Int64 {
+        let asrBytes = selectedASRBackendsForInstall.reduce(Int64(0)) { total, kind in
+            total + (ASRBackendCatalog.descriptor(for: kind).approxModelBytes ?? 0)
+        }
+        let formatterBytes = selectedFormattingModelsForInstall.reduce(Int64(0)) { total, modelID in
+            total + FormattingModelCatalog.descriptor(for: modelID).approximateBytes
+        }
+        return asrBytes + formatterBytes
+    }
+    private var canContinueAfterModelSelection: Bool {
+        guard !isPreflightModelInstalling else { return false }
+        let descriptor = ASRBackendCatalog.descriptor(for: preferredPreflightASRBackend)
+        if !asrChoiceIsAvailable(preferredPreflightASRBackend) {
+            return false
+        }
+        guard descriptor.requiresModelInstall else { return true }
+        if ASRBackendCatalog.isInstalled(preferredPreflightASRBackend) { return true }
+        return AppState.shared.activeASRBackend == preferredPreflightASRBackend && modelStatus.isReady
     }
 
     private func percentLabel(_ progress: Double) -> String {
@@ -202,19 +257,14 @@ struct PreflightView: View {
         .onAppear {
             AppState.shared.refreshPerformanceProfile()
             DictationEngine.shared.refreshASRBackendSelection()
+            initializeModelSelectionIfNeeded()
             startBackgroundAnimations()
-            startModelInBackground()
+            Task { await DictationEngine.shared.loadInstalledModelIfAvailable() }
             startWelcomeReveal()
         }
         .onChange(of: modelStatus) { _, newStatus in
-            modelAutoAdvanceTask?.cancel()
-            modelAutoAdvanceTask = nil
             if newStatus.isReady && currentSlide == .model {
-                modelAutoAdvanceTask = Task {
-                    try? await Task.sleep(for: .milliseconds(1100))
-                    guard !Task.isCancelled, currentSlide == .model else { return }
-                    advance()
-                }
+                modelSelectionNotice = t("Modèle de transcription prêt.", "Transcription model ready.", "Modelo de transcripción listo.", "转写模型已就绪。", "文字起こしモデルの準備ができました。", "Модель транскрибации готова.")
             }
         }
         .onChange(of: AppState.shared.advancedModeInstalled) { _, installed in
@@ -237,11 +287,14 @@ struct PreflightView: View {
             cancelSlideRevealTasks()
 
             if newSlide == .permissions {
+                // Immediate snapshot
+                syncPermissionState()
                 permissionPollTask = Task {
-                    while !Task.isCancelled, currentSlide == .permissions {
+                    while !Task.isCancelled {
                         AppState.shared.refreshMicPermission()
                         AppState.shared.refreshAccessibility()
-                        try? await Task.sleep(for: .seconds(1))
+                        syncPermissionState()
+                        try? await Task.sleep(for: .milliseconds(500))
                     }
                 }
             }
@@ -258,7 +311,6 @@ struct PreflightView: View {
                     guard !Task.isCancelled, currentSlide == .model else { return }
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { modelReveal = 3 }
                 }
-                Task { await startLoadModelIfNeeded() }
             }
             if newSlide == .model && modelStatus.isReady {
                 modelReveal = 3
@@ -340,12 +392,14 @@ struct PreflightView: View {
             cancelWelcomeRevealTask()
             cancelSpeedTasks()
             cancelSlideRevealTasks()
-            modelAutoAdvanceTask?.cancel()
-            modelAutoAdvanceTask = nil
             advancedModeAutoAdvanceTask?.cancel()
             advancedModeAutoAdvanceTask = nil
             advancedModeInstallTask?.cancel()
             advancedModeInstallTask = nil
+            preflightModelInstallTask?.cancel()
+            preflightModelInstallTask = nil
+            installingASRBackend = nil
+            installingFormattingModel = nil
         }
         .sheet(isPresented: $showModelTest) {
             ModelTestView()
@@ -391,8 +445,9 @@ struct PreflightView: View {
 
     private var stepIndicator: some View {
         HStack(spacing: 5) {
-            ForEach(PreflightSlide.allCases, id: \.rawValue) { slide in
-                let isCompleted = slide.rawValue < currentSlide.rawValue
+            let currentIndex = PreflightSlide.flow.firstIndex(of: currentSlide) ?? 0
+            ForEach(Array(PreflightSlide.flow.enumerated()), id: \.element.rawValue) { index, slide in
+                let isCompleted = index < currentIndex
                 let isCurrent   = slide == currentSlide
                 Capsule()
                     .fill(
@@ -492,10 +547,7 @@ struct PreflightView: View {
                 if currentSlide.rawValue == 0 { return false }
                 if currentSlide == .ready { return false }
                 if currentSlide == .model {
-                    // Allow back only if not actively downloading/loading
-                    if case .downloading = modelStatus { return false }
-                    if case .loading = modelStatus { return false }
-                    return true
+                    return !isPreflightModelInstalling
                 }
                 if currentSlide == .advancedMode {
                     return !AdvancedLLMFormatter.shared.isInstalling
@@ -579,22 +631,28 @@ struct PreflightView: View {
             ) { advance() }
 
         case .model:
-            if modelStatus.isReady {
-                PFPrimaryButton(
-                    label: t("Continuer", "Continue", "Continuar", "继续", "続ける", "Продолжить"),
-                    icon: "arrow.right"
-                ) { advance() }
-            } else {
+            if isPreflightModelInstalling {
                 HStack(spacing: 8) {
                     ProgressView()
                         .scaleEffect(0.7)
                         .tint(Color.zTextSub)
-                    Text(
-                        t("Installation…", "Installing…", "Instalando…", "安装中…", "インストール中…", "Установка…")
-                    )
-                    .font(.system(size: 13))
-                    .foregroundColor(Color.zTextSub)
+                    Text(t("Installation…", "Installing…", "Instalando…", "安装中…", "インストール中…", "Установка…"))
+                        .font(.system(size: 13))
+                        .foregroundColor(Color.zTextSub)
                 }
+            } else {
+                PFPrimaryButton(
+                    label: canContinueAfterModelSelection
+                        ? t("Continuer", "Continue", "Continuar", "继续", "続ける", "Продолжить")
+                        : t("Choisir un moteur", "Choose an engine", "Elegir un motor", "选择引擎", "エンジンを選択", "Выберите движок"),
+                    icon: "arrow.right"
+                ) {
+                    guard canContinueAfterModelSelection else { return }
+                    commitModelSelectionForContinue()
+                    advance()
+                }
+                .disabled(!canContinueAfterModelSelection)
+                .opacity(canContinueAfterModelSelection ? 1 : 0.55)
             }
 
         case .advancedMode:
@@ -644,18 +702,20 @@ struct PreflightView: View {
     // MARK: - Navigation helpers
 
     private func advance() {
-        guard currentSlide.rawValue < PreflightSlide.allCases.count - 1 else { return }
+        guard let index = PreflightSlide.flow.firstIndex(of: currentSlide),
+              index < PreflightSlide.flow.count - 1 else { return }
         goingForward = true
         withAnimation(.spring(response: 0.46, dampingFraction: 0.84)) {
-            currentSlide = PreflightSlide(rawValue: currentSlide.rawValue + 1) ?? currentSlide
+            currentSlide = PreflightSlide.flow[index + 1]
         }
     }
 
     private func goBack() {
-        guard currentSlide.rawValue > 0 else { return }
+        guard let index = PreflightSlide.flow.firstIndex(of: currentSlide),
+              index > 0 else { return }
         goingForward = false
         withAnimation(.spring(response: 0.46, dampingFraction: 0.84)) {
-            currentSlide = PreflightSlide(rawValue: currentSlide.rawValue - 1) ?? currentSlide
+            currentSlide = PreflightSlide.flow[index - 1]
         }
     }
 
@@ -837,20 +897,125 @@ struct PreflightView: View {
 
     // MARK: - Model helpers
 
-    private func startModelInBackground() {
-        guard !didStartModel else { return }
-        didStartModel = true
-        Task { await startLoadModelIfNeeded() }
+    private func initializeModelSelectionIfNeeded() {
+        guard !didInitializeModelSelection else { return }
+        didInitializeModelSelection = true
+
+        let currentPreferred = AppState.shared.preferredASRBackend
+        let currentDescriptor = ASRBackendCatalog.descriptor(for: currentPreferred)
+        if !asrChoiceIsAvailable(currentPreferred) {
+            preferredPreflightASRBackend = .whisperKit
+        } else if currentDescriptor.requiresModelInstall,
+                  !ASRBackendCatalog.isInstalled(currentPreferred),
+                  AppleSpeechAnalyzerBackend.isRuntimeSupported {
+            preferredPreflightASRBackend = .appleSpeechAnalyzer
+        } else {
+            preferredPreflightASRBackend = currentPreferred
+        }
+
+        if ASRBackendCatalog.isInstalled(preferredPreflightASRBackend) {
+            selectedASRBackendsForInstall.insert(preferredPreflightASRBackend)
+        }
+        if AdvancedLLMFormatter.resolveInstallURL(for: AppState.shared.activeFormattingModel) != nil {
+            selectedFormattingModelsForInstall.insert(AppState.shared.activeFormattingModel)
+        }
     }
 
-    private func startLoadModelIfNeeded() async {
-        guard !modelStatus.isReady else { return }
-        await DictationEngine.shared.loadModel()
+    private func commitModelSelectionForContinue() {
+        AppState.shared.preferredASRBackend = preferredPreflightASRBackend
+        DictationEngine.shared.setASRBackend(preferredPreflightASRBackend)
+        if ASRBackendCatalog.isInstalled(preferredPreflightASRBackend) {
+            Task { await DictationEngine.shared.loadInstalledModelIfAvailable() }
+        }
+    }
+
+    private func installSelectedPreflightModels() {
+        guard preflightModelInstallTask == nil else { return }
+        let plan = preflightInstallPlan
+        guard plan.hasDownloads else {
+            modelSelectionNotice = t(
+                "Aucun téléchargement sélectionné.",
+                "No download selected.",
+                "No se seleccionó ninguna descarga.",
+                "未选择下载。",
+                "ダウンロードは選択されていません。",
+                "Загрузка не выбрана."
+            )
+            return
+        }
+
+        modelSelectionNotice = nil
+        preflightModelInstallTask = Task {
+            defer {
+                preflightModelInstallTask = nil
+                installingASRBackend = nil
+                installingFormattingModel = nil
+            }
+
+            for backend in plan.asrBackendsToInstall {
+                guard !Task.isCancelled else { return }
+                installingASRBackend = backend
+                AppState.shared.preferredASRBackend = backend
+                DictationEngine.shared.setASRBackend(backend)
+                await DictationEngine.shared.loadModel()
+                if !AppState.shared.modelStatus.isReady {
+                    modelSelectionNotice = t(
+                        "L'installation du moteur de transcription a échoué.",
+                        "The transcription engine install failed.",
+                        "Falló la instalación del motor de transcripción.",
+                        "转写引擎安装失败。",
+                        "文字起こしエンジンのインストールに失敗しました。",
+                        "Не удалось установить движок транскрибации."
+                    )
+                    return
+                }
+            }
+
+            for modelID in plan.formattingModelsToInstall {
+                guard !Task.isCancelled else { return }
+                installingFormattingModel = modelID
+                AppState.shared.activeFormattingModel = modelID
+                AppState.shared.formattingMode = PerformanceRouter.shared.effectiveFormattingMode(
+                    preferred: .advanced,
+                    profile: AppState.shared.performanceProfile
+                )
+                await AdvancedLLMFormatter.shared.installModel(modelID: modelID)
+                if !AdvancedLLMFormatter.shared.installStatus(for: modelID).isInstalled {
+                    modelSelectionNotice = t(
+                        "L'installation du modèle de formatage a échoué.",
+                        "The formatting model install failed.",
+                        "Falló la instalación del modelo de formateo.",
+                        "格式化模型安装失败。",
+                        "整形モデルのインストールに失敗しました。",
+                        "Не удалось установить модель форматирования."
+                    )
+                    return
+                }
+            }
+
+            AppState.shared.preferredASRBackend = plan.activeASRBackend
+            DictationEngine.shared.setASRBackend(plan.activeASRBackend)
+            await DictationEngine.shared.loadInstalledModelIfAvailable()
+            modelSelectionNotice = t(
+                "Sélection installée. Tu peux continuer.",
+                "Selection installed. You can continue.",
+                "Selección instalada. Puedes continuar.",
+                "选择已安装，可以继续。",
+                "選択したモデルをインストールしました。続行できます。",
+                "Выбранные модели установлены. Можно продолжить."
+            )
+        }
     }
 
     private func cancelWelcomeRevealTask() {
         welcomeRevealTask?.cancel()
         welcomeRevealTask = nil
+    }
+
+    private func syncPermissionState() {
+        micGranted = AppState.shared.micPermission == .granted
+        micDenied  = AppState.shared.micPermission == .denied
+        axGranted  = AppState.shared.accessibilityGranted
     }
 
     private func cancelSlideRevealTasks() {
@@ -1984,224 +2149,282 @@ struct PreflightView: View {
     // ═══════════════════════════════════════════════════════════
 
     private var modelSlide: some View {
-        VStack(spacing: 0) {
-            Spacer()
-
-            // ── ASR backend picker ─────────────────────────────────────
-            PFASRBackendPicker(
-                selected: AppState.shared.preferredASRBackend,
-                isDownloading: {
-                    if case .downloading = modelStatus { return true }
-                    return false
-                }(),
-                onChange: { newBackend in
-                    AppState.shared.preferredASRBackend = newBackend
-                    DictationEngine.shared.refreshASRBackendSelection()
-                    Task { await DictationEngine.shared.loadModel() }
-                }
-            )
-            .padding(.bottom, 20)
-            .opacity(modelReveal >= 1 ? 1 : 0)
-            .animation(.spring(response: 0.5, dampingFraction: 0.82), value: modelReveal)
-
-            // ── Ring + center ─────────────────────────────────────────
-            ZStack {
-                // Ambient glow
-                Circle()
-                    .fill(
-                        modelStatus.isReady
-                            ? Color.zAccent.opacity(0.18)
-                            : (modelStatus.progress > 0 ? Color.zBlue.opacity(0.10) : Color.zBlue.opacity(0.05))
-                    )
-                    .frame(width: 220, height: 220)
-                    .blur(radius: 32)
-                    .animation(.easeInOut(duration: 0.6), value: modelStatus.isReady)
-
-                // Track
-                Circle()
-                    .stroke(Color.black.opacity(0.05), lineWidth: 8)
-                    .frame(width: 148, height: 148)
-
-                // Progress arc
-                Circle()
-                    .trim(from: 0, to: CGFloat(modelStatus.progress))
-                    .stroke(
-                        LinearGradient(
-                            colors: modelStatus.isReady
-                                ? [Color.zAccent, Color(hex: "34D399")]
-                                : [Color.zAccent, Color.zBlue],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        style: StrokeStyle(lineWidth: 8, lineCap: .round)
-                    )
-                    .frame(width: 148, height: 148)
-                    .rotationEffect(.degrees(-90))
-                    .animation(.easeInOut(duration: 0.35), value: modelStatus.progress)
-
-                // Center content
-                Group {
-                    if modelStatus.isReady {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 34, weight: .bold))
-                            .foregroundColor(Color.zAccent)
-                            .transition(.scale.combined(with: .opacity))
-                    } else if case .failed = modelStatus {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 30, weight: .bold))
-                            .foregroundColor(Color.zRed)
-                            .transition(.scale.combined(with: .opacity))
-                    } else if case .loading = modelStatus {
-                        VStack(spacing: 4) {
-                            Image(systemName: "memorychip")
-                                .font(.system(size: 22, weight: .medium))
-                                .foregroundColor(Color.zAccent)
-                                .symbolEffect(.pulse, isActive: true)
-                            Text("Neural\nEngine")
-                                .font(.system(size: 8, weight: .bold))
-                                .foregroundColor(Color.zTextDim)
-                                .multilineTextAlignment(.center)
-                                .tracking(0.5)
-                        }
-                    } else if isPreparingModelDownload {
-                        VStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(Color.zAccent)
-                            Text(t(
-                                "Connexion",
-                                "Connecting",
-                                "Conexión",
-                                "连接中",
-                                "接続中",
-                                "Подключение"
-                            ))
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundColor(Color.zTextDim)
-                            .tracking(0.3)
-                        }
-                    } else {
-                        Text(percentLabel(modelStatus.progress))
-                            .font(.system(size: 28, weight: .bold, design: .rounded).monospacedDigit())
-                            .foregroundColor(Color.zText)
-                            .contentTransition(.numericText())
-                            .animation(.easeInOut(duration: 0.28), value: modelStatus.progress)
-                    }
-                }
-                .animation(.spring(response: 0.4, dampingFraction: 0.8), value: modelStatus.isReady)
-            }
-            .opacity(modelReveal >= 1 ? 1 : 0)
-            .scaleEffect(modelReveal >= 1 ? 1 : 0.85)
-            .animation(.spring(response: 0.5, dampingFraction: 0.8), value: modelReveal)
-            .padding(.bottom, 28)
-
-            // ── Status title ──────────────────────────────────────────
-            Text(modelTitleText)
-                .font(.system(size: 24, weight: .bold, design: .rounded))
+        VStack(spacing: 18) {
+            VStack(spacing: 8) {
+                Text(t(
+                    "Choisis les modèles à installer.",
+                    "Choose which models to install.",
+                    "Elige qué modelos instalar.",
+                    "选择要安装的模型。",
+                    "インストールするモデルを選んでください。",
+                    "Выберите модели для установки."
+                ))
+                .font(.system(size: 26, weight: .bold, design: .rounded))
                 .foregroundColor(Color.zText)
-                .multilineTextAlignment(.center)
-                .contentTransition(.opacity)
-                .animation(.easeInOut(duration: 0.3), value: modelTitleText)
-                .opacity(modelReveal >= 2 ? 1 : 0)
-                .offset(y: modelReveal >= 2 ? 0 : 6)
-                .animation(.spring(response: 0.5, dampingFraction: 0.82), value: modelReveal)
-                .padding(.bottom, 8)
 
-            // ── Status subtitle ───────────────────────────────────────
-            Text(modelSubtitleText)
-                .font(.system(size: 14))
+                Text(t(
+                    "Rien ne se télécharge tout seul : sélectionne un moteur actif, coche seulement les modèles voulus, puis lance l'installation.",
+                    "Nothing downloads by itself: pick the active engine, check only the models you want, then start install.",
+                    "Nada se descarga solo: elige el motor activo, marca solo los modelos deseados y empieza la instalación.",
+                    "不会自动下载：选择当前引擎，只勾选需要的模型，然后开始安装。",
+                    "自動ダウンロードはありません。使うエンジンを選び、必要なモデルだけチェックしてインストールします。",
+                    "Ничего не скачивается само: выберите активный движок, отметьте нужные модели и запустите установку."
+                ))
+                .font(.system(size: 13))
                 .foregroundColor(Color.zTextSub)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
-                .padding(.horizontal, 64)
-                .contentTransition(.opacity)
-                .animation(.easeInOut(duration: 0.3), value: modelSubtitleText)
-                .opacity(modelReveal >= 2 ? 1 : 0)
-                .animation(.spring(response: 0.5, dampingFraction: 0.82), value: modelReveal)
-                .padding(.bottom, 24)
-
-            // ── Download detail card ──────────────────────────────────
-            if asrRequiresInstall, case .downloading = modelStatus {
-                DownloadCard(
-                    progress: modelStatus.progress,
-                    stats: downloadStats,
-                    isPaused: AppState.shared.isDownloadPaused,
-                    lang: lang
-                )
-                .frame(maxWidth: 360)
-                .padding(.bottom, 20)
-                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                .frame(maxWidth: 760)
             }
+            .opacity(modelReveal >= 1 ? 1 : 0)
+            .offset(y: modelReveal >= 1 ? 0 : 8)
 
-            // ── Model info chips ──────────────────────────────────────
-            HStack(spacing: 8) {
-                if asrRequiresInstall {
-                    PFInfoChip(icon: "cpu", text: asrDescriptor.displayName)
-                    PFInfoChip(icon: "memorychip", text: "MLX 8-bit · ANE")
-                } else {
-                    PFInfoChip(icon: "apple.logo", text: "Apple Speech Analyzer")
-                    PFInfoChip(icon: "bolt.horizontal", text: t("Aucun téléchargement", "No download", "Sin descarga", "无需下载", "ダウンロード不要", "Без загрузки"))
+            HStack(alignment: .top, spacing: 16) {
+                PFModelPanel(
+                    title: t("Transcription", "Transcription", "Transcripción", "转写", "文字起こし", "Транскрибация"),
+                    subtitle: t("Le moteur utilisé pour transformer la voix en texte.", "The engine used to turn voice into text.", "El motor que convierte voz en texto.", "将语音转换为文本的引擎。", "音声をテキストに変えるエンジン。", "Движок преобразования речи в текст."),
+                    icon: "waveform.and.mic",
+                    color: Color.zBlue
+                ) {
+                    VStack(spacing: 8) {
+                        ForEach(ASRBackendCatalog.allDescriptors, id: \.kind) { descriptor in
+                            PFModelChoiceRow(
+                                icon: asrChoiceIcon(for: descriptor.kind),
+                                title: descriptor.displayName,
+                                subtitle: asrChoiceSubtitle(for: descriptor),
+                                meta: descriptor.modelSizeLabel ?? t("Aucun téléchargement", "No download", "Sin descarga", "无需下载", "ダウンロード不要", "Без загрузки"),
+                                status: asrChoiceStatus(for: descriptor.kind).text,
+                                statusColor: asrChoiceStatus(for: descriptor.kind).color,
+                                isActive: preferredPreflightASRBackend == descriptor.kind,
+                                isChecked: selectedASRBackendsForInstall.contains(descriptor.kind),
+                                canToggleInstall: descriptor.requiresModelInstall,
+                                isDisabled: isPreflightModelInstalling || !asrChoiceIsAvailable(descriptor.kind),
+                                isInstalling: installingASRBackend == descriptor.kind
+                            ) {
+                                guard asrChoiceIsAvailable(descriptor.kind) else { return }
+                                preferredPreflightASRBackend = descriptor.kind
+                                modelSelectionNotice = nil
+                            } onToggleInstall: {
+                                toggleASRInstallSelection(descriptor.kind)
+                            }
+                        }
+                    }
                 }
-                PFInfoChip(
-                    icon: "lock.shield",
-                    text: t("100% local", "100% local", "100% local", "100% 本地", "100% ローカル", "100% локально")
-                )
-            }
-            .opacity(modelReveal >= 3 ? 1 : 0)
-            .offset(y: modelReveal >= 3 ? 0 : 6)
-            .animation(.spring(response: 0.5, dampingFraction: 0.82), value: modelReveal)
-            .padding(.bottom, 20)
+                .opacity(modelReveal >= 2 ? 1 : 0)
+                .offset(y: modelReveal >= 2 ? 0 : 12)
 
-            // ── Mic test when ready ───────────────────────────────────
-            if modelStatus.isReady {
+                PFModelPanel(
+                    title: t("Formatage", "Formatting", "Formateo", "格式化", "整形", "Форматирование"),
+                    subtitle: t("Optionnel : modèle local pour réécrire et nettoyer le texte.", "Optional: local model to rewrite and clean text.", "Opcional: modelo local para reescribir y limpiar texto.", "可选：用于重写和清理文本的本地模型。", "任意: テキストを整えるローカルモデル。", "Опционально: локальная модель для правки текста."),
+                    icon: "sparkles",
+                    color: Color.zPurple
+                ) {
+                    VStack(spacing: 8) {
+                        ForEach(FormattingModelCatalog.all) { descriptor in
+                            PFModelChoiceRow(
+                                icon: "brain.head.profile",
+                                title: descriptor.id.displayName(for: lang),
+                                subtitle: descriptor.id.shortDescription(for: lang),
+                                meta: ByteCountFormatter.string(fromByteCount: descriptor.approximateBytes, countStyle: .file),
+                                status: formattingChoiceStatus(for: descriptor.id).text,
+                                statusColor: formattingChoiceStatus(for: descriptor.id).color,
+                                isActive: AppState.shared.activeFormattingModel == descriptor.id,
+                                isChecked: selectedFormattingModelsForInstall.contains(descriptor.id),
+                                canToggleInstall: true,
+                                isDisabled: isPreflightModelInstalling || !isProModeUnlocked,
+                                isInstalling: installingFormattingModel == descriptor.id
+                            ) {
+                                AppState.shared.activeFormattingModel = descriptor.id
+                                modelSelectionNotice = nil
+                            } onToggleInstall: {
+                                toggleFormattingInstallSelection(descriptor.id)
+                            }
+                        }
+
+                        PFFormattingModeStrip(
+                            selectedMode: AppState.shared.formattingMode,
+                            isProUnlocked: isProModeUnlocked,
+                            lang: lang
+                        ) { mode in
+                            AppState.shared.formattingMode = PerformanceRouter.shared.effectiveFormattingMode(
+                                preferred: mode,
+                                profile: AppState.shared.performanceProfile
+                            )
+                        }
+                    }
+                }
+                .opacity(modelReveal >= 2 ? 1 : 0)
+                .offset(y: modelReveal >= 2 ? 0 : 12)
+            }
+            .padding(.horizontal, 40)
+
+            PFInstallSummaryBar(
+                selectedBytes: selectedModelDownloadBytes,
+                hasDownloads: preflightInstallPlan.hasDownloads,
+                canContinue: canContinueAfterModelSelection,
+                notice: modelSelectionNotice,
+                isInstalling: isPreflightModelInstalling,
+                progress: currentModelInstallProgress,
+                installTitle: currentModelInstallTitle,
+                lang: lang
+            ) {
+                installSelectedPreflightModels()
+            } onCancel: {
+                DictationEngine.shared.cancelModelDownload()
+                AdvancedLLMFormatter.shared.cancelInstall()
+                preflightModelInstallTask?.cancel()
+                preflightModelInstallTask = nil
+                installingASRBackend = nil
+                installingFormattingModel = nil
+            }
+            .padding(.horizontal, 40)
+            .opacity(modelReveal >= 3 ? 1 : 0)
+            .offset(y: modelReveal >= 3 ? 0 : 12)
+
+            if canContinueAfterModelSelection && modelStatus.isReady {
                 Button {
                     showModelTest = true
                 } label: {
-                    Label(
-                        t("Tester le micro", "Test microphone", "Probar micrófono", "测试麦克风", "マイクをテスト", "Проверить микрофон"),
-                        systemImage: "mic.circle"
-                    )
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Color.zText)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 9)
-                    .background(Color.white)
-                    .clipShape(Capsule())
-                    .overlay(Capsule().strokeBorder(Color.zBorder, lineWidth: 1))
+                    Label(t("Tester le micro", "Test microphone", "Probar micrófono", "测试麦克风", "マイクをテスト", "Проверить микрофон"), systemImage: "mic.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color.zText)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Color.white, in: Capsule())
+                        .overlay(Capsule().strokeBorder(Color.zBorder, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
-                .transition(.opacity.combined(with: .scale(scale: 0.95)))
             }
 
-            // ── Retry on failure ──────────────────────────────────────
-            if asrRequiresInstall, case .failed = modelStatus {
-                Button {
-                    DictationEngine.shared.cancelModelDownload()
-                    Task {
-                        try? await Task.sleep(for: .milliseconds(300))
-                        await DictationEngine.shared.loadModel()
-                    }
-                } label: {
-                    Label(
-                        t("Réessayer", "Retry", "Reintentar", "重试", "再試行", "Повторить"),
-                        systemImage: "arrow.clockwise"
-                    )
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
-                    .background(Color.zRed)
-                    .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .padding(.top, 10)
-                .transition(.opacity.combined(with: .scale(scale: 0.95)))
-            }
-
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity)
-        .animation(.easeInOut(duration: 0.25), value: modelStatus.isReady)
+        .padding(.top, 6)
+        .animation(.spring(response: 0.42, dampingFraction: 0.84), value: modelReveal)
+        .animation(.easeInOut(duration: 0.2), value: selectedASRBackendsForInstall)
+        .animation(.easeInOut(duration: 0.2), value: selectedFormattingModelsForInstall)
+    }
+
+    private var currentModelInstallProgress: Double? {
+        if installingASRBackend != nil {
+            return modelStatus.progress
+        }
+        if installingFormattingModel != nil {
+            return AdvancedLLMFormatter.shared.downloadProgress
+        }
+        return nil
+    }
+
+    private var currentModelInstallTitle: String {
+        if let installingASRBackend {
+            return ASRBackendCatalog.descriptor(for: installingASRBackend).displayName
+        }
+        if let installingFormattingModel {
+            return installingFormattingModel.displayName(for: lang)
+        }
+        return t("Installation de la sélection", "Installing selection", "Instalando selección", "正在安装选择", "選択をインストール中", "Установка выбранного")
+    }
+
+    private func asrChoiceIsAvailable(_ kind: ASRBackendKind) -> Bool {
+        switch kind {
+        case .appleSpeechAnalyzer:
+            return AppleSpeechAnalyzerBackend.isRuntimeSupported
+        case .codexVoice:
+            return CodexVoiceBackend.hasReadableCredentials()
+        case .whisperKit, .parakeet:
+            return true
+        }
+    }
+
+    private func asrChoiceIcon(for kind: ASRBackendKind) -> String {
+        switch kind {
+        case .appleSpeechAnalyzer:
+            return "apple.logo"
+        case .codexVoice:
+            return "sparkles"
+        case .whisperKit, .parakeet:
+            return "cpu"
+        }
+    }
+
+    private func asrChoiceSubtitle(for descriptor: ASRBackendDescriptor) -> String {
+        switch descriptor.kind {
+        case .appleSpeechAnalyzer:
+            return AppleSpeechAnalyzerBackend.isRuntimeSupported
+                ? t("Moteur système immédiat. Idéal si tu ne veux aucun téléchargement.", "Built-in system engine. Best when you want no download.", "Motor del sistema inmediato. Ideal si no quieres descargas.", "系统内置引擎。适合不想下载模型时使用。", "システム内蔵エンジン。ダウンロードなしで使えます。", "Системный движок без загрузки.")
+                : t("Indisponible sur cette version de macOS.", "Unavailable on this macOS version.", "No disponible en esta versión de macOS.", "此 macOS 版本不可用。", "この macOS バージョンでは利用できません。", "Недоступно в этой версии macOS.")
+        case .codexVoice:
+            return CodexVoiceBackend.hasReadableCredentials()
+                ? t("Provider Codex : transcription via ton compte, sans modèle local.", "Codex provider: transcription through your account, no local model.", "Provider Codex: transcripción con tu cuenta, sin modelo local.", "Codex provider：通过你的账号转写，无需本地模型。", "Codex provider: アカウント経由で文字起こし、ローカルモデル不要。", "Provider Codex: транскрибация через аккаунт, без локальной модели.")
+                : t("Connecte-toi à Codex Desktop pour l'activer.", "Sign in to Codex Desktop to enable it.", "Inicia sesión en Codex Desktop para activarlo.", "登录 Codex Desktop 后启用。", "Codex Desktop にサインインして有効化。", "Войдите в Codex Desktop, чтобы включить.")
+        case .whisperKit:
+            return t("Très bonne qualité locale, installation unique.", "Strong local quality, one-time install.", "Muy buena calidad local, instalación única.", "本地质量高，一次安装。", "高品質なローカル認識、初回のみインストール。", "Высокое качество локально, разовая установка.")
+        case .parakeet:
+            return t("Expérimental : fichiers MLX prêts, inférence native à activer.", "Experimental: MLX files ready, native inference still needs enabling.", "Experimental: archivos MLX listos, inferencia nativa por activar.", "实验性：MLX 文件已准备，原生推理仍需启用。", "実験的: MLX ファイルは準備済み、ネイティブ推論は未接続。", "Экспериментально: MLX-файлы готовы, нативный инференс нужно включить.")
+        }
+    }
+
+    private func asrChoiceStatus(for kind: ASRBackendKind) -> (text: String, color: Color) {
+        if installingASRBackend == kind {
+            switch modelStatus {
+            case .downloading:
+                return (percentLabel(modelStatus.progress), Color.zBlue)
+            case .loading:
+                return (t("Chargement", "Loading", "Cargando", "加载中", "読み込み中", "Загрузка"), Color.zBlue)
+            default:
+                return (t("Installation", "Installing", "Instalando", "安装中", "インストール中", "Установка"), Color.zBlue)
+            }
+        }
+        if kind == .appleSpeechAnalyzer && !AppleSpeechAnalyzerBackend.isRuntimeSupported {
+            return (t("Indisponible", "Unavailable", "No disponible", "不可用", "利用不可", "Недоступно"), Color.zOrange)
+        }
+        if kind == .codexVoice && !CodexVoiceBackend.hasReadableCredentials() {
+            return (t("Connexion requise", "Sign-in required", "Requiere sesión", "需要登录", "サインイン必要", "Нужен вход"), Color.zOrange)
+        }
+        if ASRBackendCatalog.isInstalled(kind) {
+            return (t("Prêt", "Ready", "Listo", "就绪", "準備完了", "Готово"), Color.zGreen)
+        }
+        let descriptor = ASRBackendCatalog.descriptor(for: kind)
+        return descriptor.requiresModelInstall
+            ? (t("Non installé", "Not installed", "No instalado", "未安装", "未インストール", "Не установлен"), Color.zTextDim)
+            : (t("Sans téléchargement", "No download", "Sin descarga", "无需下载", "ダウンロード不要", "Без загрузки"), Color.zAccent)
+    }
+
+    private func formattingChoiceStatus(for modelID: FormattingModelID) -> (text: String, color: Color) {
+        guard isProModeUnlocked else {
+            return (t("Profil Éco", "Eco profile", "Perfil Eco", "节能配置", "エコ構成", "Эко-профиль"), Color.zOrange)
+        }
+        switch AdvancedLLMFormatter.shared.installStatus(for: modelID) {
+        case .installed:
+            return (t("Installé", "Installed", "Instalado", "已安装", "インストール済み", "Установлен"), Color.zGreen)
+        case .notInstalled:
+            return (t("Optionnel", "Optional", "Opcional", "可选", "任意", "Опционально"), Color.zTextDim)
+        case .preparing:
+            return (t("Préparation", "Preparing", "Preparando", "准备中", "準備中", "Подготовка"), Color.zBlue)
+        case .downloading(let progress):
+            return ("\(Int(progress * 100))%", Color.zBlue)
+        case .unavailable(let reason), .error(let reason):
+            return (reason, Color.zOrange)
+        }
+    }
+
+    private func toggleASRInstallSelection(_ kind: ASRBackendKind) {
+        guard !isPreflightModelInstalling else { return }
+        if selectedASRBackendsForInstall.contains(kind) {
+            selectedASRBackendsForInstall.remove(kind)
+        } else {
+            selectedASRBackendsForInstall.insert(kind)
+        }
+        modelSelectionNotice = nil
+    }
+
+    private func toggleFormattingInstallSelection(_ modelID: FormattingModelID) {
+        guard !isPreflightModelInstalling, isProModeUnlocked else { return }
+        if selectedFormattingModelsForInstall.contains(modelID) {
+            selectedFormattingModelsForInstall.remove(modelID)
+        } else {
+            selectedFormattingModelsForInstall.insert(modelID)
+        }
+        modelSelectionNotice = nil
     }
 
     private var modelTitleText: String {
@@ -2356,9 +2579,14 @@ struct PreflightView: View {
                         "音声文字起こしのための録音",
                         "Захват звука для транскрибации"
                     ),
-                    isGranted: appState.micPermission == .granted,
-                    isDenied: appState.micPermission == .denied,
-                    onAllow: { Task { await AppState.shared.requestMicrophoneAccess() } },
+                    isGranted: micGranted,
+                    isDenied: micDenied,
+                    onAllow: {
+                        Task {
+                            _ = await AppState.shared.requestMicrophoneAccess()
+                            syncPermissionState()
+                        }
+                    },
                     onOpenSettings: {
                         NSWorkspace.shared.open(
                             URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!
@@ -2379,15 +2607,19 @@ struct PreflightView: View {
                         "あらゆるアプリにテキストを挿入",
                         "Вставка текста в любое приложение"
                     ),
-                    isGranted: appState.accessibilityGranted,
+                    isGranted: axGranted,
                     isDenied: false,
-                    onAllow: { AppState.shared.requestAccessibilityAccess() },
+                    onAllow: {
+                        AppState.shared.requestAccessibilityAccess()
+                        // AX status updates asynchronously; poll will catch it
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { syncPermissionState() }
+                    },
                     onOpenSettings: { AppState.shared.requestAccessibilityAccess() }
                 )
             }
             .padding(.horizontal, 44)
 
-            if !appState.accessibilityGranted {
+            if !axGranted {
                 HStack(spacing: 7) {
                     Image(systemName: "info.circle")
                         .font(.system(size: 11))
@@ -3207,7 +3439,7 @@ private struct PFPermissionCard: View {
 
 private struct PFCustomShortcutRecorder: View {
     @State private var isRecording: Bool = false
-    private var manager: ShortcutManager { ShortcutManager.shared }
+    @State private var manager = ShortcutManager.shared
 
     var body: some View {
         HStack(spacing: 10) {
@@ -3566,6 +3798,281 @@ private struct DownloadStatItem: View {
                 .contentTransition(.numericText())
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+private struct PFModelPanel<Content: View>: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let color: Color
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(color.opacity(0.12))
+                        .frame(width: 34, height: 34)
+                    Image(systemName: icon)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(color)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(Color.zText)
+                    Text(subtitle)
+                        .font(.system(size: 11.5))
+                        .foregroundColor(Color.zTextDim)
+                        .lineLimit(2)
+                }
+            }
+
+            content
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(Color.black.opacity(0.07), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.04), radius: 12, x: 0, y: 4)
+        )
+    }
+}
+
+private struct PFModelChoiceRow: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let meta: String
+    let status: String
+    let statusColor: Color
+    let isActive: Bool
+    let isChecked: Bool
+    let canToggleInstall: Bool
+    let isDisabled: Bool
+    let isInstalling: Bool
+    let onSelect: () -> Void
+    let onToggleInstall: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onSelect) {
+                ZStack {
+                    Circle()
+                        .strokeBorder(isActive ? Color.zAccent : Color.zBorder, lineWidth: isActive ? 5 : 1.5)
+                        .frame(width: 18, height: 18)
+                    if isActive {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 5, height: 5)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(isDisabled)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isActive ? Color.zAccent.opacity(0.12) : Color.zSurface2)
+                    .frame(width: 34, height: 34)
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(isActive ? Color.zAccent : Color.zTextSub)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 7) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(Color.zText)
+                        .lineLimit(1)
+                    Text(meta)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundColor(Color.zTextSub)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color.zSurface2, in: Capsule())
+                }
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundColor(Color.zTextDim)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 10)
+
+            if isInstalling {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(Color.zBlue)
+            } else {
+                Text(status)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundColor(statusColor)
+                    .lineLimit(1)
+            }
+
+            if canToggleInstall {
+                Button(action: onToggleInstall) {
+                    Image(systemName: isChecked ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(isChecked ? Color.zAccent : Color.zTextDim)
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .disabled(isDisabled)
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(isActive ? Color.zAccent.opacity(0.07) : Color.zSurface2.opacity(0.65))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .strokeBorder(isActive ? Color.zAccent.opacity(0.28) : Color.black.opacity(0.05), lineWidth: 1)
+                )
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard !isDisabled else { return }
+            onSelect()
+        }
+        .opacity(isDisabled ? 0.55 : 1)
+    }
+}
+
+private struct PFFormattingModeStrip: View {
+    let selectedMode: FormattingMode
+    let isProUnlocked: Bool
+    let lang: String
+    let onSelect: (FormattingMode) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(FormattingMode.allCases) { mode in
+                let active = selectedMode == mode
+                Button {
+                    onSelect(mode)
+                } label: {
+                    Text(mode == .trigger
+                         ? L10n.ui(for: lang, fr: "Normal", en: "Normal", es: "Normal", zh: "普通", ja: "通常", ru: "Обычный")
+                         : L10n.ui(for: lang, fr: "IA locale", en: "Local AI", es: "IA local", zh: "本地 AI", ja: "ローカルAI", ru: "Локальный ИИ"))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(active ? Color.zText : Color.zTextSub)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(active ? Color.white : Color.clear)
+                                .shadow(color: active ? Color.black.opacity(0.06) : .clear, radius: 5, y: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(mode == .advanced && !isProUnlocked)
+                .opacity(mode == .advanced && !isProUnlocked ? 0.45 : 1)
+            }
+        }
+        .padding(4)
+        .background(Color.zSurface2, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct PFInstallSummaryBar: View {
+    let selectedBytes: Int64
+    let hasDownloads: Bool
+    let canContinue: Bool
+    let notice: String?
+    let isInstalling: Bool
+    let progress: Double?
+    let installTitle: String
+    let lang: String
+    let onInstall: () -> Void
+    let onCancel: () -> Void
+
+    private var sizeLabel: String {
+        selectedBytes > 0
+            ? ByteCountFormatter.string(fromByteCount: selectedBytes, countStyle: .file)
+            : L10n.ui(for: lang, fr: "0 Mo", en: "0 MB", es: "0 MB", zh: "0 MB", ja: "0 MB", ru: "0 МБ")
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(isInstalling ? installTitle : L10n.ui(for: lang, fr: "Installation manuelle", en: "Manual install", es: "Instalación manual", zh: "手动安装", ja: "手動インストール", ru: "Ручная установка"))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(Color.zText)
+                    Text(summaryText)
+                        .font(.system(size: 11.5))
+                        .foregroundColor(Color.zTextDim)
+                }
+
+                Spacer()
+
+                if isInstalling {
+                    Button(L10n.ui(for: lang, fr: "Annuler", en: "Cancel", es: "Cancelar", zh: "取消", ja: "キャンセル", ru: "Отмена"), action: onCancel)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color.zRed)
+                } else {
+                    Button(action: onInstall) {
+                        Label(
+                            hasDownloads
+                                ? L10n.ui(for: lang, fr: "Installer la sélection", en: "Install selection", es: "Instalar selección", zh: "安装选择", ja: "選択をインストール", ru: "Установить выбранное")
+                                : L10n.ui(for: lang, fr: "Rien à installer", en: "Nothing to install", es: "Nada que instalar", zh: "无需安装", ja: "インストール不要", ru: "Нечего устанавливать"),
+                            systemImage: "arrow.down.circle"
+                        )
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(hasDownloads ? Color.zText : Color.zTextDim)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 8)
+                        .background(hasDownloads ? Color.zAccent.opacity(0.14) : Color.zSurface2, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!hasDownloads)
+                }
+            }
+
+            if let progress {
+                ProgressView(value: max(0, min(progress, 1)))
+                    .progressViewStyle(.linear)
+                    .tint(Color.zAccent)
+            }
+
+            if let notice {
+                HStack(spacing: 6) {
+                    Image(systemName: canContinue ? "checkmark.circle.fill" : "info.circle")
+                        .font(.system(size: 11))
+                        .foregroundColor(canContinue ? Color.zGreen : Color.zBlue)
+                    Text(notice)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundColor(Color.zTextSub)
+                    Spacer()
+                }
+            }
+        }
+        .padding(16)
+        .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.black.opacity(0.07), lineWidth: 1))
+        .shadow(color: Color.black.opacity(0.04), radius: 10, y: 3)
+    }
+
+    private var summaryText: String {
+        if isInstalling {
+            return L10n.ui(for: lang, fr: "Téléchargement contrôlé par toi, progression en direct.", en: "User-started download with live progress.", es: "Descarga iniciada por ti con progreso en vivo.", zh: "由你启动的下载，实时显示进度。", ja: "ユーザー開始のダウンロード、進捗を表示。", ru: "Загрузка запущена вами, прогресс в реальном времени.")
+        }
+        if hasDownloads {
+            return L10n.ui(for: lang, fr: "Téléchargement sélectionné : \(sizeLabel).", en: "Selected download: \(sizeLabel).", es: "Descarga seleccionada: \(sizeLabel).", zh: "已选择下载：\(sizeLabel)。", ja: "選択したダウンロード: \(sizeLabel)。", ru: "Выбрано для загрузки: \(sizeLabel).")
+        }
+        return L10n.ui(for: lang, fr: "Aucun modèle payant en espace disque n'est coché.", en: "No disk-heavy model is checked.", es: "No hay modelos pesados marcados.", zh: "未勾选占用磁盘的大模型。", ja: "容量の大きいモデルは選択されていません。", ru: "Тяжёлые модели не отмечены.")
     }
 }
 

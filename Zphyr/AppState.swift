@@ -433,9 +433,7 @@ final class AppState {
                     "[Settings] activeFormattingModel changed from \(oldValue.rawValue, privacy: .public) to \(self.activeFormattingModel.rawValue, privacy: .public)"
                 )
             }
-            DispatchQueue.main.async { [weak self] in
-                self?.syncActiveFormattingModelInstallState()
-            }
+            syncActiveFormattingModelInstallState()
         }
     }
 
@@ -750,6 +748,11 @@ final class AppState {
         currentDictationSession = session
     }
 
+    func presentDictationHUDMessage(_ message: String) {
+        error = nil
+        updateCurrentDictationSession(errorMessage: message)
+    }
+
     func updateCurrentLiveTranscription(
         partialText: String? = nil,
         clearPartialText: Bool = false,
@@ -815,6 +818,7 @@ final class AppState {
         }
         if let errorMessage {
             session.errorMessage = errorMessage
+            error = nil
         }
         session.transitions.append(
             DictationSessionTransition(phase: phase, timestamp: now, note: note)

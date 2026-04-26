@@ -96,7 +96,7 @@ final class InsertionEngine {
                 targetFamily: targetFamily,
                 fallbackReason: .insertionAccessibilityUnavailable
             )
-            AppState.shared.error = L10n.ui(
+            AppState.shared.updateCurrentDictationSession(errorMessage: L10n.ui(
                 for: AppState.shared.selectedLanguage.id,
                 fr: "Acc\u{00E8}s Accessibilit\u{00E9} manquant. Le texte a \u{00E9}t\u{00E9} copi\u{00E9} dans le presse-papiers.",
                 en: "Accessibility access is missing. Text was copied to the clipboard.",
@@ -104,7 +104,7 @@ final class InsertionEngine {
                 zh: "\u{7F3A}\u{5C11}\u{8F85}\u{52A9}\u{529F}\u{80FD}\u{6743}\u{9650}\u{3002}\u{6587}\u{672C}\u{5DF2}\u{590D}\u{5236}\u{5230}\u{526A}\u{8D34}\u{677F}\u{3002}",
                 ja: "\u{30A2}\u{30AF}\u{30BB}\u{30B7}\u{30D3}\u{30EA}\u{30C6}\u{30A3}\u{6A29}\u{9650}\u{304C}\u{3042}\u{308A}\u{307E}\u{305B}\u{3093}\u{3002}\u{30C6}\u{30AD}\u{30B9}\u{30C8}\u{3092}\u{30AF}\u{30EA}\u{30C3}\u{30D7}\u{30DC}\u{30FC}\u{30C9}\u{306B}\u{30B3}\u{30D4}\u{30FC}\u{3057}\u{307E}\u{3057}\u{305F}\u{3002}",
                 ru: "\u{041D}\u{0435}\u{0442} \u{0434}\u{043E}\u{0441}\u{0442}\u{0443}\u{043F}\u{0430} \u{043A} \u{0421}\u{043F}\u{0435}\u{0446}\u{0432}\u{043E}\u{0437}\u{043C}\u{043E}\u{0436}\u{043D}\u{043E}\u{0441}\u{0442}\u{044F}\u{043C}. \u{0422}\u{0435}\u{043A}\u{0441}\u{0442} \u{0441}\u{043A}\u{043E}\u{043F}\u{0438}\u{0440}\u{043E}\u{0432}\u{0430}\u{043D} \u{0432} \u{0431}\u{0443}\u{0444}\u{0435}\u{0440} \u{043E}\u{0431}\u{043C}\u{0435}\u{043D}\u{0430}."
-            )
+            ))
             log.error("[Insert] accessibility not trusted; used clipboard fallback")
             return outcome
         }
@@ -134,7 +134,7 @@ final class InsertionEngine {
                     targetFamily: targetFamily,
                     fallbackReason: .insertionTargetNotFrontmost
                 )
-                AppState.shared.error = L10n.ui(
+                AppState.shared.updateCurrentDictationSession(errorMessage: L10n.ui(
                     for: AppState.shared.selectedLanguage.id,
                     fr: "Impossible de revenir \u{00E0} l'application cible. Le texte a \u{00E9}t\u{00E9} copi\u{00E9} dans le presse-papiers.",
                     en: "Could not focus the target app. The text was copied to the clipboard.",
@@ -142,7 +142,7 @@ final class InsertionEngine {
                     zh: "\u{65E0}\u{6CD5}\u{5207}\u{56DE}\u{76EE}\u{6807}\u{5E94}\u{7528}\u{FF0C}\u{6587}\u{672C}\u{5DF2}\u{590D}\u{5236}\u{5230}\u{526A}\u{8D34}\u{677F}\u{3002}",
                     ja: "\u{5BFE}\u{8C61}\u{30A2}\u{30D7}\u{30EA}\u{306B}\u{623B}\u{308C}\u{306A}\u{304B}\u{3063}\u{305F}\u{305F}\u{3081}\u{3001}\u{30C6}\u{30AD}\u{30B9}\u{30C8}\u{3092}\u{30AF}\u{30EA}\u{30C3}\u{30D7}\u{30DC}\u{30FC}\u{30C9}\u{306B}\u{30B3}\u{30D4}\u{30FC}\u{3057}\u{307E}\u{3057}\u{305F}\u{3002}",
                     ru: "\u{041D}\u{0435} \u{0443}\u{0434}\u{0430}\u{043B}\u{043E}\u{0441}\u{044C} \u{0432}\u{0435}\u{0440}\u{043D}\u{0443}\u{0442}\u{044C} \u{0444}\u{043E}\u{043A}\u{0443}\u{0441} \u{0446}\u{0435}\u{043B}\u{0435}\u{0432}\u{043E}\u{043C}\u{0443} \u{043F}\u{0440}\u{0438}\u{043B}\u{043E}\u{0436}\u{0435}\u{043D}\u{0438}\u{044E}. \u{0422}\u{0435}\u{043A}\u{0441}\u{0442} \u{0441}\u{043A}\u{043E}\u{043F}\u{0438}\u{0440}\u{043E}\u{0432}\u{0430}\u{043D} \u{0432} \u{0431}\u{0443}\u{0444}\u{0435}\u{0440} \u{043E}\u{0431}\u{043C}\u{0435}\u{043D}\u{0430}."
-                )
+                ))
                 log.error("[Insert] aborting simulated typing: target app did not become frontmost")
                 return outcome
             }

@@ -7,36 +7,16 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-private enum MainAlert: Identifiable {
-    case error(String)
-
-    var id: String {
-        switch self {
-        case .error(let message):
-            return "error:\(message)"
-        }
-    }
-}
-
 struct MainView: View {
     @State private var selectedItem: SidebarItem = .home
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showSettings = false
     private var engine: DictationEngine { DictationEngine.shared }
     @Bindable private var appState = AppState.shared
-    private var activeAlertBinding: Binding<MainAlert?> {
-        Binding(
-            get: {
-                if let message = appState.error {
-                    return .error(message)
-                }
-                return nil
-            },
-            set: { newValue in
-                guard newValue == nil else { return }
-                appState.error = nil
-            }
-        )
+
+    private var inlineErrorMessage: String? {
+        guard appState.currentDictationSession == nil else { return nil }
+        return appState.error
     }
 
     var body: some View {
@@ -67,8 +47,7 @@ struct MainView: View {
         .task {
             appState.refreshPerformanceProfile()
             engine.refreshASRBackendSelection()
-            // Pre-load ASR model in background on launch
-            await engine.loadModel()
+            await engine.loadInstalledModelIfAvailable()
             if AppState.shared.modelStatus.isReady {
                 ShortcutManager.shared.startListening()
             }
@@ -89,19 +68,63 @@ struct MainView: View {
                 }
             }
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.88), value: showSettings)
-        .alert(item: activeAlertBinding) { alert in
-            switch alert {
-            case .error(let message):
-                return Alert(
-                    title: Text(t("Erreur", "Error", "Error", "错误", "エラー", "Ошибка")),
-                    message: Text(message),
-                    dismissButton: .default(Text(t("OK", "OK", "OK", "确定", "OK", "ОК"))) {
-                        appState.error = nil
-                    }
-                )
+        .overlay(alignment: .bottom) {
+            if let message = inlineErrorMessage {
+                MainInlineErrorToast(message: message) {
+                    appState.error = nil
+                }
+                .padding(.bottom, 24)
             }
         }
+        .animation(.spring(response: 0.3, dampingFraction: 0.88), value: showSettings)
+        .task(id: inlineErrorMessage) {
+            guard let message = inlineErrorMessage else { return }
+            try? await Task.sleep(for: .seconds(6))
+            if appState.error == message {
+                appState.error = nil
+            }
+        }
+    }
+}
+
+private struct MainInlineErrorToast: View {
+    let message: String
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(Color(hex: "#FFB4A8"))
+
+            Text(message)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.white.opacity(0.92))
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+
+            Spacer(minLength: 8)
+
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.white.opacity(0.72))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: 520)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.black.opacity(0.88))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        )
+        .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 8)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 }
 
@@ -765,12 +788,12 @@ struct AudioTranscriptionView: View {
                 .disabled(!canTranscribe)
 
                 if !appState.modelStatus.isReady {
-                    Text(t("Le modèle sera chargé automatiquement si nécessaire.",
-                           "The model will be loaded automatically if needed.",
-                           "El modelo se cargará automáticamente si es necesario.",
-                           "如有需要将自动加载模型。",
-                           "必要に応じてモデルを自動読み込みします。",
-                           "Модель загрузится автоматически при необходимости."))
+                    Text(t("Installe d'abord un modèle de transcription dans Réglages.",
+                           "Install a transcription model in Settings first.",
+                           "Instala primero un modelo de transcripción en Ajustes.",
+                           "请先在设置中安装转写模型。",
+                           "先に設定で文字起こしモデルをインストールしてください。",
+                           "Сначала установите модель транскрибации в настройках."))
                         .font(.system(size: 11))
                         .foregroundColor(Color(hex: "#888880"))
                 }
@@ -850,7 +873,19 @@ struct AudioTranscriptionView: View {
         defer { isTranscribing = false }
 
         if !appState.modelStatus.isReady {
-            await engine.loadModel()
+            await engine.loadInstalledModelIfAvailable()
+        }
+
+        guard appState.modelStatus.isReady else {
+            appState.error = t(
+                "Aucun moteur de transcription n'est prêt. Choisis Apple Speech ou installe un modèle local dans Réglages.",
+                "No transcription engine is ready. Choose Apple Speech or install a local model in Settings.",
+                "No hay ningún motor de transcripción listo. Elige Apple Speech o instala un modelo local en Ajustes.",
+                "没有可用的转写引擎。请选择 Apple Speech 或在设置中安装本地模型。",
+                "文字起こしエンジンの準備ができていません。Apple Speech を選ぶか、設定でローカルモデルをインストールしてください。",
+                "Движок транскрибации не готов. Выберите Apple Speech или установите локальную модель в настройках."
+            )
+            return
         }
 
         let hasSecurityAccess = selectedAudioURL.startAccessingSecurityScopedResource()

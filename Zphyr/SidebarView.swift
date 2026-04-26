@@ -165,7 +165,7 @@ struct SidebarView: View {
                         ru: "Обновления"
                     )
                 ) {
-                    if let url = URL(string: "https://zphyr.app/changelog") {
+                    if let url = URL(string: "https://github.com/aristocratte/Zphyr/releases") {
                         NSWorkspace.shared.open(url)
                     }
                 }

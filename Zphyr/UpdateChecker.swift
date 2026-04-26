@@ -5,6 +5,8 @@
 
 import Foundation
 import AppKit
+import CryptoKit
+import os
 
 @Observable @MainActor
 final class UpdateChecker {
@@ -37,12 +39,65 @@ final class UpdateChecker {
         }
     }
 
+    enum ReleaseChannel {
+        case stable
+        case includePrerelease
+    }
+
+    private enum UpdateCheckError: LocalizedError {
+        case invalidRepositoryURL
+        case invalidResponse
+        case httpStatus(Int, message: String?)
+        case decodeFailed
+        case noCompatibleAsset(String)
+        case invalidDownloadURL(String)
+        case installPreflightFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidRepositoryURL:
+                return "Update source is misconfigured."
+            case .invalidResponse:
+                return "Unexpected response from update server."
+            case .httpStatus(let code, let message):
+                if let message, !message.isEmpty {
+                    return "Update check failed (\(code)): \(message)"
+                }
+                return "Update check failed with HTTP status \(code)."
+            case .decodeFailed:
+                return "Could not parse release metadata from GitHub."
+            case .noCompatibleAsset(let version):
+                return "No compatible DMG asset was found for release \(version)."
+            case .invalidDownloadURL(let version):
+                return "Release \(version) has an invalid download URL."
+            case .installPreflightFailed(let message):
+                return message
+            }
+        }
+    }
+
     private(set) var state: State = .idle
 
     private let repoOwner = "aristocratte"
     private let repoName  = "Zphyr"
+    private let releaseChannel: ReleaseChannel
+    private let urlSession: URLSession
+    private let fileManager: FileManager
+    private let appBundle: Bundle
+    private let log = Logger(subsystem: "com.zphyr.app", category: "UpdateChecker")
+    private var pendingAssetSHA256: String?
 
-    private init() {}
+    private init(
+        releaseChannel: ReleaseChannel = .stable,
+        urlSession: URLSession = .shared,
+        fileManager: FileManager = .default,
+        appBundle: Bundle = .main
+    ) {
+        self.releaseChannel = releaseChannel
+        self.urlSession = urlSession
+        self.fileManager = fileManager
+        self.appBundle = appBundle
+    }
 
     // MARK: - Public API
 
@@ -55,100 +110,118 @@ final class UpdateChecker {
 
     func downloadAndInstall() {
         guard case .updateAvailable(_, let url) = state else { return }
-        Task { await performInstall(from: url) }
+        let expectedSHA256 = pendingAssetSHA256
+        Task { await performInstall(from: url, expectedSHA256: expectedSHA256) }
     }
 
     // MARK: - Check
 
     private func check() async {
         state = .checking
-        guard let apiURL = URL(string: "https://api.github.com/repos/\(repoOwner)/\(repoName)/releases/latest") else {
-            state = .idle; return
-        }
         do {
-            var req = URLRequest(url: apiURL, timeoutInterval: 10)
-            req.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
-            let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                state = .upToDate; return
-            }
-            let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
-            let latestRaw = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "v"))
-            let current   = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
-            guard isNewer(latestRaw, than: current) else { state = .upToDate; return }
-
-            if let asset = release.assets.first(where: { $0.name.hasSuffix(".dmg") }),
-               let url   = URL(string: asset.browserDownloadURL) {
-                state = .updateAvailable(version: latestRaw, downloadURL: url)
-            } else {
+            pendingAssetSHA256 = nil
+            let releases = try await fetchReleases()
+            guard let release = Self.preferredRelease(from: releases, channel: releaseChannel) else {
                 state = .upToDate
+                return
             }
+
+            let latestRaw = Self.normalizedVersionTag(release.tagName)
+            let current = appVersionString()
+            guard Self.isNewerVersion(latestRaw, than: current) else {
+                state = .upToDate
+                return
+            }
+
+            guard let asset = Self.preferredDMGAsset(
+                from: release.assets,
+                architectureHint: Self.currentArchitectureHint()
+            ) else {
+                throw UpdateCheckError.noCompatibleAsset(latestRaw)
+            }
+            guard let url = URL(string: asset.browserDownloadURL) else {
+                throw UpdateCheckError.invalidDownloadURL(latestRaw)
+            }
+
+            pendingAssetSHA256 = Self.normalizedSHA256(from: asset.digest)
+            state = .updateAvailable(version: latestRaw, downloadURL: url)
+        } catch let error as UpdateCheckError {
+            log.error("[Updater] check failed: \(error.localizedDescription, privacy: .public)")
+            state = .failed(error.localizedDescription)
         } catch {
-            state = .idle
+            log.error("[Updater] check failed: \(error.localizedDescription, privacy: .public)")
+            state = .failed("Update check failed: \(error.localizedDescription)")
         }
     }
 
     // MARK: - Download & Install
 
-    private func performInstall(from downloadURL: URL) async {
+    private func performInstall(from downloadURL: URL, expectedSHA256: String?) async {
         state = .downloading(progress: 0)
-        let tmp = FileManager.default.temporaryDirectory
-        let dmgDest = tmp.appendingPathComponent("ZphyrUpdate.dmg")
+        let tmp = fileManager.temporaryDirectory
+        let dmgDest = tmp.appendingPathComponent("ZphyrUpdate-\(UUID().uuidString).dmg")
+        let mountPoint = tmp.appendingPathComponent("ZphyrMount_\(UUID().uuidString)")
+        var didMount = false
 
         do {
             // 1. Download DMG
-            let (tmpFile, _) = try await URLSession.shared.download(from: downloadURL)
-            try? FileManager.default.removeItem(at: dmgDest)
-            try FileManager.default.moveItem(at: tmpFile, to: dmgDest)
-            state = .downloading(progress: 0.6)
+            let (tmpFile, _) = try await urlSession.download(from: downloadURL)
+            try? fileManager.removeItem(at: dmgDest)
+            try fileManager.moveItem(at: tmpFile, to: dmgDest)
+            state = .downloading(progress: 0.55)
+
+            if let expectedSHA256 {
+                let fileSHA256 = try Self.sha256Hex(for: dmgDest)
+                guard fileSHA256 == expectedSHA256 else {
+                    throw UpdateCheckError.installPreflightFailed("Downloaded update failed integrity verification.")
+                }
+            }
 
             // 2. Mount DMG
-            let mountPoint = tmp.appendingPathComponent("ZphyrMount_\(UUID().uuidString)")
-            try FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: mountPoint, withIntermediateDirectories: true)
             let mount = Process()
             mount.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-            mount.arguments = ["attach", dmgDest.path, "-mountpoint", mountPoint.path,
-                               "-nobrowse", "-quiet", "-noverify"]
+            mount.arguments = ["attach", dmgDest.path, "-mountpoint", mountPoint.path, "-nobrowse", "-quiet"]
             try mount.run(); mount.waitUntilExit()
             guard mount.terminationStatus == 0 else {
-                state = .failed("Could not mount update image"); return
+                state = .failed("Could not mount update image")
+                return
             }
+            didMount = true
             state = .downloading(progress: 0.80)
 
             // 3. Copy new .app to temp
-            let entries = try FileManager.default.contentsOfDirectory(at: mountPoint,
-                                                                       includingPropertiesForKeys: nil)
-            guard let newApp = entries.first(where: { $0.pathExtension == "app" }) else {
-                state = .failed("App bundle not found in update"); return
+            let entries = try fileManager.contentsOfDirectory(at: mountPoint, includingPropertiesForKeys: nil)
+            guard let newApp = Self.preferredAppBundle(from: entries) else {
+                state = .failed("App bundle not found in update")
+                return
             }
-            let tempApp = tmp.appendingPathComponent("ZphyrNew.app")
-            try? FileManager.default.removeItem(at: tempApp)
-            try FileManager.default.copyItem(at: newApp, to: tempApp)
+            let tempApp = tmp.appendingPathComponent("ZphyrNew-\(UUID().uuidString).app")
+            try? fileManager.removeItem(at: tempApp)
+            try fileManager.copyItem(at: newApp, to: tempApp)
             state = .downloading(progress: 0.95)
 
             // 4. Unmount
-            let unmount = Process()
-            unmount.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-            unmount.arguments = ["detach", mountPoint.path, "-quiet", "-force"]
-            try? unmount.run(); unmount.waitUntilExit()
+            Self.detachDiskImage(at: mountPoint)
+            didMount = false
 
             state = .installing
 
             // 5. Write shell script that replaces app after we quit, then relaunches
-            let currentApp = Bundle.main.bundleURL
-            let script = """
-            #!/bin/bash
-            sleep 1.5
-            rm -rf \"\(currentApp.path)\"
-            cp -R \"\(tempApp.path)\" \"\(currentApp.path)\"
-            open \"\(currentApp.path)\"
-            rm -rf \"\(tempApp.path)\"
-            rm -f \"\(dmgDest.path)\"
-            """
-            let scriptURL = tmp.appendingPathComponent("zphyr_install.sh")
+            let currentApp = appBundle.bundleURL
+            if let preflightError = Self.installPreflightError(for: currentApp, fileManager: fileManager) {
+                throw UpdateCheckError.installPreflightFailed(preflightError)
+            }
+
+            let scriptURL = tmp.appendingPathComponent("zphyr_install_\(UUID().uuidString).sh")
+            let script = Self.buildInstallerScript(
+                currentAppPath: currentApp.path,
+                stagedAppPath: tempApp.path,
+                dmgPath: dmgDest.path,
+                scriptPath: scriptURL.path
+            )
             try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755],
-                                                   ofItemAtPath: scriptURL.path)
+            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
             let installer = Process()
             installer.executableURL = URL(fileURLWithPath: "/bin/bash")
             installer.arguments = [scriptURL.path]
@@ -161,44 +234,401 @@ final class UpdateChecker {
         } catch {
             state = .failed(error.localizedDescription)
         }
+
+        if didMount {
+            Self.detachDiskImage(at: mountPoint)
+        }
+        try? fileManager.removeItem(at: mountPoint)
+    }
+
+    // MARK: - Release fetching
+
+    private func fetchReleases() async throws -> [GitHubRelease] {
+        guard let apiURL = URL(string: "https://api.github.com/repos/\(repoOwner)/\(repoName)/releases?per_page=20") else {
+            throw UpdateCheckError.invalidRepositoryURL
+        }
+        var request = URLRequest(url: apiURL, timeoutInterval: 12)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("Zphyr/\(appVersionString())", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await urlSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw UpdateCheckError.invalidResponse
+        }
+        guard http.statusCode == 200 else {
+            throw UpdateCheckError.httpStatus(http.statusCode, message: Self.apiErrorMessage(from: data))
+        }
+
+        guard let releases = try? JSONDecoder().decode([GitHubRelease].self, from: data) else {
+            throw UpdateCheckError.decodeFailed
+        }
+        return releases
+    }
+
+    private func appVersionString() -> String {
+        (appBundle.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0"
     }
 
     // MARK: - Version comparison
 
-    private func isNewer(_ candidate: String, than current: String) -> Bool {
-        let a = numericParts(candidate)
-        let b = numericParts(current)
+    private nonisolated static func isNewerVersion(_ candidate: String, than current: String) -> Bool {
+        compareVersionStrings(candidate, current) == .orderedDescending
+    }
+
+    private nonisolated static func compareVersionStrings(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        guard let left = SemanticVersion(raw: lhs), let right = SemanticVersion(raw: rhs) else {
+            return fallbackNumericCompare(lhs, rhs)
+        }
+        if left == right { return .orderedSame }
+        return left > right ? .orderedDescending : .orderedAscending
+    }
+
+    private nonisolated static func fallbackNumericCompare(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let a = numericParts(normalizedVersionTag(lhs))
+        let b = numericParts(normalizedVersionTag(rhs))
         for i in 0..<max(a.count, b.count) {
             let av = i < a.count ? a[i] : 0
             let bv = i < b.count ? b[i] : 0
-            if av > bv { return true }
-            if av < bv { return false }
+            if av > bv { return .orderedDescending }
+            if av < bv { return .orderedAscending }
         }
-        return false
+        return .orderedSame
     }
 
-    private func numericParts(_ version: String) -> [Int] {
-        let stripped = version.components(separatedBy: "-").first ?? version
-        return stripped.components(separatedBy: ".").compactMap { Int($0) }
+    private nonisolated static func numericParts(_ version: String) -> [Int] {
+        version.components(separatedBy: ".").compactMap { Int($0) }
+    }
+
+    fileprivate nonisolated static func normalizedVersionTag(_ tag: String) -> String {
+        let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first, first == "v" || first == "V" else { return trimmed }
+        return String(trimmed.dropFirst())
+    }
+
+    // MARK: - Release and asset selection
+
+    private nonisolated static func preferredRelease(from releases: [GitHubRelease], channel: ReleaseChannel) -> GitHubRelease? {
+        let eligible = releases.filter { release in
+            guard !release.draft else { return false }
+            if channel == .stable && isPrereleaseRelease(release) { return false }
+            return true
+        }
+        guard !eligible.isEmpty else { return nil }
+
+        return eligible.max { lhs, rhs in
+            let compare = compareVersionStrings(
+                normalizedVersionTag(lhs.tagName),
+                normalizedVersionTag(rhs.tagName)
+            )
+            if compare == .orderedSame {
+                return (lhs.publishedAt ?? "") < (rhs.publishedAt ?? "")
+            }
+            return compare == .orderedAscending
+        }
+    }
+
+    private nonisolated static func preferredDMGAsset(from assets: [GitHubAsset], architectureHint: String) -> GitHubAsset? {
+        let dmgAssets = assets.filter { $0.name.lowercased().hasSuffix(".dmg") }
+        guard !dmgAssets.isEmpty else { return nil }
+
+        let scored: [(asset: GitHubAsset, score: Int)] = dmgAssets.map { asset in
+            (asset: asset, score: score(assetName: asset.name, architectureHint: architectureHint))
+        }
+        let sorted = scored.sorted { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            let leftDownloads = lhs.asset.downloadCount ?? 0
+            let rightDownloads = rhs.asset.downloadCount ?? 0
+            if leftDownloads != rightDownloads { return leftDownloads > rightDownloads }
+            return lhs.asset.name.localizedCaseInsensitiveCompare(rhs.asset.name) == .orderedAscending
+        }
+
+        guard let top = sorted.first else { return nil }
+        if sorted.count > 1 {
+            let second = sorted[1]
+            let tieOnScore = top.score == second.score
+            let tieOnDownloads = (top.asset.downloadCount ?? 0) == (second.asset.downloadCount ?? 0)
+            if tieOnScore && tieOnDownloads {
+                return nil
+            }
+        }
+        return top.asset
+    }
+
+    private nonisolated static func isPrereleaseRelease(_ release: GitHubRelease) -> Bool {
+        if release.prerelease {
+            return true
+        }
+        guard let version = SemanticVersion(raw: normalizedVersionTag(release.tagName)) else {
+            return false
+        }
+        return version.isPrerelease
+    }
+
+    private nonisolated static func score(assetName: String, architectureHint: String) -> Int {
+        let name = assetName.lowercased()
+        var score = 0
+        if name.contains("zphyr") { score += 40 }
+        if name.hasSuffix(".dmg") { score += 5 }
+        if name.contains("release") { score += 8 }
+        if name.contains("universal") { score += 24 }
+        if name.contains("debug") { score -= 30 }
+        if name.contains("symbols") { score -= 40 }
+
+        let armTokens = ["arm64", "aarch64", "apple-silicon"]
+        let intelTokens = ["x86_64", "intel"]
+        let hasArmToken = armTokens.contains { name.contains($0) }
+        let hasIntelToken = intelTokens.contains { name.contains($0) }
+
+        if architectureHint == "arm64" {
+            if hasArmToken { score += 30 }
+            if hasIntelToken { score -= 35 }
+        } else if architectureHint == "x86_64" {
+            if hasIntelToken { score += 30 }
+            if hasArmToken { score -= 35 }
+        }
+        if !hasArmToken && !hasIntelToken { score += 3 }
+        return score
+    }
+
+    private nonisolated static func preferredAppBundle(from entries: [URL]) -> URL? {
+        let apps = entries.filter { $0.pathExtension == "app" }
+        guard !apps.isEmpty else { return nil }
+        if let exact = apps.first(where: { $0.lastPathComponent.lowercased() == "zphyr.app" }) {
+            return exact
+        }
+        return apps.count == 1 ? apps[0] : nil
+    }
+
+    // MARK: - Install safety helpers
+
+    private nonisolated static func installPreflightError(for currentApp: URL, fileManager: FileManager) -> String? {
+        if isLikelyTranslocated(path: currentApp.path) {
+            return "Move Zphyr to /Applications before installing updates."
+        }
+        let parentPath = currentApp.deletingLastPathComponent().path
+        guard fileManager.isWritableFile(atPath: parentPath) else {
+            return "Insufficient write permissions in \(parentPath). Move Zphyr to a writable location."
+        }
+        return nil
+    }
+
+    private nonisolated static func isLikelyTranslocated(path: String) -> Bool {
+        path.contains("/AppTranslocation/")
+    }
+
+    private nonisolated static func buildInstallerScript(
+        currentAppPath: String,
+        stagedAppPath: String,
+        dmgPath: String,
+        scriptPath: String
+    ) -> String {
+        """
+        #!/bin/bash
+        sleep 1.5
+        CURRENT_APP="\(currentAppPath)"
+        STAGED_APP="\(stagedAppPath)"
+        DMG_PATH="\(dmgPath)"
+        SCRIPT_PATH="\(scriptPath)"
+        BACKUP_APP="${CURRENT_APP}.backup.$$"
+
+        cleanup() {
+          rm -rf "$STAGED_APP"
+          rm -f "$DMG_PATH"
+          rm -f "$SCRIPT_PATH"
+        }
+
+        if [ ! -d "$STAGED_APP" ]; then
+          exit 11
+        fi
+
+        if [ -e "$CURRENT_APP" ]; then
+          mv "$CURRENT_APP" "$BACKUP_APP" || exit 12
+        fi
+
+        if /usr/bin/ditto "$STAGED_APP" "$CURRENT_APP"; then
+          rm -rf "$BACKUP_APP"
+          cleanup
+          /usr/bin/open "$CURRENT_APP"
+          exit 0
+        fi
+
+        rm -rf "$CURRENT_APP"
+        if [ -e "$BACKUP_APP" ]; then
+          mv "$BACKUP_APP" "$CURRENT_APP"
+        fi
+        cleanup
+        exit 13
+        """
+    }
+
+    private nonisolated static func detachDiskImage(at mountPoint: URL) {
+        let unmount = Process()
+        unmount.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        unmount.arguments = ["detach", mountPoint.path, "-quiet", "-force"]
+        try? unmount.run()
+        unmount.waitUntilExit()
+    }
+
+    private nonisolated static func apiErrorMessage(from data: Data) -> String? {
+        guard
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let message = json["message"] as? String
+        else {
+            return nil
+        }
+        return message
+    }
+
+    private nonisolated static func normalizedSHA256(from digest: String?) -> String? {
+        guard let digest else { return nil }
+        let lower = digest.lowercased()
+        if lower.hasPrefix("sha256:") {
+            let value = String(lower.dropFirst("sha256:".count))
+            return value.count == 64 ? value : nil
+        }
+        return lower.count == 64 ? lower : nil
+    }
+
+    private nonisolated static func sha256Hex(for fileURL: URL) throws -> String {
+        let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private nonisolated static func currentArchitectureHint() -> String {
+        #if arch(arm64)
+        return "arm64"
+        #elseif arch(x86_64)
+        return "x86_64"
+        #else
+        return "unknown"
+        #endif
+    }
+
+    // MARK: - Tests
+
+    nonisolated static func _test_isNewerVersion(_ candidate: String, than current: String) -> Bool {
+        isNewerVersion(candidate, than: current)
+    }
+
+    nonisolated static func _test_preferredReleaseTag(
+        from releases: [GitHubRelease],
+        includePrerelease: Bool
+    ) -> String? {
+        let channel: ReleaseChannel = includePrerelease ? .includePrerelease : .stable
+        return preferredRelease(from: releases, channel: channel)?.tagName
+    }
+
+    nonisolated static func _test_preferredDMGAssetName(
+        from assets: [GitHubAsset],
+        architectureHint: String
+    ) -> String? {
+        preferredDMGAsset(from: assets, architectureHint: architectureHint)?.name
+    }
+}
+
+private struct SemanticVersion: Comparable {
+    private enum Identifier: Comparable {
+        case numeric(Int)
+        case text(String)
+
+        static func < (lhs: Identifier, rhs: Identifier) -> Bool {
+            switch (lhs, rhs) {
+            case (.numeric(let l), .numeric(let r)):
+                return l < r
+            case (.numeric, .text):
+                return true
+            case (.text, .numeric):
+                return false
+            case (.text(let l), .text(let r)):
+                return l < r
+            }
+        }
+    }
+
+    private let numbers: [Int]
+    private let prerelease: [Identifier]
+
+    var isPrerelease: Bool {
+        !prerelease.isEmpty
+    }
+
+    init?(raw: String) {
+        let normalized = UpdateChecker.normalizedVersionTag(raw)
+        let noBuildMetadata = normalized.split(separator: "+", maxSplits: 1, omittingEmptySubsequences: false)
+        let mainAndPrerelease = noBuildMetadata[0].split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        let numericTokens = mainAndPrerelease[0].split(separator: ".")
+        let parsedNumbers = numericTokens.compactMap { Int($0) }
+        guard !parsedNumbers.isEmpty, parsedNumbers.count == numericTokens.count else {
+            return nil
+        }
+        self.numbers = parsedNumbers
+
+        if mainAndPrerelease.count > 1 {
+            let prereleaseTokens = mainAndPrerelease[1].split(separator: ".")
+            self.prerelease = prereleaseTokens.map { token in
+                if let value = Int(token) {
+                    return .numeric(value)
+                }
+                return .text(String(token).lowercased())
+            }
+        } else {
+            self.prerelease = []
+        }
+    }
+
+    static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
+        for index in 0..<max(lhs.numbers.count, rhs.numbers.count) {
+            let left = index < lhs.numbers.count ? lhs.numbers[index] : 0
+            let right = index < rhs.numbers.count ? rhs.numbers[index] : 0
+            if left != right { return left < right }
+        }
+
+        let leftIsPrerelease = !lhs.prerelease.isEmpty
+        let rightIsPrerelease = !rhs.prerelease.isEmpty
+        if leftIsPrerelease != rightIsPrerelease {
+            return leftIsPrerelease
+        }
+
+        for index in 0..<max(lhs.prerelease.count, rhs.prerelease.count) {
+            guard index < lhs.prerelease.count else { return true }
+            guard index < rhs.prerelease.count else { return false }
+            if lhs.prerelease[index] != rhs.prerelease[index] {
+                return lhs.prerelease[index] < rhs.prerelease[index]
+            }
+        }
+        return false
     }
 }
 
 // MARK: - GitHub API models
 
-private struct GitHubRelease: Decodable {
+struct GitHubRelease: Decodable {
     let tagName: String
+    let draft: Bool
+    let prerelease: Bool
+    let publishedAt: String?
     let assets: [GitHubAsset]
+
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
+        case draft
+        case prerelease
+        case publishedAt = "published_at"
         case assets
     }
 }
 
-private struct GitHubAsset: Decodable {
+struct GitHubAsset: Decodable {
     let name: String
     let browserDownloadURL: String
+    let downloadCount: Int?
+    let digest: String?
+
     enum CodingKeys: String, CodingKey {
         case name
         case browserDownloadURL = "browser_download_url"
+        case downloadCount = "download_count"
+        case digest
     }
 }

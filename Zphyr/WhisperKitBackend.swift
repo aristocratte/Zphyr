@@ -125,7 +125,8 @@ final class WhisperKitBackend: ASRService {
     // MARK: - Loading
 
     func loadIfInstalled() async {
-        guard AppState.shared.whisperInstalled, !isLoaded else { return }
+        guard !isLoaded else { return }
+        guard AppState.shared.whisperInstalled || Self.resolveInstallURL() != nil else { return }
         do {
             let config = WhisperKitConfig(
                 model: Self.modelVariant,

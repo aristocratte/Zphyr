@@ -9,6 +9,7 @@
 
 import AppKit
 import Carbon
+import Observation
 
 // MARK: - TriggerKey
 
@@ -83,6 +84,10 @@ enum TriggerKey: String, CaseIterable, Identifiable {
         case .rightShift:               return .shift
         }
     }
+
+    static func from(keyCode: UInt16) -> TriggerKey? {
+        allCases.first { $0.keyCode == keyCode }
+    }
 }
 
 // MARK: - RecordedShortcut (custom key binding)
@@ -95,13 +100,24 @@ struct RecordedShortcut: Codable, Equatable {
     var modifierFlags: NSEvent.ModifierFlags {
         NSEvent.ModifierFlags(rawValue: modifierRawValue)
     }
+
+    var normalizedModifierFlags: NSEvent.ModifierFlags {
+        ShortcutManager.normalizedModifierFlags(modifierFlags)
+    }
+
+    var isModifierOnly: Bool {
+        guard let modifierFlag = ShortcutManager.modifierFlagForKeyCode(keyCode) else { return false }
+        return normalizedModifierFlags == modifierFlag
+    }
 }
 
 // MARK: - ShortcutManager
 
+@Observable
 @MainActor
 final class ShortcutManager {
     static let shared = ShortcutManager()
+    nonisolated static let relevantModifierFlags: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
 
     private static let userDefaultsKey = "zphyr.shortcut.triggerKey"
 
@@ -121,7 +137,7 @@ final class ShortcutManager {
     private static let customShortcutKey = "zphyr.shortcut.custom"
 
     var recordedShortcut: RecordedShortcut? = {
-        guard let data = UserDefaults.standard.data(forKey: "zphyr.shortcut.custom"),
+        guard let data = UserDefaults.standard.data(forKey: ShortcutManager.customShortcutKey),
               let shortcut = try? JSONDecoder().decode(RecordedShortcut.self, from: data)
         else { return nil }
         return shortcut
@@ -140,14 +156,43 @@ final class ShortcutManager {
         }
     }
 
+    var activeShortcutDisplayText: String {
+        recordedShortcut?.displayText ?? selectedTriggerKey.shortLabel
+    }
+
+    func activeShortcutDisplayName(for languageCode: String) -> String {
+        if let recordedShortcut {
+            if let triggerKey = TriggerKey.from(keyCode: recordedShortcut.keyCode),
+               recordedShortcut.isModifierOnly {
+                return triggerKey.displayName(for: languageCode)
+            }
+            return recordedShortcut.displayText
+        }
+        return selectedTriggerKey.displayName(for: languageCode)
+    }
+
+    @ObservationIgnored
     private var recordingMonitor: Any?
+    @ObservationIgnored
     private var customKeyDownMonitor: Any?
+    @ObservationIgnored
     private var customKeyUpMonitor: Any?
+    @ObservationIgnored
+    private var customLocalKeyDownMonitor: Any?
+    @ObservationIgnored
+    private var customLocalKeyUpMonitor: Any?
+    @ObservationIgnored
+    private var pendingModifierShortcut: RecordedShortcut?
+    @ObservationIgnored
     var isRecording: Bool = false
+    @ObservationIgnored
     private var recordingCallback: ((RecordedShortcut) -> Void)?
 
+    @ObservationIgnored
     private var globalFlagsMonitor: Any?
+    @ObservationIgnored
     private var localFlagsMonitor: Any?
+    @ObservationIgnored
     private(set) var isHolding = false
 
     private init() {
@@ -174,26 +219,26 @@ final class ShortcutManager {
         }
 
         // Custom shortcut key down/up monitoring
-        if let custom = recordedShortcut {
+        if let custom = recordedShortcut, !custom.isModifierOnly {
             customKeyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, event.keyCode == custom.keyCode else { return }
-                let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                guard mods.rawValue == custom.modifierRawValue || custom.modifierRawValue == 0 else { return }
+                guard let self else { return }
                 Task { @MainActor in
-                    if !self.isHolding {
-                        self.isHolding = true
-                        await DictationEngine.shared.startDictation()
-                    }
+                    self.handleCustomKeyDown(event, shortcut: custom)
                 }
             }
             customKeyUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyUp) { [weak self] event in
-                guard let self, event.keyCode == custom.keyCode else { return }
+                guard let self else { return }
                 Task { @MainActor in
-                    if self.isHolding {
-                        self.isHolding = false
-                        await DictationEngine.shared.stopDictation()
-                    }
+                    self.handleCustomKeyUp(event, shortcut: custom)
                 }
+            }
+            customLocalKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self else { return event }
+                return self.handleCustomKeyDown(event, shortcut: custom) ? nil : event
+            }
+            customLocalKeyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
+                guard let self else { return event }
+                return self.handleCustomKeyUp(event, shortcut: custom) ? nil : event
             }
         }
     }
@@ -203,15 +248,23 @@ final class ShortcutManager {
         if let m = localFlagsMonitor  { NSEvent.removeMonitor(m); localFlagsMonitor  = nil }
         if let m = customKeyDownMonitor { NSEvent.removeMonitor(m); customKeyDownMonitor = nil }
         if let m = customKeyUpMonitor  { NSEvent.removeMonitor(m); customKeyUpMonitor  = nil }
+        if let m = customLocalKeyDownMonitor { NSEvent.removeMonitor(m); customLocalKeyDownMonitor = nil }
+        if let m = customLocalKeyUpMonitor  { NSEvent.removeMonitor(m); customLocalKeyUpMonitor  = nil }
         isHolding = false
     }
 
     // MARK: - Flag change handler
 
     private func handleFlagsChanged(_ event: NSEvent) {
-        guard recordedShortcut == nil else { return } // Custom shortcut handles key events separately
+        if let custom = recordedShortcut {
+            if custom.isModifierOnly {
+                handleCustomModifierFlagsChanged(event, shortcut: custom)
+            }
+            return
+        }
+
         guard event.keyCode == selectedTriggerKey.keyCode else { return }
-        let isDown = event.modifierFlags.contains(selectedTriggerKey.modifierFlag)
+        let isDown = Self.normalizedModifierFlags(event.modifierFlags).contains(selectedTriggerKey.modifierFlag)
 
         if isDown && !isHolding {
             isHolding = true
@@ -230,29 +283,39 @@ final class ShortcutManager {
         recordingCallback = onRecorded
         recordingMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self, self.isRecording else { return event }
-            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            // Build display text
-            var parts: [String] = []
-            if modifiers.contains(.command)  { parts.append("⌘") }
-            if modifiers.contains(.option)   { parts.append("⌥") }
-            if modifiers.contains(.control)  { parts.append("⌃") }
-            if modifiers.contains(.shift)    { parts.append("⇧") }
-            let keyStr = event.charactersIgnoringModifiers?.uppercased() ?? "?"
-            if event.type == .keyDown && !keyStr.isEmpty && keyStr != "?" {
-                parts.append(keyStr)
+            let modifiers = Self.normalizedModifierFlags(event.modifierFlags)
+
+            if event.type == .keyDown,
+               let shortcut = Self.makeShortcutFromKeyDown(event, modifiers: modifiers) {
+                Task { @MainActor in
+                    self.stopRecording()
+                    onRecorded(shortcut)
+                }
+                return nil
             }
-            let displayText = parts.joined()
-            guard !displayText.isEmpty else { return event }
-            let shortcut = RecordedShortcut(
-                keyCode: event.keyCode,
-                modifierRawValue: modifiers.rawValue,
-                displayText: displayText
-            )
-            Task { @MainActor in
-                self.stopRecording()
-                onRecorded(shortcut)
+
+            if event.type == .flagsChanged,
+               let modifierFlag = Self.modifierFlagForKeyCode(event.keyCode),
+               let displayText = Self.modifierDisplayTextForKeyCode(event.keyCode) {
+                let isDown = modifiers.contains(modifierFlag)
+                if isDown {
+                    self.pendingModifierShortcut = RecordedShortcut(
+                        keyCode: event.keyCode,
+                        modifierRawValue: modifierFlag.rawValue,
+                        displayText: displayText
+                    )
+                } else if let pendingModifierShortcut,
+                          pendingModifierShortcut.keyCode == event.keyCode {
+                    let shortcut = pendingModifierShortcut
+                    Task { @MainActor in
+                        self.stopRecording()
+                        onRecorded(shortcut)
+                    }
+                }
+                return nil
             }
-            return nil // consume event
+
+            return nil
         }
     }
 
@@ -260,10 +323,103 @@ final class ShortcutManager {
         isRecording = false
         if let m = recordingMonitor { NSEvent.removeMonitor(m); recordingMonitor = nil }
         recordingCallback = nil
+        pendingModifierShortcut = nil
     }
 
     func clearCustomShortcut() {
         stopRecording()
         recordedShortcut = nil
+    }
+
+    // MARK: - Internal helpers
+
+    nonisolated static func modifierFlagForKeyCode(_ keyCode: UInt16) -> NSEvent.ModifierFlags? {
+        switch keyCode {
+        case 58, 61: return .option
+        case 59, 62: return .control
+        case 56, 60: return .shift
+        case 54, 55: return .command
+        default: return nil
+        }
+    }
+
+    nonisolated static func modifierDisplayTextForKeyCode(_ keyCode: UInt16) -> String? {
+        switch keyCode {
+        case 58: return "⌥ Left Option"
+        case 61: return "⌥ Right Option"
+        case 59: return "⌃ Left Control"
+        case 62: return "⌃ Right Control"
+        case 56: return "⇧ Left Shift"
+        case 60: return "⇧ Right Shift"
+        case 55: return "⌘ Left Command"
+        case 54: return "⌘ Right Command"
+        default: return nil
+        }
+    }
+
+    nonisolated static func normalizedModifierFlags(_ flags: NSEvent.ModifierFlags) -> NSEvent.ModifierFlags {
+        flags.intersection(relevantModifierFlags)
+    }
+
+    nonisolated static func isModifierOnlyShortcut(_ shortcut: RecordedShortcut) -> Bool {
+        guard let modifierFlag = modifierFlagForKeyCode(shortcut.keyCode) else { return false }
+        let normalized = normalizedModifierFlags(NSEvent.ModifierFlags(rawValue: shortcut.modifierRawValue))
+        return normalized == modifierFlag
+    }
+
+    // MARK: - Custom shortcut runtime handling
+
+    private func handleCustomModifierFlagsChanged(_ event: NSEvent, shortcut: RecordedShortcut) {
+        guard event.keyCode == shortcut.keyCode else { return }
+
+        let isDown = Self.normalizedModifierFlags(event.modifierFlags) == shortcut.normalizedModifierFlags
+        if isDown && !isHolding {
+            isHolding = true
+            Task { await DictationEngine.shared.startDictation() }
+        } else if !isDown && isHolding {
+            isHolding = false
+            Task { await DictationEngine.shared.stopDictation() }
+        }
+    }
+
+    @discardableResult
+    private func handleCustomKeyDown(_ event: NSEvent, shortcut: RecordedShortcut) -> Bool {
+        guard event.keyCode == shortcut.keyCode else { return false }
+        let modifiers = Self.normalizedModifierFlags(event.modifierFlags)
+        guard modifiers == shortcut.normalizedModifierFlags else { return false }
+        guard !isHolding else { return true }
+        isHolding = true
+        Task { await DictationEngine.shared.startDictation() }
+        return true
+    }
+
+    @discardableResult
+    private func handleCustomKeyUp(_ event: NSEvent, shortcut: RecordedShortcut) -> Bool {
+        guard event.keyCode == shortcut.keyCode else { return false }
+        guard isHolding else { return true }
+        isHolding = false
+        Task { await DictationEngine.shared.stopDictation() }
+        return true
+    }
+
+    private static func makeShortcutFromKeyDown(
+        _ event: NSEvent,
+        modifiers: NSEvent.ModifierFlags
+    ) -> RecordedShortcut? {
+        let keyStr = event.charactersIgnoringModifiers?.uppercased() ?? "?"
+        guard !keyStr.isEmpty, keyStr != "?" else { return nil }
+
+        var parts: [String] = []
+        if modifiers.contains(.command)  { parts.append("⌘") }
+        if modifiers.contains(.option)   { parts.append("⌥") }
+        if modifiers.contains(.control)  { parts.append("⌃") }
+        if modifiers.contains(.shift)    { parts.append("⇧") }
+        parts.append(keyStr)
+
+        return RecordedShortcut(
+            keyCode: event.keyCode,
+            modifierRawValue: modifiers.rawValue,
+            displayText: parts.joined()
+        )
     }
 }

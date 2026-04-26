@@ -142,7 +142,7 @@ final class DictationEngine {
         state.preferredASRBackend = preferred
         state.activeASRBackend = asrBackend.descriptor.kind
         if !asrBackend.descriptor.requiresModelInstall {
-            state.modelStatus = .ready
+            refreshNonInstallBackendStatus(asrBackend)
         }
     }
 
@@ -172,8 +172,14 @@ final class DictationEngine {
         if asrBackend.descriptor.requiresModelInstall {
             state.modelStatus = asrBackend.isLoaded ? .ready : .notDownloaded
         } else {
-            state.modelStatus = .ready
+            refreshNonInstallBackendStatus(asrBackend)
         }
+    }
+
+    private func refreshNonInstallBackendStatus(_ backend: any ASRService) {
+        AppState.shared.modelStatus = backend.isLoaded
+            ? .ready
+            : .failed(backend.installError ?? "\(backend.descriptor.displayName) is not ready.")
     }
 
     // MARK: - Sound Effects
@@ -223,6 +229,45 @@ final class DictationEngine {
         modelLoadTask = nil
     }
 
+    /// Loads the selected backend only when its files are already present locally.
+    /// This is used by launch/preflight paths so the app never downloads a model
+    /// until the user explicitly presses an install/download action.
+    func loadInstalledModelIfAvailable() async {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            Self.modelLogger.notice("[ModelLoad] skipping installed-only backend load under XCTest")
+            return
+        }
+
+        let state = AppState.shared
+        state.refreshPerformanceProfile()
+        let effectivePreferred = PerformanceRouter.shared.effectiveASRBackend(
+            preferred: state.preferredASRBackend,
+            profile: state.performanceProfile
+        )
+        if effectivePreferred != currentASRBackendKind {
+            setASRBackend(effectivePreferred)
+        }
+
+        let backend = asrBackend
+        state.activeASRBackend = backend.descriptor.kind
+
+        if backend.descriptor.requiresModelInstall {
+            await backend.loadIfInstalled()
+            state.modelInstallPath = backend.installPath
+            state.downloadStats = DownloadStats()
+            state.isDownloadPaused = false
+            state.modelStatus = backend.isLoaded ? .ready : .notDownloaded
+            return
+        }
+
+        state.modelStatus = .loading
+        await backend.loadIfInstalled()
+        state.modelInstallPath = backend.installPath
+        state.downloadStats = DownloadStats()
+        state.isDownloadPaused = false
+        refreshNonInstallBackendStatus(backend)
+    }
+
     func cancelModelDownload() {
         let existing = modelLoadTask
         existing?.cancel()
@@ -232,7 +277,7 @@ final class DictationEngine {
         if asrBackend.descriptor.requiresModelInstall {
             AppState.shared.modelStatus = .notDownloaded
         } else {
-            AppState.shared.modelStatus = .ready
+            refreshNonInstallBackendStatus(asrBackend)
         }
     }
 
@@ -255,7 +300,7 @@ final class DictationEngine {
         if asrBackend.descriptor.requiresModelInstall {
             AppState.shared.modelStatus = .notDownloaded
         } else {
-            AppState.shared.modelStatus = .ready
+            refreshNonInstallBackendStatus(asrBackend)
         }
     }
 
@@ -289,8 +334,12 @@ final class DictationEngine {
             await backend.loadIfInstalled()
             state.modelInstallPath = backend.installPath
             state.downloadStats = DownloadStats()
-            state.modelStatus = .ready
-            Self.modelLogger.notice("[ModelLoad] backend ready without install: \(descriptor.displayName, privacy: .public)")
+            refreshNonInstallBackendStatus(backend)
+            if backend.isLoaded {
+                Self.modelLogger.notice("[ModelLoad] backend ready without install: \(descriptor.displayName, privacy: .public)")
+            } else {
+                Self.modelLogger.warning("[ModelLoad] backend unavailable without install: \(descriptor.displayName, privacy: .public)")
+            }
             return
         }
 
@@ -430,6 +479,7 @@ final class DictationEngine {
             transcriptionMode: transcriptionPlan.mode,
             outputProfile: outputProfile
         )
+        state.error = nil
         overlayController.show()
 
         // ── Guard: microphone ─────────────────────────────────────────────────
@@ -439,7 +489,7 @@ final class DictationEngine {
         if state.micPermission != .granted {
             let granted = await state.requestMicrophoneAccess()
             guard granted else {
-                state.error = L10n.ui(
+                let errorMessage = L10n.ui(
                     for: state.selectedLanguage.id,
                     fr: "Accès au microphone refusé. Autorisez Zphyr dans Réglages Système → Confidentialité → Microphone.",
                     en: "Microphone access denied. Allow Zphyr in System Settings → Privacy & Security → Microphone.",
@@ -451,9 +501,9 @@ final class DictationEngine {
                 state.finishCurrentDictationSession(
                     phase: .failure,
                     note: "microphone_access_denied",
-                    errorMessage: state.error
+                    errorMessage: errorMessage
                 )
-                overlayController.hide()
+                hideOverlay(for: .failure)
                 targetApp = nil
                 return
             }
@@ -464,7 +514,7 @@ final class DictationEngine {
                     phase: .cancelled,
                     note: "key_released_during_arming"
                 )
-                overlayController.hide()
+                hideOverlay(for: .cancelled)
                 targetApp = nil
                 return
             }
@@ -472,7 +522,7 @@ final class DictationEngine {
 
         // ── Guard: ASR backend ready ──────────────────────────────────────────
         guard state.modelStatus.isReady, asrBackend.isLoaded else {
-            state.error = L10n.ui(
+            let errorMessage = L10n.ui(
                 for: state.selectedLanguage.id,
                 fr: "Le moteur de dictée n'est pas encore prêt.",
                 en: "The dictation backend is not ready yet.",
@@ -484,9 +534,9 @@ final class DictationEngine {
             state.finishCurrentDictationSession(
                 phase: .failure,
                 note: "backend_not_ready",
-                errorMessage: state.error
+                errorMessage: errorMessage
             )
-            overlayController.hide()
+            hideOverlay(for: .failure)
             targetApp = nil
             return
         }
@@ -500,11 +550,21 @@ final class DictationEngine {
         }, onAudioChunk: nil) else {
             isDictating = false
             targetApp = nil
+            let errorMessage = L10n.ui(
+                for: state.selectedLanguage.id,
+                fr: "Impossible de démarrer l'enregistrement audio.",
+                en: "Unable to start audio capture.",
+                es: "No se pudo iniciar la captura de audio.",
+                zh: "无法启动音频采集。",
+                ja: "音声収録を開始できませんでした。",
+                ru: "Не удалось запустить захват аудио."
+            )
             state.finishCurrentDictationSession(
                 phase: .failure,
-                note: "audio_capture_start_failed"
+                note: "audio_capture_start_failed",
+                errorMessage: errorMessage
             )
-            overlayController.hide()
+            hideOverlay(for: .failure)
             return
         }
         state.transitionCurrentDictationSession(to: .recording)
@@ -576,7 +636,7 @@ final class DictationEngine {
             note: "user_cancelled"
         )
         playDictationEndSound()
-        overlayController.hide()
+        hideOverlay(for: .cancelled)
         targetApp = nil
     }
 
@@ -755,7 +815,7 @@ final class DictationEngine {
             )
             targetApp = nil
             playDictationEndSound()
-            overlayController.hide()
+            hideOverlay(for: .cancelled)
             isProcessing = false
             return
         }
@@ -812,19 +872,24 @@ final class DictationEngine {
             )
         } else {
             Self.pipelineLogger.notice("[Dictation] no transcription text — bufferCount=\(capturedSamples, privacy: .public) rawText.count=\(rawText.count, privacy: .public)")
-            let errorMessage: String
-            if capturedSamples < 1600 {
-                errorMessage = L10n.ui(
-                    for: state.selectedLanguage.id,
-                    fr: "Enregistrement trop court. Maintiens la touche et parle, puis relâche.",
-                    en: "Recording too short. Hold the key while speaking, then release.",
-                    es: "Grabación demasiado corta. Mantén la tecla mientras hablas.",
-                    zh: "录音太短，请按住按键说话再松开。",
-                    ja: "録音が短すぎます。キーを押しながら話し、離してください。",
-                    ru: "Запись слишком короткая. Удерживайте клавишу пока говорите."
-                )
-            } else {
-                errorMessage = L10n.ui(
+            let surfacedError = state.error?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let sessionErrorMessage = state.currentDictationSession?.errorMessage?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let errorMessage = ((surfacedError?.isEmpty == false) ? surfacedError : nil)
+            ?? ((sessionErrorMessage?.isEmpty == false) ? sessionErrorMessage : nil)
+            ?? {
+                if capturedSamples < 1600 {
+                    return L10n.ui(
+                        for: state.selectedLanguage.id,
+                        fr: "Enregistrement trop court. Maintiens la touche et parle, puis relâche.",
+                        en: "Recording too short. Hold the key while speaking, then release.",
+                        es: "Grabación demasiado corta. Mantén la tecla mientras hablas.",
+                        zh: "录音太短，请按住按键说话再松开。",
+                        ja: "録音が短すぎます。キーを押しながら話し、離してください。",
+                        ru: "Запись слишком короткая. Удерживайте клавишу пока говорите."
+                    )
+                }
+                return L10n.ui(
                     for: state.selectedLanguage.id,
                     fr: "Aucun texte détecté (\(capturedSamples/16)ms audio). Parle plus fort ou plus longtemps.",
                     en: "No text detected (\(capturedSamples/16)ms audio). Speak louder or longer.",
@@ -833,8 +898,7 @@ final class DictationEngine {
                     ja: "テキストが検出されませんでした（\(capturedSamples/16)ms の音声）。もっと大きく、または長く話してください。",
                     ru: "Текст не распознан (\(capturedSamples/16) мс аудио). Говорите громче или дольше."
                 )
-            }
-            state.error = errorMessage
+            }()
             state.finishCurrentDictationSession(
                 phase: .failure,
                 note: "empty_final_text",
@@ -852,7 +916,7 @@ final class DictationEngine {
         LocalMetricsRecorder.shared.record(metrics)
         targetApp = nil
         playDictationEndSound()
-        overlayController.hide()
+        hideOverlayForLatestSession()
 
         try? await Task.sleep(for: .milliseconds(600))
         state.resetLegacyDictationState()
@@ -867,6 +931,24 @@ final class DictationEngine {
         targetApp = nil
         isProcessing = false
         return true
+    }
+
+    private func hideOverlay(for phase: DictationSessionPhase) {
+        overlayController.hide(after: overlayHideDelay(for: phase))
+    }
+
+    private func hideOverlayForLatestSession() {
+        let phase = AppState.shared.latestDictationSession?.phase ?? .success
+        hideOverlay(for: phase)
+    }
+
+    private func overlayHideDelay(for phase: DictationSessionPhase) -> TimeInterval {
+        switch phase {
+        case .failure:
+            return 2.4
+        default:
+            return 0.6
+        }
     }
 
     // MARK: - Text Formatter Pipeline
@@ -996,7 +1078,7 @@ final class DictationEngine {
         audioSnapshot: [Float],
         language lang: String?
     ) async -> String {
-        await transcribeAudioSamples(audioSnapshot, language: lang)
+        await transcribeAudioSamples(audioSnapshot, language: lang, surfaceErrorsModally: false)
     }
 
     func transcribeAudioFile(at url: URL, language: WhisperLanguage) async -> String {
@@ -1032,7 +1114,7 @@ final class DictationEngine {
             return ""
         }
 
-        let rawText = await transcribeAudioSamples(samples, language: language.id)
+        let rawText = await transcribeAudioSamples(samples, language: language.id, surfaceErrorsModally: true)
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         state.lastTranscription = trimmed
         if trimmed.isEmpty {
@@ -1051,7 +1133,8 @@ final class DictationEngine {
 
     private func transcribeAudioSamples(
         _ audioSnapshot: [Float],
-        language lang: String?
+        language lang: String?,
+        surfaceErrorsModally: Bool
     ) async -> String {
         let vad = VoiceActivityDetector(sampleRate: AudioCaptureService.sampleRate)
         let processedAudio: [Float]
@@ -1066,17 +1149,16 @@ final class DictationEngine {
                 )
             }
         } catch {
-            await MainActor.run {
-                AppState.shared.error = L10n.ui(
-                    for: AppState.shared.selectedLanguage.id,
-                    fr: "Aucune voix détectée dans l'audio. Réessaie en parlant plus près du micro.",
-                    en: "No voice detected in the audio. Try speaking closer to the microphone.",
-                    es: "No se detectó voz en el audio. Intenta hablar más cerca del micrófono.",
-                    zh: "音频中未检测到语音。请靠近麦克风重试。",
-                    ja: "音声が検出されませんでした。マイクに近づいて再試行してください。",
-                    ru: "В аудио не обнаружен голос. Попробуйте говорить ближе к микрофону."
-                )
-            }
+            let errorMessage = L10n.ui(
+                for: AppState.shared.selectedLanguage.id,
+                fr: "Aucune voix détectée dans l'audio. Réessaie en parlant plus près du micro.",
+                en: "No voice detected in the audio. Try speaking closer to the microphone.",
+                es: "No se detectó voz en el audio. Intenta hablar más cerca del micrófono.",
+                zh: "音频中未检测到语音。请靠近麦克风重试。",
+                ja: "音声が検出されませんでした。マイクに近づいて再試行してください。",
+                ru: "В аудио не обнаружен голос. Попробуйте говорить ближе к микрофону."
+            )
+            await surfaceASRError(errorMessage, modally: surfaceErrorsModally)
             Self.pipelineLogger.error("[Dictation] VAD rejected audio: \(error.localizedDescription, privacy: .public)")
             return ""
         }
@@ -1162,23 +1244,31 @@ final class DictationEngine {
             return selected.text
         }
 
-        await MainActor.run {
-            AppState.shared.error = L10n.ui(
-                for: AppState.shared.selectedLanguage.id,
-                fr: "La transcription a échoué. Réessayez après rechargement du moteur.",
-                en: "Transcription failed. Retry after reloading the backend.",
-                es: "La transcripción falló. Vuelve a intentarlo tras recargar el backend.",
-                zh: "转写失败。请重新加载后端后重试。",
-                ja: "文字起こしに失敗しました。バックエンド再読み込み後に再試行してください。",
-                ru: "Сбой транскрибации. Повторите после перезагрузки бэкенда."
-            )
-        }
+        let errorMessage = L10n.ui(
+            for: AppState.shared.selectedLanguage.id,
+            fr: "La transcription a échoué. Réessayez après rechargement du moteur.",
+            en: "Transcription failed. Retry after reloading the backend.",
+            es: "La transcripción falló. Vuelve a intentarlo tras recargar el backend.",
+            zh: "转写失败。请重新加载后端后重试。",
+            ja: "文字起こしに失敗しました。バックエンド再読み込み後に再試行してください。",
+            ru: "Сбой транскрибации. Повторите после перезагрузки бэкенда."
+        )
+        await surfaceASRError(errorMessage, modally: surfaceErrorsModally)
         if let lastFailure {
             Self.pipelineLogger.error("[Dictation] all backend attempts failed; last error=\(lastFailure.localizedDescription, privacy: .public)")
         } else {
             Self.pipelineLogger.error("[Dictation] all backend attempts failed; no backend available")
         }
         return ""
+    }
+
+    @MainActor
+    private func surfaceASRError(_ message: String, modally: Bool) {
+        if modally {
+            AppState.shared.error = message
+        } else {
+            AppState.shared.updateCurrentDictationSession(errorMessage: message)
+        }
     }
 
     private enum TranscriptionAttemptError: LocalizedError {
@@ -1243,6 +1333,8 @@ final class DictationEngine {
             return min(120.0, max(whisperBaseTranscriptionTimeoutSeconds, audioSeconds * 2.2 + 8.0))
         case .appleSpeechAnalyzer:
             return min(60.0, max(15.0, audioSeconds * 1.4 + 6.0))
+        case .codexVoice:
+            return min(180.0, max(30.0, audioSeconds * 1.6 + 15.0))
         case .parakeet:
             return min(90.0, max(15.0, audioSeconds * 1.8 + 6.0))
         }

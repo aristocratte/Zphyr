@@ -7,6 +7,7 @@
 
 import Testing
 import Foundation
+import AppKit
 @testable import Zphyr
 
 struct ZphyrTests {
@@ -81,6 +82,90 @@ struct ZphyrTests {
     @Test func triggerKeyCodesAreUnique() {
         let codes = TriggerKey.allCases.map(\.keyCode)
         #expect(Set(codes).count == codes.count)
+    }
+
+    @Test func modifierKeyCodeMappingRecognizesLeftAndRightOption() {
+        #expect(ShortcutManager.modifierFlagForKeyCode(58) == .option)
+        #expect(ShortcutManager.modifierFlagForKeyCode(61) == .option)
+        #expect(ShortcutManager.modifierDisplayTextForKeyCode(58) == "⌥ Left Option")
+        #expect(ShortcutManager.modifierDisplayTextForKeyCode(61) == "⌥ Right Option")
+    }
+
+    @Test func modifierOnlyShortcutDetectionMatchesRecordedModifier() {
+        let leftOptionOnly = RecordedShortcut(
+            keyCode: 58,
+            modifierRawValue: NSEvent.ModifierFlags.option.rawValue,
+            displayText: "⌥ Left Option"
+        )
+        #expect(ShortcutManager.isModifierOnlyShortcut(leftOptionOnly))
+
+        let leftCommandOnly = RecordedShortcut(
+            keyCode: 55,
+            modifierRawValue: NSEvent.ModifierFlags.command.rawValue,
+            displayText: "⌘ Left Command"
+        )
+        #expect(ShortcutManager.isModifierOnlyShortcut(leftCommandOnly))
+
+        let optionPlusLetter = RecordedShortcut(
+            keyCode: 0,
+            modifierRawValue: NSEvent.ModifierFlags.option.rawValue,
+            displayText: "⌥A"
+        )
+        #expect(!ShortcutManager.isModifierOnlyShortcut(optionPlusLetter))
+    }
+
+    @Test func updateCheckerVersionComparisonHandlesPrereleases() {
+        #expect(UpdateChecker._test_isNewerVersion("1.0.2-beta", than: "1.0.1"))
+        #expect(!UpdateChecker._test_isNewerVersion("1.0.1-beta", than: "1.0.1"))
+        #expect(UpdateChecker._test_isNewerVersion("v1.0.2", than: "1.0.1"))
+    }
+
+    @Test func updateCheckerStableChannelPrefersLatestNonPrerelease() {
+        let releases = [
+            GitHubRelease(
+                tagName: "v1.1.0-beta",
+                draft: false,
+                prerelease: true,
+                publishedAt: "2026-03-16T10:00:00Z",
+                assets: []
+            ),
+            GitHubRelease(
+                tagName: "v1.0.5",
+                draft: false,
+                prerelease: false,
+                publishedAt: "2026-03-15T10:00:00Z",
+                assets: []
+            )
+        ]
+
+        #expect(UpdateChecker._test_preferredReleaseTag(from: releases, includePrerelease: false) == "v1.0.5")
+        #expect(UpdateChecker._test_preferredReleaseTag(from: releases, includePrerelease: true) == "v1.1.0-beta")
+    }
+
+    @Test func updateCheckerAssetSelectionPrefersArchitectureCompatibleDmg() {
+        let assets = [
+            GitHubAsset(
+                name: "Zphyr-debug.dmg",
+                browserDownloadURL: "https://example.com/debug.dmg",
+                downloadCount: 1,
+                digest: nil
+            ),
+            GitHubAsset(
+                name: "Zphyr-arm64.dmg",
+                browserDownloadURL: "https://example.com/arm64.dmg",
+                downloadCount: 10,
+                digest: nil
+            ),
+            GitHubAsset(
+                name: "Zphyr-universal.dmg",
+                browserDownloadURL: "https://example.com/universal.dmg",
+                downloadCount: 20,
+                digest: nil
+            )
+        ]
+
+        #expect(UpdateChecker._test_preferredDMGAssetName(from: assets, architectureHint: "arm64") == "Zphyr-arm64.dmg")
+        #expect(UpdateChecker._test_preferredDMGAssetName(from: assets, architectureHint: "x86_64") == "Zphyr-universal.dmg")
     }
 
     @Test func secureStoreMigratesPlaintextToEncrypted() {
@@ -161,6 +246,131 @@ struct ZphyrTests {
         let ids = FormattingModelCatalog.all.map(\.id)
         #expect(ids == [.qwen3_4b])
         #expect(FormattingModelCatalog.descriptor(for: .qwen3_4b).huggingFaceModelID.contains("Qwen3.5-4B-MLX-4bit"))
+    }
+
+    @Test func preflightInstallPlanDoesNotDownloadWhenSelectionIsEmpty() {
+        let descriptors: [ASRBackendKind: ASRBackendDescriptor] = [
+            .appleSpeechAnalyzer: ASRBackendDescriptor(
+                kind: .appleSpeechAnalyzer,
+                displayName: "Apple",
+                requiresModelInstall: false,
+                modelSizeLabel: nil,
+                onboardingSubtitle: "",
+                approxModelBytes: nil
+            ),
+            .whisperKit: ASRBackendDescriptor(
+                kind: .whisperKit,
+                displayName: "Whisper",
+                requiresModelInstall: true,
+                modelSizeLabel: "~600 MB",
+                onboardingSubtitle: "",
+                approxModelBytes: 600
+            ),
+        ]
+
+        let plan = PreflightModelInstallPlan(
+            preferredASRBackend: .appleSpeechAnalyzer,
+            selectedASRBackends: [],
+            selectedFormattingModels: [],
+            availableASRDescriptors: descriptors,
+            availableFormattingModels: [.qwen3_4b]
+        )
+
+        #expect(plan.asrBackendsToInstall.isEmpty)
+        #expect(plan.formattingModelsToInstall.isEmpty)
+        #expect(!plan.hasDownloads)
+        #expect(plan.activeASRBackend == .appleSpeechAnalyzer)
+    }
+
+    @Test func preflightInstallPlanOnlyInstallsExplicitlySelectedInstallableModels() {
+        let descriptors: [ASRBackendKind: ASRBackendDescriptor] = [
+            .appleSpeechAnalyzer: ASRBackendDescriptor(
+                kind: .appleSpeechAnalyzer,
+                displayName: "Apple",
+                requiresModelInstall: false,
+                modelSizeLabel: nil,
+                onboardingSubtitle: "",
+                approxModelBytes: nil
+            ),
+            .whisperKit: ASRBackendDescriptor(
+                kind: .whisperKit,
+                displayName: "Whisper",
+                requiresModelInstall: true,
+                modelSizeLabel: "~600 MB",
+                onboardingSubtitle: "",
+                approxModelBytes: 600
+            ),
+            .parakeet: ASRBackendDescriptor(
+                kind: .parakeet,
+                displayName: "Parakeet",
+                requiresModelInstall: true,
+                modelSizeLabel: "~640 MB",
+                onboardingSubtitle: "",
+                approxModelBytes: 640
+            ),
+        ]
+
+        let plan = PreflightModelInstallPlan(
+            preferredASRBackend: .whisperKit,
+            selectedASRBackends: [.appleSpeechAnalyzer, .whisperKit],
+            selectedFormattingModels: [.qwen3_4b],
+            availableASRDescriptors: descriptors,
+            availableFormattingModels: [.qwen3_4b]
+        )
+
+        #expect(plan.asrBackendsToInstall == [.whisperKit])
+        #expect(plan.formattingModelsToInstall == [.qwen3_4b])
+        #expect(plan.hasDownloads)
+        #expect(plan.activeASRBackend == .whisperKit)
+    }
+
+    @Test func preflightInstallPlanKeepsCodexVoiceAsNoDownloadProvider() {
+        let descriptors: [ASRBackendKind: ASRBackendDescriptor] = [
+            .appleSpeechAnalyzer: ASRBackendDescriptor(
+                kind: .appleSpeechAnalyzer,
+                displayName: "Apple",
+                requiresModelInstall: false,
+                modelSizeLabel: nil,
+                onboardingSubtitle: "",
+                approxModelBytes: nil
+            ),
+            .codexVoice: ASRBackendDescriptor(
+                kind: .codexVoice,
+                displayName: "Codex",
+                requiresModelInstall: false,
+                modelSizeLabel: nil,
+                onboardingSubtitle: "",
+                approxModelBytes: nil
+            ),
+            .whisperKit: ASRBackendDescriptor(
+                kind: .whisperKit,
+                displayName: "Whisper",
+                requiresModelInstall: true,
+                modelSizeLabel: "~600 MB",
+                onboardingSubtitle: "",
+                approxModelBytes: 600
+            ),
+        ]
+
+        let plan = PreflightModelInstallPlan(
+            preferredASRBackend: .codexVoice,
+            selectedASRBackends: [.codexVoice],
+            selectedFormattingModels: [],
+            availableASRDescriptors: descriptors,
+            availableFormattingModels: [.qwen3_4b]
+        )
+
+        #expect(plan.activeASRBackend == .codexVoice)
+        #expect(plan.asrBackendsToInstall.isEmpty)
+        #expect(!plan.hasDownloads)
+    }
+
+    @MainActor
+    @Test func performanceRouterDoesNotForceCodexVoiceOutOfEcoProfile() {
+        let profile = PerformanceProfile(tier: .eco, physicalMemoryBytes: 8 * 1_073_741_824)
+
+        #expect(PerformanceRouter.shared.effectiveASRBackend(preferred: .codexVoice, profile: profile) == .codexVoice)
+        #expect(PerformanceRouter.shared.effectiveASRBackend(preferred: .whisperKit, profile: profile) == .appleSpeechAnalyzer)
     }
 
     @MainActor

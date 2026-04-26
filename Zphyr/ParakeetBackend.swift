@@ -297,7 +297,8 @@ final class ParakeetBackend: ASRService {
     // MARK: - Loading
 
     func loadIfInstalled() async {
-        guard AppState.shared.parakeetInstalled, !isLoaded else { return }
+        guard !isLoaded else { return }
+        guard AppState.shared.parakeetInstalled || Self.resolveInstallURL() != nil else { return }
         if Self.resolveInstallURL() != nil {
             isLoaded = true
             log.notice("[ParakeetASR] model files found on disk — ready")

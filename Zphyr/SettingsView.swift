@@ -405,7 +405,7 @@ struct SystemSettingsContent: View {
                     profile: state.performanceProfile
                 )
                 DictationEngine.shared.refreshASRBackendSelection()
-                Task { await DictationEngine.shared.loadModel() }
+                Task { await DictationEngine.shared.loadInstalledModelIfAvailable() }
             }
         )
     }
@@ -441,7 +441,7 @@ struct SystemSettingsContent: View {
         if let explicitPath = state.modelInstallPath, fm.fileExists(atPath: explicitPath) {
             return URL(fileURLWithPath: explicitPath)
         }
-        return WhisperKitBackend.resolveInstallURL()
+        return ASRBackendCatalog.installURL(for: asrDescriptor.kind)
     }
 
     private var formatterInstallURL: URL? {
@@ -450,6 +450,17 @@ struct SystemSettingsContent: View {
 
     private var formatterDescriptor: FormattingModelDescriptor {
         FormattingModelCatalog.descriptor(for: state.activeFormattingModel)
+    }
+
+    private var asrNonInstallStorageLabel: String {
+        switch asrDescriptor.kind {
+        case .appleSpeechAnalyzer:
+            return t("Backend système intégré", "Built-in system backend", "Backend de sistema integrado", "系统内置后端", "システム内蔵バックエンド", "Встроенный системный бэкенд")
+        case .codexVoice:
+            return t("Compte Codex, aucun fichier modèle local", "Codex account, no local model file", "Cuenta Codex, sin archivo de modelo local", "Codex 账号，无本地模型文件", "Codex アカウント、ローカルモデルなし", "Аккаунт Codex, без локального файла модели")
+        case .whisperKit, .parakeet:
+            return t("Non installé", "Not installed", "No instalado", "未安装", "未インストール", "Не установлен")
+        }
     }
 
     private var formatterInstallStatus: FormattingModelInstallStatus {
@@ -488,6 +499,244 @@ struct SystemSettingsContent: View {
     }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(t("Système", "System", "Sistema", "系统", "システム", "Система"))
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundColor(Color(hex: "#171717"))
+                    Text(t(
+                        "Moteurs voix, langues, formatage et stockage local.",
+                        "Voice engines, languages, formatting, and local storage.",
+                        "Motores de voz, idiomas, formateo y almacenamiento local.",
+                        "语音引擎、语言、格式化和本地存储。",
+                        "音声エンジン、言語、整形、ローカル保存。",
+                        "Голосовые движки, языки, форматирование и локальное хранилище."
+                    ))
+                    .font(.system(size: 12.5))
+                    .foregroundColor(Color(hex: "#777770"))
+                }
+                Spacer()
+                Text(performanceProfile.tier.displayName)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(performanceProfile.tier == .pro ? Color(hex: "#087F68") : Color(hex: "#666660"))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background((performanceProfile.tier == .pro ? Color(hex: "#22D3B8") : Color(hex: "#E5E5E0")).opacity(0.18))
+                    .clipShape(Capsule())
+            }
+
+            SystemPanel {
+                HStack(spacing: 10) {
+                    SystemMetricTile(
+                        icon: "memorychip",
+                        title: t("Profil matériel", "Hardware profile", "Perfil hardware", "硬件配置", "ハードウェア", "Железо"),
+                        value: "\(performanceProfile.physicalMemoryGB) GB RAM",
+                        detail: performanceProfile.displayLabel(for: lang),
+                        color: Color(hex: "#FF9500")
+                    )
+                    SystemMetricTile(
+                        icon: "waveform",
+                        title: t("Voix active", "Active voice", "Voz activa", "当前语音", "音声入力", "Активный голос"),
+                        value: asrDescriptor.displayName,
+                        detail: state.modelStatusLabel,
+                        color: Color(hex: "#007AFF")
+                    )
+                    SystemMetricTile(
+                        icon: "textformat.alt",
+                        title: t("Formatage", "Formatting", "Formateo", "格式化", "整形", "Форматирование"),
+                        value: state.formattingMode.displayName(for: lang),
+                        detail: state.activeFormattingModel.displayName(for: lang),
+                        color: Color(hex: "#AF52DE")
+                    )
+                }
+            }
+
+            SystemPanel {
+                SystemPanelHeader(
+                    icon: "waveform.and.mic",
+                    title: t("Moteur de transcription", "Transcription engine", "Motor de transcripción", "转写引擎", "文字起こしエンジン", "Движок транскрибации"),
+                    subtitle: t("Choisis le provider actif. Les installations restent manuelles.", "Choose the active provider. Installs stay manual.", "Elige el proveedor activo. Las instalaciones son manuales.", "选择当前 provider。安装保持手动。", "使う provider を選択。インストールは手動です。", "Выберите активный provider. Установка только вручную."),
+                    color: Color(hex: "#007AFF")
+                )
+                VStack(spacing: 8) {
+                    ForEach(ASRBackendCatalog.allDescriptors, id: \.kind) { descriptor in
+                        SystemASRModelRow(
+                            descriptor: descriptor,
+                            isActive: state.preferredASRBackend == descriptor.kind,
+                            statusText: asrSettingsStatus(for: descriptor.kind).text,
+                            statusColor: asrSettingsStatus(for: descriptor.kind).color,
+                            installURL: ASRBackendCatalog.installURL(for: descriptor.kind),
+                            canUse: asrSettingsCanUse(descriptor.kind),
+                            isBusy: asrSettingsIsBusy(descriptor.kind),
+                            lang: lang
+                        ) {
+                            selectASRBackend(descriptor.kind)
+                        } onInstall: {
+                            installASRBackend(descriptor.kind)
+                        } onOpen: {
+                            if let url = ASRBackendCatalog.installURL(for: descriptor.kind) {
+                                NSWorkspace.shared.activateFileViewerSelecting([url])
+                            }
+                        } onRemove: {
+                            removeASRBackend(descriptor.kind)
+                        }
+                    }
+                }
+            }
+
+            SystemPanel {
+                SystemPanelHeader(
+                    icon: "sparkles",
+                    title: t("Formatage local", "Local formatting", "Formateo local", "本地格式化", "ローカル整形", "Локальное форматирование"),
+                    subtitle: state.isProModeUnlocked
+                        ? t("Mode normal ou IA locale, avec modèle choisi explicitement.", "Normal mode or local AI, with explicit model choice.", "Modo normal o IA local, con modelo elegido explícitamente.", "普通模式或本地 AI，模型明确选择。", "通常モードまたはローカルAI、モデルを明示選択。", "Обычный режим или локальный ИИ с явным выбором модели.")
+                        : t("Le profil matériel force le mode Normal.", "Hardware profile forces Normal mode.", "El perfil hardware fuerza el modo Normal.", "硬件配置强制普通模式。", "ハードウェア構成により通常モード固定。", "Профиль железа принудительно включает обычный режим."),
+                    color: Color(hex: "#AF52DE")
+                )
+                SystemFormattingModeControl(
+                    selectedMode: state.formattingMode,
+                    isProUnlocked: state.isProModeUnlocked,
+                    lang: lang
+                ) { mode in
+                    state.formattingMode = PerformanceRouter.shared.effectiveFormattingMode(
+                        preferred: mode,
+                        profile: state.performanceProfile
+                    )
+                }
+                VStack(spacing: 8) {
+                    ForEach(FormattingModelCatalog.all) { descriptor in
+                        SystemFormatterModelRow(
+                            modelID: descriptor.id,
+                            isActive: state.activeFormattingModel == descriptor.id,
+                            statusText: formatterSettingsStatus(for: descriptor.id).text,
+                            statusColor: formatterSettingsStatus(for: descriptor.id).color,
+                            installURL: AdvancedLLMFormatter.resolveInstallURL(for: descriptor.id),
+                            canUse: state.isProModeUnlocked,
+                            isBusy: AdvancedLLMFormatter.shared.installingModelID == descriptor.id,
+                            lang: lang
+                        ) {
+                            state.activeFormattingModel = descriptor.id
+                            AdvancedLLMFormatter.shared.unload()
+                        } onInstall: {
+                            Task { await AdvancedLLMFormatter.shared.installModel(modelID: descriptor.id) }
+                        } onOpen: {
+                            if let url = AdvancedLLMFormatter.resolveInstallURL(for: descriptor.id) {
+                                NSWorkspace.shared.activateFileViewerSelecting([url])
+                            }
+                        } onRemove: {
+                            AdvancedLLMFormatter.shared.unload()
+                            AdvancedLLMFormatter.removeModelFromDisk(modelID: descriptor.id)
+                            state.syncActiveFormattingModelInstallState()
+                        }
+                    }
+                }
+            }
+
+            SystemPanel {
+                SystemPanelHeader(
+                    icon: "mic.fill",
+                    title: t("Langues de dictée", "Dictation languages", "Idiomas de dictado", "听写语言", "音声入力言語", "Языки диктовки"),
+                    subtitle: t("Coche les langues parlées. Plusieurs langues activent l'auto-détection.", "Check spoken languages. Multiple languages enable auto-detection.", "Marca los idiomas hablados. Varios idiomas activan autodetección.", "勾选口述语言。多语言会启用自动检测。", "話す言語を選択。複数なら自動検出。", "Отметьте языки диктовки. Несколько языков включают автоопределение."),
+                    color: Color(hex: "#34C759")
+                )
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 6),
+                    GridItem(.flexible(), spacing: 6),
+                    GridItem(.flexible(), spacing: 6)
+                ], spacing: 6) {
+                    ForEach(WhisperLanguage.all, id: \.id) { language in
+                        SLanguageCell(
+                            language: language,
+                            isSelected: state.selectedLanguages.contains(where: { $0.id == language.id })
+                        ) {
+                            withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
+                                if state.selectedLanguages.contains(where: { $0.id == language.id }) {
+                                    if state.selectedLanguages.count > 1 {
+                                        state.selectedLanguages.removeAll { $0.id == language.id }
+                                    }
+                                } else {
+                                    state.selectedLanguages.append(language)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            SystemPanel {
+                SystemPanelHeader(
+                    icon: "internaldrive.fill",
+                    title: t("Stockage local", "Local storage", "Almacenamiento local", "本地存储", "ローカル保存", "Локальное хранилище"),
+                    subtitle: t("Dossiers modèles et données privées sur ce Mac.", "Model folders and private data on this Mac.", "Carpetas de modelos y datos privados en este Mac.", "此 Mac 上的模型文件夹和私有数据。", "このMac上のモデルフォルダと個人データ。", "Папки моделей и приватные данные на этом Mac."),
+                    color: Color(hex: "#666660")
+                )
+                VStack(spacing: 8) {
+                    SystemPathRow(
+                        title: t("Backend ASR actif", "Active ASR backend", "Backend ASR activo", "当前 ASR 后端", "現在のASR", "Активный ASR"),
+                        value: asrRequiresInstall
+                            ? (asrInstallURL?.path ?? t("Non installé", "Not installed", "No instalado", "未安装", "未インストール", "Не установлен"))
+                            : asrNonInstallStorageLabel,
+                        actionTitle: t("Ouvrir", "Open", "Abrir", "打开", "開く", "Открыть"),
+                        isEnabled: asrInstallURL != nil
+                    ) {
+                        if let asrInstallURL {
+                            NSWorkspace.shared.activateFileViewerSelecting([asrInstallURL])
+                        }
+                    }
+                    SystemPathRow(
+                        title: t("Modèle de formatage actif", "Active formatting model", "Modelo de formateo activo", "当前格式化模型", "現在の整形モデル", "Активная модель форматирования"),
+                        value: formatterInstallURL?.path ?? t("Non installé", "Not installed", "No instalado", "未安装", "未インストール", "Не установлен"),
+                        actionTitle: t("Ouvrir", "Open", "Abrir", "打开", "開く", "Открыть"),
+                        isEnabled: formatterInstallURL != nil
+                    ) {
+                        if let formatterInstallURL {
+                            NSWorkspace.shared.activateFileViewerSelecting([formatterInstallURL])
+                        }
+                    }
+                    SystemPathRow(
+                        title: t("Données locales", "Local data", "Datos locales", "本地数据", "ローカルデータ", "Локальные данные"),
+                        value: localDataSize,
+                        actionTitle: nil,
+                        isEnabled: false,
+                        action: {}
+                    )
+                }
+            }
+
+            SystemPanel {
+                HStack(spacing: 12) {
+                    Image(systemName: "arrow.uturn.backward.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(Color(hex: "#FF9500"))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(t("Relancer le preflight", "Rerun preflight", "Reiniciar preflight", "重新运行预检", "preflight をやり直す", "Запустить preflight заново"))
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(Color(hex: "#1A1A1A"))
+                        Text(t("Revient à l'écran de configuration initiale sans supprimer tes données.", "Returns to initial setup without deleting your data.", "Vuelve a la configuración inicial sin borrar datos.", "返回初始配置，不删除数据。", "データを消さずに初期設定へ戻ります。", "Возвращает к начальной настройке без удаления данных."))
+                            .font(.system(size: 11.5))
+                            .foregroundColor(Color(hex: "#888880"))
+                    }
+                    Spacer()
+                    Button(t("Ouvrir", "Open", "Abrir", "打开", "開く", "Открыть")) {
+                        NotificationCenter.default.post(name: .returnToOnboarding, object: nil)
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Color(hex: "#FF9500"))
+                }
+            }
+        }
+        .onAppear {
+            state.refreshPerformanceProfile()
+        }
+        .task(id: asrModelDiskSizeRefreshToken) {
+            await refreshASRModelDiskSizeCache()
+        }
+    }
+
+    @ViewBuilder
+    private var legacySystemBody: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text(t("Système", "System", "Sistema", "系统", "システム", "Система"))
                 .font(.system(size: 20, weight: .bold))
@@ -855,6 +1104,89 @@ struct SystemSettingsContent: View {
         }
     }
 
+    private func selectASRBackend(_ kind: ASRBackendKind) {
+        let effective = PerformanceRouter.shared.effectiveASRBackend(
+            preferred: kind,
+            profile: state.performanceProfile
+        )
+        state.preferredASRBackend = effective
+        DictationEngine.shared.setASRBackend(effective)
+        Task { await DictationEngine.shared.loadInstalledModelIfAvailable() }
+    }
+
+    private func installASRBackend(_ kind: ASRBackendKind) {
+        state.preferredASRBackend = kind
+        DictationEngine.shared.setASRBackend(kind)
+        Task { await DictationEngine.shared.loadModel() }
+    }
+
+    private func removeASRBackend(_ kind: ASRBackendKind) {
+        state.preferredASRBackend = kind
+        DictationEngine.shared.setASRBackend(kind)
+        DictationEngine.shared.uninstallModel()
+    }
+
+    private func asrSettingsCanUse(_ kind: ASRBackendKind) -> Bool {
+        if kind == .appleSpeechAnalyzer {
+            return AppleSpeechAnalyzerBackend.isRuntimeSupported
+        }
+        if kind == .codexVoice {
+            return CodexVoiceBackend.hasReadableCredentials()
+        }
+        if kind == .whisperKit {
+            return state.isWhisperASRUnlocked
+        }
+        return true
+    }
+
+    private func asrSettingsIsBusy(_ kind: ASRBackendKind) -> Bool {
+        state.preferredASRBackend == kind && {
+            if case .downloading = state.modelStatus { return true }
+            if case .loading = state.modelStatus { return true }
+            return false
+        }()
+    }
+
+    private func asrSettingsStatus(for kind: ASRBackendKind) -> (text: String, color: Color) {
+        if asrSettingsIsBusy(kind) {
+            if case .downloading = state.modelStatus {
+                return ("\(Int(state.modelStatus.progress * 100))%", Color(hex: "#007AFF"))
+            }
+            return (t("Chargement", "Loading", "Cargando", "加载中", "読み込み中", "Загрузка"), Color(hex: "#007AFF"))
+        }
+        if kind == .appleSpeechAnalyzer && !AppleSpeechAnalyzerBackend.isRuntimeSupported {
+            return (t("Indisponible", "Unavailable", "No disponible", "不可用", "利用不可", "Недоступно"), Color(hex: "#FF9500"))
+        }
+        if kind == .codexVoice && !CodexVoiceBackend.hasReadableCredentials() {
+            return (t("Connexion requise", "Sign-in required", "Requiere sesión", "需要登录", "サインイン必要", "Нужен вход"), Color(hex: "#FF9500"))
+        }
+        if ASRBackendCatalog.isInstalled(kind) {
+            return (t("Installé", "Installed", "Instalado", "已安装", "インストール済み", "Установлен"), Color(hex: "#34C759"))
+        }
+        let descriptor = ASRBackendCatalog.descriptor(for: kind)
+        return descriptor.requiresModelInstall
+            ? (t("Non installé", "Not installed", "No instalado", "未安装", "未インストール", "Не установлен"), Color(hex: "#AAAAAA"))
+            : (t("Système", "System", "Sistema", "系统", "システム", "Система"), Color(hex: "#007AFF"))
+    }
+
+    private func formatterSettingsStatus(for modelID: FormattingModelID) -> (text: String, color: Color) {
+        guard state.isProModeUnlocked else {
+            return (t("Profil Éco", "Eco profile", "Perfil Eco", "节能配置", "エコ構成", "Эко-профиль"), Color(hex: "#FF9500"))
+        }
+        switch AdvancedLLMFormatter.shared.installStatus(for: modelID) {
+        case .installed:
+            return (t("Installé", "Installed", "Instalado", "已安装", "インストール済み", "Установлен"), Color(hex: "#34C759"))
+        case .notInstalled:
+            return (t("Non installé", "Not installed", "No instalado", "未安装", "未インストール", "Не установлен"), Color(hex: "#AAAAAA"))
+        case .preparing:
+            return (t("Préparation", "Preparing", "Preparando", "准备中", "準備中", "Подготовка"), Color(hex: "#007AFF"))
+        case .downloading(let progress):
+            return ("\(Int(progress * 100))%", Color(hex: "#007AFF"))
+        case .unavailable(let reason), .error(let reason):
+            return (reason, Color(hex: "#FF9500"))
+        }
+    }
+
     private var localDataSize: String {
         let baseKeys = [TranscriptionStore.storageKey, "zphyr.dictionary.entries"]
         let keys = baseKeys + baseKeys.map { "\($0).enc" }
@@ -893,7 +1225,12 @@ struct SystemSettingsContent: View {
     @ViewBuilder
     private var modelStatusBadge: some View {
         if !asrRequiresInstall {
-            Label(t("Système", "System", "Sistema", "系统", "システム", "Система"), systemImage: "apple.logo")
+            Label(
+                asrDescriptor.kind == .codexVoice
+                    ? t("Codex", "Codex", "Codex", "Codex", "Codex", "Codex")
+                    : t("Système", "System", "Sistema", "系统", "システム", "Система"),
+                systemImage: asrDescriptor.kind == .codexVoice ? "sparkles" : "apple.logo"
+            )
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(Color(hex: "#007AFF"))
                 .labelStyle(.titleAndIcon)
@@ -921,9 +1258,375 @@ struct SystemSettingsContent: View {
     }
 }
 
+private struct SystemPanel<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            content
+        }
+        .padding(16)
+        .background(Color.white)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.black.opacity(0.06), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.035), radius: 10, x: 0, y: 3)
+    }
+}
+
+private struct SystemPanelHeader: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(color.opacity(0.12))
+                    .frame(width: 34, height: 34)
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(color)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(Color(hex: "#1A1A1A"))
+                Text(subtitle)
+                    .font(.system(size: 11.5))
+                    .foregroundColor(Color(hex: "#888880"))
+                    .lineLimit(2)
+            }
+            Spacer()
+        }
+    }
+}
+
+private struct SystemMetricTile: View {
+    let icon: String
+    let title: String
+    let value: String
+    let detail: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(color)
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Color(hex: "#777770"))
+                    .lineLimit(1)
+            }
+            Text(value)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color(hex: "#1A1A1A"))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text(detail)
+                .font(.system(size: 10.5))
+                .foregroundColor(Color(hex: "#AAAAAA"))
+                .lineLimit(1)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(hex: "#F7F7F5"), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct SystemASRModelRow: View {
+    let descriptor: ASRBackendDescriptor
+    let isActive: Bool
+    let statusText: String
+    let statusColor: Color
+    let installURL: URL?
+    let canUse: Bool
+    let isBusy: Bool
+    let lang: String
+    let onUse: () -> Void
+    let onInstall: () -> Void
+    let onOpen: () -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        SystemModelRowShell(
+            icon: icon,
+            title: descriptor.displayName,
+            subtitle: subtitle,
+            badge: descriptor.modelSizeLabel ?? L10n.ui(for: lang, fr: "Sans téléchargement", en: "No download", es: "Sin descarga", zh: "无需下载", ja: "ダウンロード不要", ru: "Без загрузки"),
+            isActive: isActive,
+            statusText: statusText,
+            statusColor: statusColor,
+            isBusy: isBusy,
+            canUse: canUse,
+            installURL: installURL,
+            requiresInstall: descriptor.requiresModelInstall,
+            lang: lang,
+            onUse: onUse,
+            onInstall: onInstall,
+            onOpen: onOpen,
+            onRemove: onRemove
+        )
+    }
+
+    private var icon: String {
+        switch descriptor.kind {
+        case .appleSpeechAnalyzer:
+            return "apple.logo"
+        case .codexVoice:
+            return "sparkles"
+        case .whisperKit, .parakeet:
+            return "cpu"
+        }
+    }
+
+    private var subtitle: String {
+        switch descriptor.kind {
+        case .appleSpeechAnalyzer:
+            return L10n.ui(for: lang, fr: "Provider système, aucun modèle à télécharger.", en: "System provider, no model download.", es: "Proveedor del sistema, sin descarga de modelo.", zh: "系统 provider，无需下载模型。", ja: "システム provider、モデル不要。", ru: "Системный provider без загрузки модели.")
+        case .codexVoice:
+            return CodexVoiceBackend.hasReadableCredentials()
+                ? L10n.ui(for: lang, fr: "Provider Codex, transcription via ton compte, sans modèle local.", en: "Codex provider, transcription through your account, no local model.", es: "Provider Codex, transcripción con tu cuenta, sin modelo local.", zh: "Codex provider，通过你的账号转写，无需本地模型。", ja: "Codex provider、アカウント経由で文字起こし、ローカルモデル不要。", ru: "Provider Codex, транскрибация через аккаунт без локальной модели.")
+                : L10n.ui(for: lang, fr: "Connecte-toi à Codex Desktop pour l'activer.", en: "Sign in to Codex Desktop to enable it.", es: "Inicia sesión en Codex Desktop para activarlo.", zh: "登录 Codex Desktop 后启用。", ja: "Codex Desktop にサインインして有効化。", ru: "Войдите в Codex Desktop, чтобы включить.")
+        case .whisperKit:
+            return L10n.ui(for: lang, fr: "Qualité locale élevée, installation unique.", en: "High local quality, one-time install.", es: "Alta calidad local, instalación única.", zh: "高质量本地模型，一次安装。", ja: "高品質ローカル、初回のみインストール。", ru: "Высокое качество локально, разовая установка.")
+        case .parakeet:
+            return L10n.ui(for: lang, fr: "Expérimental, conservé comme provider sélectionnable.", en: "Experimental, kept as a selectable provider.", es: "Experimental, mantenido como proveedor seleccionable.", zh: "实验性，可作为 provider 选择。", ja: "実験的、選択可能 provider として保持。", ru: "Экспериментальный selectable provider.")
+        }
+    }
+}
+
+private struct SystemFormatterModelRow: View {
+    let modelID: FormattingModelID
+    let isActive: Bool
+    let statusText: String
+    let statusColor: Color
+    let installURL: URL?
+    let canUse: Bool
+    let isBusy: Bool
+    let lang: String
+    let onUse: () -> Void
+    let onInstall: () -> Void
+    let onOpen: () -> Void
+    let onRemove: () -> Void
+
+    private var descriptor: FormattingModelDescriptor {
+        FormattingModelCatalog.descriptor(for: modelID)
+    }
+
+    var body: some View {
+        SystemModelRowShell(
+            icon: "brain.head.profile",
+            title: modelID.displayName(for: lang),
+            subtitle: modelID.recommendedUsage(for: lang),
+            badge: ByteCountFormatter.string(fromByteCount: descriptor.approximateBytes, countStyle: .file),
+            isActive: isActive,
+            statusText: statusText,
+            statusColor: statusColor,
+            isBusy: isBusy,
+            canUse: canUse,
+            installURL: installURL,
+            requiresInstall: true,
+            lang: lang,
+            onUse: onUse,
+            onInstall: onInstall,
+            onOpen: onOpen,
+            onRemove: onRemove
+        )
+    }
+}
+
+private struct SystemModelRowShell: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let badge: String
+    let isActive: Bool
+    let statusText: String
+    let statusColor: Color
+    let isBusy: Bool
+    let canUse: Bool
+    let installURL: URL?
+    let requiresInstall: Bool
+    let lang: String
+    let onUse: () -> Void
+    let onInstall: () -> Void
+    let onOpen: () -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isActive ? Color(hex: "#22D3B8").opacity(0.12) : Color(hex: "#F0F0EE"))
+                    .frame(width: 34, height: 34)
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(isActive ? Color(hex: "#0A8F78") : Color(hex: "#777770"))
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 7) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(Color(hex: "#1A1A1A"))
+                        .lineLimit(1)
+                    Text(badge)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundColor(Color(hex: "#666660"))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color(hex: "#F0F0EE"), in: Capsule())
+                }
+                Text(subtitle)
+                    .font(.system(size: 11.2))
+                    .foregroundColor(Color(hex: "#888880"))
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            if isBusy {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Text(statusText)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundColor(statusColor)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 8) {
+                Button(isActive ? L10n.ui(for: lang, fr: "Actif", en: "Active", es: "Activo", zh: "当前", ja: "使用中", ru: "Активно") : L10n.ui(for: lang, fr: "Utiliser", en: "Use", es: "Usar", zh: "使用", ja: "使う", ru: "Использовать")) {
+                    onUse()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundColor(isActive ? Color(hex: "#0A8F78") : Color(hex: "#007AFF"))
+                .disabled(!canUse || isBusy)
+
+                if requiresInstall {
+                    if installURL == nil {
+                        Button(L10n.ui(for: lang, fr: "Installer", en: "Install", es: "Instalar", zh: "安装", ja: "インストール", ru: "Установить")) {
+                            onInstall()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(Color(hex: "#AF52DE"))
+                        .disabled(!canUse || isBusy)
+                    } else {
+                        Button(L10n.ui(for: lang, fr: "Ouvrir", en: "Open", es: "Abrir", zh: "打开", ja: "開く", ru: "Открыть")) {
+                            onOpen()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(Color(hex: "#666660"))
+
+                        Button(L10n.ui(for: lang, fr: "Supprimer", en: "Remove", es: "Eliminar", zh: "删除", ja: "削除", ru: "Удалить")) {
+                            onRemove()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(Color(hex: "#FF3B30"))
+                        .disabled(isBusy)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(isActive ? Color(hex: "#22D3B8").opacity(0.06) : Color(hex: "#F7F7F5"))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .strokeBorder(isActive ? Color(hex: "#22D3B8").opacity(0.28) : Color.black.opacity(0.04), lineWidth: 1)
+                )
+        )
+        .opacity(canUse ? 1 : 0.58)
+    }
+}
+
+private struct SystemFormattingModeControl: View {
+    let selectedMode: FormattingMode
+    let isProUnlocked: Bool
+    let lang: String
+    let onSelect: (FormattingMode) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(FormattingMode.allCases) { mode in
+                let active = selectedMode == mode
+                Button {
+                    onSelect(mode)
+                } label: {
+                    VStack(spacing: 3) {
+                        Text(mode == .trigger
+                             ? L10n.ui(for: lang, fr: "Normal", en: "Normal", es: "Normal", zh: "普通", ja: "通常", ru: "Обычный")
+                             : L10n.ui(for: lang, fr: "IA locale", en: "Local AI", es: "IA local", zh: "本地 AI", ja: "ローカルAI", ru: "Локальный ИИ"))
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(mode.subtitle(for: lang))
+                            .font(.system(size: 10.5))
+                            .lineLimit(1)
+                    }
+                    .foregroundColor(active ? Color(hex: "#1A1A1A") : Color(hex: "#777770"))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(active ? Color.white : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .shadow(color: active ? Color.black.opacity(0.06) : .clear, radius: 6, y: 1)
+                }
+                .buttonStyle(.plain)
+                .disabled(mode == .advanced && !isProUnlocked)
+                .opacity(mode == .advanced && !isProUnlocked ? 0.5 : 1)
+            }
+        }
+        .padding(4)
+        .background(Color(hex: "#F0F0EE"), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+    }
+}
+
+private struct SystemPathRow: View {
+    let title: String
+    let value: String
+    let actionTitle: String?
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundColor(Color(hex: "#1A1A1A"))
+                Text(value)
+                    .font(.system(size: 11).monospaced())
+                    .foregroundColor(Color(hex: "#888880"))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            if let actionTitle {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundColor(isEnabled ? Color(hex: "#007AFF") : Color(hex: "#AAAAAA"))
+                    .disabled(!isEnabled)
+            }
+        }
+        .padding(12)
+        .background(Color(hex: "#F7F7F5"), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
 // MARK: - Shortcut Settings
 
 struct ShortcutSettingsContent: View {
+    @State private var manager = ShortcutManager.shared
     private var lang: String { AppState.shared.uiDisplayLanguage.rawValue }
 
     var body: some View {
@@ -946,13 +1649,13 @@ struct ShortcutSettingsContent: View {
             SettingsCard {
                 SettingsRow(icon: "keyboard.chevron.compact.down", iconColor: Color(hex: "#FF6B35"),
                             title: t("Touche prédéfinie", "Preset key", "Tecla predefinida", "预设键", "プリセットキー", "Предустановленная клавиша"),
-                            subtitle: ShortcutManager.shared.recordedShortcut == nil
-                                ? ShortcutManager.shared.selectedTriggerKey.displayName(for: lang)
+                            subtitle: manager.recordedShortcut == nil
+                                ? manager.selectedTriggerKey.displayName(for: lang)
                                 : t("Désactivé (raccourci personnalisé actif)", "Disabled (custom shortcut active)", "Desactivado (atajo personalizado activo)", "已禁用（自定义快捷键生效）", "無効（カスタムショートカット有効）", "Отключено (используется пользовательский)"),
                             showDivider: false) {
                     Picker("", selection: Binding(
-                        get: { ShortcutManager.shared.selectedTriggerKey },
-                        set: { ShortcutManager.shared.selectedTriggerKey = $0 }
+                        get: { manager.selectedTriggerKey },
+                        set: { manager.selectedTriggerKey = $0 }
                     )) {
                         ForEach(TriggerKey.allCases) { key in
                             Text(key.displayName(for: lang)).tag(key)
@@ -960,8 +1663,8 @@ struct ShortcutSettingsContent: View {
                     }
                     .pickerStyle(.menu)
                     .frame(width: 195)
-                    .opacity(ShortcutManager.shared.recordedShortcut == nil ? 1 : 0.4)
-                    .disabled(ShortcutManager.shared.recordedShortcut != nil)
+                    .opacity(manager.recordedShortcut == nil ? 1 : 0.4)
+                    .disabled(manager.recordedShortcut != nil)
                 }
             }
 
@@ -1002,12 +1705,12 @@ struct ShortcutSettingsContent: View {
                     Text(t("Mode push-to-talk", "Push-to-talk", "Modo pulsar para hablar", "按住说话模式", "プッシュトゥトーク", "Режим push-to-talk"))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(Color(hex: "#1A1A1A"))
-                    Text(t("Maintenez \(ShortcutManager.shared.selectedTriggerKey.displayName(for: lang)) → parlez → relâchez. Le texte est transcrit et injecté automatiquement.",
-                           "Hold \(ShortcutManager.shared.selectedTriggerKey.displayName(for: lang)) → speak → release. Text is transcribed and inserted automatically.",
-                           "Mantén \(ShortcutManager.shared.selectedTriggerKey.displayName(for: lang)) → habla → suelta. El texto se transcribe e inserta automáticamente.",
-                           "按住 \(ShortcutManager.shared.selectedTriggerKey.displayName(for: lang)) → 说话 → 松开。文本会自动转写并插入。",
-                           "\(ShortcutManager.shared.selectedTriggerKey.displayName(for: lang)) を押しながら話し、離すと自動で文字起こしと挿入を行います。",
-                           "Удерживайте \(ShortcutManager.shared.selectedTriggerKey.displayName(for: lang)) → говорите → отпустите. Текст автоматически транскрибируется и вставляется."))
+                    Text(t("Maintenez \(manager.activeShortcutDisplayName(for: lang)) → parlez → relâchez. Le texte est transcrit et injecté automatiquement.",
+                           "Hold \(manager.activeShortcutDisplayName(for: lang)) → speak → release. Text is transcribed and inserted automatically.",
+                           "Mantén \(manager.activeShortcutDisplayName(for: lang)) → habla → suelta. El texto se transcribe e inserta automáticamente.",
+                           "按住 \(manager.activeShortcutDisplayName(for: lang)) → 说话 → 松开。文本会自动转写并插入。",
+                           "\(manager.activeShortcutDisplayName(for: lang)) を押しながら話し、離すと自動で文字起こしと挿入を行います。",
+                           "Удерживайте \(manager.activeShortcutDisplayName(for: lang)) → говорите → отпустите. Текст автоматически транскрибируется и вставляется."))
                         .font(.system(size: 12))
                         .foregroundColor(Color(hex: "#666660"))
                         .lineSpacing(2)
@@ -1199,7 +1902,7 @@ struct SLanguageCell: View {
 struct SCustomShortcutRecorder: View {
     @State private var isRecording: Bool = false
     @State private var pulse: Bool = false
-    private var manager: ShortcutManager { ShortcutManager.shared }
+    @State private var manager = ShortcutManager.shared
 
     var body: some View {
         HStack(spacing: 8) {

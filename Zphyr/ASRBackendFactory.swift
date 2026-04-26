@@ -5,6 +5,8 @@ enum ASRBackendFactory {
         switch preferred {
         case .appleSpeechAnalyzer:
             return AppleSpeechAnalyzerBackend.isRuntimeSupported ? .appleSpeechAnalyzer : .whisperKit
+        case .codexVoice:
+            return .codexVoice
         case .whisperKit:
             return .whisperKit
         case .parakeet:
@@ -17,6 +19,8 @@ enum ASRBackendFactory {
         switch resolveEffectiveKind(preferred: preferred) {
         case .appleSpeechAnalyzer:
             return AppleSpeechAnalyzerBackend()
+        case .codexVoice:
+            return CodexVoiceBackend.shared
         case .whisperKit:
             return WhisperKitBackend.shared
         case .parakeet:

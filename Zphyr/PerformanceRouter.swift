@@ -30,10 +30,6 @@ struct PerformanceProfile: Sendable, Equatable {
         tier != .eco
     }
 
-    var forcedASRBackendInTier: ASRBackendKind? {
-        tier == .eco ? .appleSpeechAnalyzer : nil
-    }
-
     var fallbackASRBackend: ASRBackendKind {
         .appleSpeechAnalyzer
     }
@@ -95,8 +91,13 @@ final class PerformanceRouter {
 
     func effectiveASRBackend(preferred: ASRBackendKind, profile: PerformanceProfile? = nil) -> ASRBackendKind {
         let profile = profile ?? currentProfile()
-        if let forced = profile.forcedASRBackendInTier {
-            return forced
+        if profile.tier == .eco {
+            switch preferred {
+            case .whisperKit, .parakeet:
+                return .appleSpeechAnalyzer
+            case .appleSpeechAnalyzer, .codexVoice:
+                return preferred
+            }
         }
         return preferred
     }

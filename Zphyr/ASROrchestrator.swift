@@ -85,7 +85,7 @@ final class ASROrchestrator {
             }
         } catch {
             await MainActor.run {
-                AppState.shared.error = L10n.ui(
+                AppState.shared.presentDictationHUDMessage(L10n.ui(
                     for: AppState.shared.selectedLanguage.id,
                     fr: "Aucune voix d\u{00E9}tect\u{00E9}e dans l'audio. R\u{00E9}essaie en parlant plus pr\u{00E8}s du micro.",
                     en: "No voice detected in the audio. Try speaking closer to the microphone.",
@@ -93,7 +93,7 @@ final class ASROrchestrator {
                     zh: "\u{97F3}\u{9891}\u{4E2D}\u{672A}\u{68C0}\u{6D4B}\u{5230}\u{8BED}\u{97F3}\u{3002}\u{8BF7}\u{9760}\u{8FD1}\u{9EA6}\u{514B}\u{98CE}\u{91CD}\u{8BD5}\u{3002}",
                     ja: "\u{97F3}\u{58F0}\u{304C}\u{691C}\u{51FA}\u{3055}\u{308C}\u{307E}\u{305B}\u{3093}\u{3067}\u{3057}\u{305F}\u{3002}\u{30DE}\u{30A4}\u{30AF}\u{306B}\u{8FD1}\u{3065}\u{3044}\u{3066}\u{518D}\u{8A66}\u{884C}\u{3057}\u{3066}\u{304F}\u{3060}\u{3055}\u{3044}\u{3002}",
                     ru: "\u{0412} \u{0430}\u{0443}\u{0434}\u{0438}\u{043E} \u{043D}\u{0435} \u{043E}\u{0431}\u{043D}\u{0430}\u{0440}\u{0443}\u{0436}\u{0435}\u{043D} \u{0433}\u{043E}\u{043B}\u{043E}\u{0441}. \u{041F}\u{043E}\u{043F}\u{0440}\u{043E}\u{0431}\u{0443}\u{0439}\u{0442}\u{0435} \u{0433}\u{043E}\u{0432}\u{043E}\u{0440}\u{0438}\u{0442}\u{044C} \u{0431}\u{043B}\u{0438}\u{0436}\u{0435} \u{043A} \u{043C}\u{0438}\u{043A}\u{0440}\u{043E}\u{0444}\u{043E}\u{043D}\u{0443}."
-                )
+                ))
             }
             log.error("[ASROrchestrator] VAD rejected audio: \(error.localizedDescription, privacy: .public)")
             return ""
@@ -177,7 +177,7 @@ final class ASROrchestrator {
         }
 
         await MainActor.run {
-            AppState.shared.error = L10n.ui(
+            AppState.shared.presentDictationHUDMessage(L10n.ui(
                 for: AppState.shared.selectedLanguage.id,
                 fr: "La transcription a \u{00E9}chou\u{00E9}. R\u{00E9}essayez apr\u{00E8}s rechargement du moteur.",
                 en: "Transcription failed. Retry after reloading the backend.",
@@ -185,7 +185,7 @@ final class ASROrchestrator {
                 zh: "\u{8F6C}\u{5199}\u{5931}\u{8D25}\u{3002}\u{8BF7}\u{91CD}\u{65B0}\u{52A0}\u{8F7D}\u{540E}\u{7AEF}\u{540E}\u{91CD}\u{8BD5}\u{3002}",
                 ja: "\u{6587}\u{5B57}\u{8D77}\u{3053}\u{3057}\u{306B}\u{5931}\u{6557}\u{3057}\u{307E}\u{3057}\u{305F}\u{3002}\u{30D0}\u{30C3}\u{30AF}\u{30A8}\u{30F3}\u{30C9}\u{518D}\u{8AAD}\u{307F}\u{8FBC}\u{307F}\u{5F8C}\u{306B}\u{518D}\u{8A66}\u{884C}\u{3057}\u{3066}\u{304F}\u{3060}\u{3055}\u{3044}\u{3002}",
                 ru: "\u{0421}\u{0431}\u{043E}\u{0439} \u{0442}\u{0440}\u{0430}\u{043D}\u{0441}\u{043A}\u{0440}\u{0438}\u{0431}\u{0430}\u{0446}\u{0438}\u{0438}. \u{041F}\u{043E}\u{0432}\u{0442}\u{043E}\u{0440}\u{0438}\u{0442}\u{0435} \u{043F}\u{043E}\u{0441}\u{043B}\u{0435} \u{043F}\u{0435}\u{0440}\u{0435}\u{0437}\u{0430}\u{0433}\u{0440}\u{0443}\u{0437}\u{043A}\u{0438} \u{0431}\u{044D}\u{043A}\u{0435}\u{043D}\u{0434}\u{0430}."
-            )
+            ))
         }
         if let lastFailure {
             log.error("[ASROrchestrator] all backend attempts failed; last error=\(lastFailure.localizedDescription, privacy: .public)")
@@ -231,6 +231,8 @@ final class ASROrchestrator {
             return min(120.0, max(whisperBaseTranscriptionTimeoutSeconds, audioSeconds * 2.2 + 8.0))
         case .appleSpeechAnalyzer:
             return min(60.0, max(15.0, audioSeconds * 1.4 + 6.0))
+        case .codexVoice:
+            return min(180.0, max(30.0, audioSeconds * 1.6 + 15.0))
         case .parakeet:
             // Parakeet is not user-selectable (unimplemented stub). Treat same as Whisper.
             return min(90.0, max(15.0, audioSeconds * 1.8 + 6.0))
