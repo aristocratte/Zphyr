@@ -737,8 +737,7 @@ struct TranscriptionCard: View {
     }
 
     private func copy() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(entry.preview, forType: .string)
+        InsertionEngine.writeConcealedToPasteboard(entry.preview)
         copied = true
         flashCopy = true
         Task {

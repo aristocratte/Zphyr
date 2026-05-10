@@ -2414,8 +2414,7 @@ final class DictationEngine {
 
     private func copyTextToClipboard(_ text: String) {
         guard !text.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        InsertionEngine.writeConcealedToPasteboard(text)
     }
 
     /// Monitors focused text changes shortly after insertion and proposes dictionary learning
