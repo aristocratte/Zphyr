@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import os
 
@@ -115,7 +116,7 @@ struct TextIntegrityVerifier {
         let missingProtectedTerms = relevantProtectedTerms.filter { !formattedText.contains($0) }
         if !missingProtectedTerms.isEmpty {
             Self.log.warning(
-                "[IntegrityVerifier] strict validation rejected protected terms missing=\"\(missingProtectedTerms.prefix(12).joined(separator: ","), privacy: .public)\" rawPreview=\"\(Self.debugPreview(rawASRText), privacy: .public)\" formattedPreview=\"\(Self.debugPreview(formattedText), privacy: .public)\""
+                "[IntegrityVerifier] strict validation rejected protected terms missing=\"\(missingProtectedTerms.prefix(12).joined(separator: ","), privacy: .private(mask: .hash))\" rawPreview=\"\(Self.debugPreview(rawASRText), privacy: .public)\" formattedPreview=\"\(Self.debugPreview(formattedText), privacy: .public)\""
             )
             return .invalidProtectedTerms(missingProtectedTerms)
         }
@@ -126,7 +127,7 @@ struct TextIntegrityVerifier {
             .sorted()
         if !introduced.isEmpty {
             Self.log.warning(
-                "[IntegrityVerifier] strict validation rejected introduced tokens count=\(introduced.count, privacy: .public) sample=\"\(introduced.prefix(12).joined(separator: ","), privacy: .public)\" rawPreview=\"\(Self.debugPreview(rawASRText), privacy: .public)\" formattedPreview=\"\(Self.debugPreview(formattedText), privacy: .public)\""
+                "[IntegrityVerifier] strict validation rejected introduced tokens count=\(introduced.count, privacy: .public) sample=\"\(introduced.prefix(12).joined(separator: ","), privacy: .private(mask: .hash))\" rawPreview=\"\(Self.debugPreview(rawASRText), privacy: .public)\" formattedPreview=\"\(Self.debugPreview(formattedText), privacy: .public)\""
             )
             return .invalidIntroducedTokens(introduced)
         }
@@ -156,7 +157,7 @@ struct TextIntegrityVerifier {
                 return candidateCount < sourceCount ? token : nil
             }.sorted()
             Self.log.warning(
-                "[IntegrityVerifier] strict validation rejected dropped content recall=\(recall, privacy: .public) threshold=\(clampedMinRecall, privacy: .public) missing=\"\(missingTokens.prefix(12).joined(separator: ","), privacy: .public)\" rawPreview=\"\(Self.debugPreview(rawASRText), privacy: .public)\" formattedPreview=\"\(Self.debugPreview(formattedText), privacy: .public)\""
+                "[IntegrityVerifier] strict validation rejected dropped content recall=\(recall, privacy: .public) threshold=\(clampedMinRecall, privacy: .public) missing=\"\(missingTokens.prefix(12).joined(separator: ","), privacy: .private(mask: .hash))\" rawPreview=\"\(Self.debugPreview(rawASRText), privacy: .public)\" formattedPreview=\"\(Self.debugPreview(formattedText), privacy: .public)\""
             )
             return .invalidDroppedContent(recall: recall, missingTokens: missingTokens)
         }
@@ -190,12 +191,18 @@ struct TextIntegrityVerifier {
     }
 
     private static func debugPreview(_ text: String, limit: Int = 280) -> String {
+        #if DEBUG
         let normalized = text
             .replacingOccurrences(of: "\r", with: "")
             .replacingOccurrences(of: "\n", with: "\\n")
         guard normalized.count > limit else { return normalized }
         let remaining = normalized.count - limit
         return "\(normalized.prefix(limit))…(+\(remaining) chars)"
+        #else
+        let h = SHA256.hash(data: Data(text.utf8))
+            .prefix(4).map { String(format: "%02x", $0) }.joined()
+        return "redacted len=\(text.count) hash=\(h)"
+        #endif
     }
 
     static let defaultAllowedDroppedTokens: Set<String> = [

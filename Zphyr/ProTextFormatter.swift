@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import os
 
@@ -166,7 +167,7 @@ struct ProTextFormatter: TextFormatter {
 
         case .invalidIntroducedTokens(let introducedTokens):
             log.warning(
-                "[ProFormatter] baseline=\(Round2BaselinePolicy.baselineID, privacy: .public) profile=\(context.outputProfile.rawValue, privacy: .public) integrity check failed (introduced tokens) → deterministic fallback (rejected=\(introducedTokens.joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recall=\(recall, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
+                "[ProFormatter] baseline=\(Round2BaselinePolicy.baselineID, privacy: .public) profile=\(context.outputProfile.rawValue, privacy: .public) integrity check failed (introduced tokens) → deterministic fallback (rejected=\(introducedTokens.joined(separator: ","), privacy: .private(mask: .hash)) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public) recall=\(recall, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
             )
             return TextFormatterResult(
                 text: deterministic.text,
@@ -182,7 +183,7 @@ struct ProTextFormatter: TextFormatter {
 
         case .invalidDroppedContent(let recall, let missingTokens):
             log.warning(
-                "[ProFormatter] baseline=\(Round2BaselinePolicy.baselineID, privacy: .public) profile=\(context.outputProfile.rawValue, privacy: .public) integrity check failed (dropped content) → deterministic fallback (mode=\"\(integrityValidationMode.description, privacy: .public)\" recall=\(recall, privacy: .public) missing=\(missingTokens.prefix(12).joined(separator: ","), privacy: .public) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
+                "[ProFormatter] baseline=\(Round2BaselinePolicy.baselineID, privacy: .public) profile=\(context.outputProfile.rawValue, privacy: .public) integrity check failed (dropped content) → deterministic fallback (mode=\"\(integrityValidationMode.description, privacy: .public)\" recall=\(recall, privacy: .public) missing=\(missingTokens.prefix(12).joined(separator: ","), privacy: .private(mask: .hash)) llmInLen=\(llmInput.count, privacy: .public) llmOutLen=\(llmCandidate.count, privacy: .public)) llmOutputPreview=\"\(Self.debugPreview(llmCandidate), privacy: .public)\" fallbackPreview=\"\(Self.debugPreview(deterministic.text), privacy: .public)\""
             )
             return TextFormatterResult(
                 text: deterministic.text,
@@ -283,11 +284,17 @@ struct ProTextFormatter: TextFormatter {
     }
 
     private static func debugPreview(_ text: String, limit: Int = 280) -> String {
+        #if DEBUG
         let normalized = text
             .replacingOccurrences(of: "\r", with: "")
             .replacingOccurrences(of: "\n", with: "\\n")
         guard normalized.count > limit else { return normalized }
         let remaining = normalized.count - limit
         return "\(normalized.prefix(limit))…(+\(remaining) chars)"
+        #else
+        let h = SHA256.hash(data: Data(text.utf8))
+            .prefix(4).map { String(format: "%02x", $0) }.joined()
+        return "redacted len=\(text.count) hash=\(h)"
+        #endif
     }
 }

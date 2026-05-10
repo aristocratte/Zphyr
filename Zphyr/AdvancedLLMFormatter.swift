@@ -14,6 +14,7 @@
 //  (mlx-swift-examples ne contient PAS MLXLLM — utiliser mlx-swift-lm)
 //  ─────────────────────────────────────────────────────────────────────────────
 
+import CryptoKit
 import Foundation
 import os
 
@@ -599,7 +600,7 @@ final class AdvancedLLMFormatter {
                 .map { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).lowercased() }
                 .filter { candidateTokens.contains($0) && !sourceTokens.contains($0) }
             if !forbiddenInsertions.isEmpty {
-                log.warning("[AdvancedLLM] forbidden insertion guard mode=\(promptMode, privacy: .public) triggered: \(forbiddenInsertions.joined(separator: ","), privacy: .public)")
+                log.warning("[AdvancedLLM] forbidden insertion guard mode=\(promptMode, privacy: .public) triggered: \(forbiddenInsertions.joined(separator: ","), privacy: .private(mask: .hash))")
                 return nil
             }
 
@@ -812,12 +813,18 @@ final class AdvancedLLMFormatter {
     }
 
     private static func debugPreview(_ text: String, limit: Int = 320) -> String {
+        #if DEBUG
         let normalized = text
             .replacingOccurrences(of: "\r", with: "")
             .replacingOccurrences(of: "\n", with: "\\n")
         guard normalized.count > limit else { return normalized }
         let remaining = normalized.count - limit
         return "\(normalized.prefix(limit))…(+\(remaining) chars)"
+        #else
+        let h = SHA256.hash(data: Data(text.utf8))
+            .prefix(4).map { String(format: "%02x", $0) }.joined()
+        return "redacted len=\(text.count) hash=\(h)"
+        #endif
     }
 }
 
