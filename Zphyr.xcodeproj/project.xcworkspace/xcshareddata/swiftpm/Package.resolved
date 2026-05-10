@@ -15,7 +15,6 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/ml-explore/mlx-swift-lm",
       "state" : {
-        "branch" : "main",
         "revision" : "0ef0e1045429dbacb1406e6ec05696de6827cebc"
       }
     },
@@ -87,7 +86,6 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/argmaxinc/WhisperKit",
       "state" : {
-        "branch" : "main",
         "revision" : "2870b46b92ebd522c094e4c2da77ba3c415138d8"
       }
     },

@@ -652,16 +652,16 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/argmaxinc/WhisperKit";
 			requirement = {
-				branch = main;
-				kind = branch;
+				kind = revision;
+				revision = 2870b46b92ebd522c094e4c2da77ba3c415138d8;
 			};
 		};
 		0BAFF6ED2F56DB1B00F80183 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/ml-explore/mlx-swift-lm";
 			requirement = {
-				branch = main;
-				kind = branch;
+				kind = revision;
+				revision = 0ef0e1045429dbacb1406e6ec05696de6827cebc;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
