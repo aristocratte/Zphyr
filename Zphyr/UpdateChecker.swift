@@ -6,6 +6,7 @@
 import Foundation
 import AppKit
 import CryptoKit
+import Security
 import os
 
 @Observable @MainActor
@@ -44,6 +45,8 @@ final class UpdateChecker {
         case includePrerelease
     }
 
+    private static let maxDMGBytes: Int64 = 500 * 1_024 * 1_024
+
     private enum UpdateCheckError: LocalizedError {
         case invalidRepositoryURL
         case invalidResponse
@@ -52,6 +55,11 @@ final class UpdateChecker {
         case noCompatibleAsset(String)
         case invalidDownloadURL(String)
         case installPreflightFailed(String)
+        case missingDigest(String)
+        case sizeExceeded(Int64)
+        case integrityMismatch
+        case codeSignatureInvalid(String)
+        case unsafeInstallPath(String)
 
         var errorDescription: String? {
             switch self {
@@ -72,6 +80,17 @@ final class UpdateChecker {
                 return "Release \(version) has an invalid download URL."
             case .installPreflightFailed(let message):
                 return message
+            case .missingDigest(let version):
+                return "Release \(version) is missing an integrity digest. Refusing to install."
+            case .sizeExceeded(let bytes):
+                let mb = Double(bytes) / 1_048_576
+                return String(format: "Update payload of %.0f MB exceeds the safety cap.", mb)
+            case .integrityMismatch:
+                return "Downloaded update failed integrity verification."
+            case .codeSignatureInvalid(let detail):
+                return "Update signature check failed: \(detail)"
+            case .unsafeInstallPath(let path):
+                return "Update install path contains unsupported characters: \(path)"
             }
         }
     }
@@ -109,8 +128,12 @@ final class UpdateChecker {
     }
 
     func downloadAndInstall() {
-        guard case .updateAvailable(_, let url) = state else { return }
-        let expectedSHA256 = pendingAssetSHA256
+        guard case .updateAvailable(let version, let url) = state else { return }
+        guard let expectedSHA256 = pendingAssetSHA256 else {
+            log.error("[Updater] refusing install: release has no SHA256 digest")
+            state = .failed(UpdateCheckError.missingDigest(version).localizedDescription)
+            return
+        }
         Task { await performInstall(from: url, expectedSHA256: expectedSHA256) }
     }
 
@@ -156,75 +179,114 @@ final class UpdateChecker {
 
     // MARK: - Download & Install
 
-    private func performInstall(from downloadURL: URL, expectedSHA256: String?) async {
+    private func performInstall(from downloadURL: URL, expectedSHA256: String) async {
         state = .downloading(progress: 0)
-        let tmp = fileManager.temporaryDirectory
-        let dmgDest = tmp.appendingPathComponent("ZphyrUpdate-\(UUID().uuidString).dmg")
-        let mountPoint = tmp.appendingPathComponent("ZphyrMount_\(UUID().uuidString)")
+
+        // Stage everything inside an app-private directory (mode 0700) so other
+        // processes cannot read or race-replace the staged bundle / installer.
+        let stagingRoot: URL
+        do {
+            stagingRoot = try Self.makeStagingDirectory(fileManager: fileManager)
+        } catch {
+            state = .failed(error.localizedDescription)
+            return
+        }
+        let dmgDest = stagingRoot.appendingPathComponent("ZphyrUpdate.dmg")
+        let mountPoint = stagingRoot.appendingPathComponent("mount")
         var didMount = false
 
+        defer {
+            if didMount {
+                Self.detachDiskImage(at: mountPoint)
+            }
+            try? fileManager.removeItem(at: stagingRoot)
+        }
+
         do {
-            // 1. Download DMG
+            // 1. Download DMG (size-capped)
             let (tmpFile, _) = try await urlSession.download(from: downloadURL)
             try? fileManager.removeItem(at: dmgDest)
             try fileManager.moveItem(at: tmpFile, to: dmgDest)
-            state = .downloading(progress: 0.55)
 
-            if let expectedSHA256 {
-                let fileSHA256 = try Self.sha256Hex(for: dmgDest)
-                guard fileSHA256 == expectedSHA256 else {
-                    throw UpdateCheckError.installPreflightFailed("Downloaded update failed integrity verification.")
-                }
+            let attrs = try fileManager.attributesOfItem(atPath: dmgDest.path)
+            let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+            guard size <= Self.maxDMGBytes else {
+                throw UpdateCheckError.sizeExceeded(size)
             }
+            state = .downloading(progress: 0.45)
 
-            // 2. Mount DMG
+            // 2. Verify SHA256 BEFORE we touch hdiutil. Mounting an unverified
+            //    DMG is needless attack surface (License.plist triggers, etc.).
+            let fileSHA256 = try Self.sha256Hex(for: dmgDest)
+            guard fileSHA256 == expectedSHA256 else {
+                throw UpdateCheckError.integrityMismatch
+            }
+            state = .downloading(progress: 0.60)
+
+            // 3. Mount DMG
             try fileManager.createDirectory(at: mountPoint, withIntermediateDirectories: true)
             let mount = Process()
             mount.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
             mount.arguments = ["attach", dmgDest.path, "-mountpoint", mountPoint.path, "-nobrowse", "-quiet"]
+            mount.environment = Self.scrubbedEnvironment()
             try mount.run(); mount.waitUntilExit()
             guard mount.terminationStatus == 0 else {
                 state = .failed("Could not mount update image")
                 return
             }
             didMount = true
-            state = .downloading(progress: 0.80)
+            state = .downloading(progress: 0.75)
 
-            // 3. Copy new .app to temp
+            // 4. Copy new .app to staging
             let entries = try fileManager.contentsOfDirectory(at: mountPoint, includingPropertiesForKeys: nil)
             guard let newApp = Self.preferredAppBundle(from: entries) else {
                 state = .failed("App bundle not found in update")
                 return
             }
-            let tempApp = tmp.appendingPathComponent("ZphyrNew-\(UUID().uuidString).app")
+            let tempApp = stagingRoot.appendingPathComponent("ZphyrNew.app")
             try? fileManager.removeItem(at: tempApp)
             try fileManager.copyItem(at: newApp, to: tempApp)
+            state = .downloading(progress: 0.85)
+
+            // 5. Verify the staged bundle's code signature and that its Team ID
+            //    matches the currently running app — refuses unsigned builds and
+            //    swaps from a different developer.
+            try Self.verifyStagedAppSignature(stagedApp: tempApp, currentBundle: appBundle)
             state = .downloading(progress: 0.95)
 
-            // 4. Unmount
+            // 6. Unmount before we hand control to the installer
             Self.detachDiskImage(at: mountPoint)
             didMount = false
 
             state = .installing
 
-            // 5. Write shell script that replaces app after we quit, then relaunches
+            // 7. Write installer to the same private staging dir (mode 0700)
             let currentApp = appBundle.bundleURL
             if let preflightError = Self.installPreflightError(for: currentApp, fileManager: fileManager) {
                 throw UpdateCheckError.installPreflightFailed(preflightError)
             }
+            // Reject paths whose shell-quoted form is ambiguous; we hard-fail
+            // rather than try to escape every edge case in bash.
+            for path in [currentApp.path, tempApp.path, dmgDest.path, stagingRoot.path] {
+                guard Self.isShellSafePath(path) else {
+                    throw UpdateCheckError.unsafeInstallPath(path)
+                }
+            }
 
-            let scriptURL = tmp.appendingPathComponent("zphyr_install_\(UUID().uuidString).sh")
+            let scriptURL = stagingRoot.appendingPathComponent("zphyr_install.sh")
             let script = Self.buildInstallerScript(
                 currentAppPath: currentApp.path,
                 stagedAppPath: tempApp.path,
                 dmgPath: dmgDest.path,
-                scriptPath: scriptURL.path
+                stagingPath: stagingRoot.path
             )
             try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+            try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+
             let installer = Process()
             installer.executableURL = URL(fileURLWithPath: "/bin/bash")
             installer.arguments = [scriptURL.path]
+            installer.environment = Self.scrubbedEnvironment()
             try installer.run()
 
             // Quit so the script can replace us
@@ -234,11 +296,6 @@ final class UpdateChecker {
         } catch {
             state = .failed(error.localizedDescription)
         }
-
-        if didMount {
-            Self.detachDiskImage(at: mountPoint)
-        }
-        try? fileManager.removeItem(at: mountPoint)
     }
 
     // MARK: - Release fetching
@@ -420,29 +477,31 @@ final class UpdateChecker {
         currentAppPath: String,
         stagedAppPath: String,
         dmgPath: String,
-        scriptPath: String
+        stagingPath: String
     ) -> String {
+        // Paths are validated to be shell-safe before this is called.
+        // The whole staging dir is removed at the end so no per-file cleanup is needed.
         """
         #!/bin/bash
+        set -u
+        export PATH=/usr/bin:/bin
         sleep 1.5
         CURRENT_APP="\(currentAppPath)"
         STAGED_APP="\(stagedAppPath)"
-        DMG_PATH="\(dmgPath)"
-        SCRIPT_PATH="\(scriptPath)"
+        STAGING_DIR="\(stagingPath)"
         BACKUP_APP="${CURRENT_APP}.backup.$$"
 
         cleanup() {
-          rm -rf "$STAGED_APP"
-          rm -f "$DMG_PATH"
-          rm -f "$SCRIPT_PATH"
+          rm -rf "$STAGING_DIR"
         }
 
         if [ ! -d "$STAGED_APP" ]; then
+          cleanup
           exit 11
         fi
 
         if [ -e "$CURRENT_APP" ]; then
-          mv "$CURRENT_APP" "$BACKUP_APP" || exit 12
+          mv "$CURRENT_APP" "$BACKUP_APP" || { cleanup; exit 12; }
         fi
 
         if /usr/bin/ditto "$STAGED_APP" "$CURRENT_APP"; then
@@ -459,6 +518,93 @@ final class UpdateChecker {
         cleanup
         exit 13
         """
+    }
+
+    // MARK: - Sandboxed staging directory
+
+    /// Creates an app-private directory under `Application Support/` with mode 0700.
+    /// Used for download/staging so other processes cannot read the staged bundle
+    /// or race-replace the installer script.
+    private nonisolated static func makeStagingDirectory(fileManager: FileManager) throws -> URL {
+        let appSupport = try fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.zphyr.app"
+        let root = appSupport
+            .appendingPathComponent(bundleID, isDirectory: true)
+            .appendingPathComponent("Updates", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true,
+                                        attributes: [.posixPermissions: 0o700])
+        return root
+    }
+
+    /// Strict allow-list to keep update paths safe to embed in a bash heredoc.
+    /// Permits letters, digits, `/ . _ - + : @` and space. Rejects `"`, `$`, `` ` ``, `\`, etc.
+    nonisolated static func isShellSafePath(_ path: String) -> Bool {
+        guard !path.isEmpty else { return false }
+        let allowed = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/._- +:@")
+        return path.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    /// Minimal env passed to spawned helpers. Drops `DYLD_*`, custom `$PATH`,
+    /// and anything else inherited from the GUI session that an attacker could
+    /// pre-set via `launchctl setenv`.
+    private nonisolated static func scrubbedEnvironment() -> [String: String] {
+        var env: [String: String] = ["PATH": "/usr/bin:/bin"]
+        if let home = ProcessInfo.processInfo.environment["HOME"] { env["HOME"] = home }
+        if let user = ProcessInfo.processInfo.environment["USER"] { env["USER"] = user }
+        return env
+    }
+
+    // MARK: - Code signature verification of the staged bundle
+
+    private nonisolated static func verifyStagedAppSignature(stagedApp: URL, currentBundle: Bundle) throws {
+        var staticCode: SecStaticCode?
+        let createStatus = SecStaticCodeCreateWithPath(stagedApp as CFURL, [], &staticCode)
+        guard createStatus == errSecSuccess, let code = staticCode else {
+            throw UpdateCheckError.codeSignatureInvalid("could not read signature (\(createStatus))")
+        }
+        let flags = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures)
+        let validateStatus = SecStaticCodeCheckValidity(code, flags, nil)
+        if validateStatus != errSecSuccess {
+            throw UpdateCheckError.codeSignatureInvalid("validity check failed (\(validateStatus))")
+        }
+
+        let stagedTeamID = try teamIdentifier(for: code)
+        let currentTeamID = teamIdentifier(forRunning: currentBundle)
+        guard let stagedTeamID, !stagedTeamID.isEmpty else {
+            throw UpdateCheckError.codeSignatureInvalid("staged bundle has no Team ID")
+        }
+        if let currentTeamID, !currentTeamID.isEmpty, currentTeamID != stagedTeamID {
+            throw UpdateCheckError.codeSignatureInvalid(
+                "Team ID mismatch (current=\(currentTeamID), staged=\(stagedTeamID))"
+            )
+        }
+    }
+
+    private nonisolated static func teamIdentifier(for code: SecStaticCode) throws -> String? {
+        var info: CFDictionary?
+        let status = SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info)
+        guard status == errSecSuccess, let dict = info as? [String: Any] else {
+            throw UpdateCheckError.codeSignatureInvalid("could not read signing info (\(status))")
+        }
+        return dict[kSecCodeInfoTeamIdentifier as String] as? String
+    }
+
+    private nonisolated static func teamIdentifier(forRunning bundle: Bundle) -> String? {
+        guard let url = bundle.bundleURL as CFURL? else { return nil }
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url, [], &staticCode) == errSecSuccess,
+              let code = staticCode else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let dict = info as? [String: Any] else { return nil }
+        return dict[kSecCodeInfoTeamIdentifier as String] as? String
     }
 
     private nonisolated static func detachDiskImage(at mountPoint: URL) {
