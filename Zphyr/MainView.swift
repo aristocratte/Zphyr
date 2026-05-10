@@ -814,8 +814,7 @@ struct AudioTranscriptionView: View {
                 Spacer()
 
                 Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(transcriptionText, forType: .string)
+                    InsertionEngine.writeConcealedToPasteboard(transcriptionText)
                     copied = true
                     Task {
                         try? await Task.sleep(for: .seconds(1.2))
