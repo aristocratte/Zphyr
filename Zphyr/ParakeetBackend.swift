@@ -180,6 +180,23 @@ final class ParakeetBackend: ASRService {
         let type: String?
     }
 
+    /// HF tree API response is attacker-influenced JSON. A malicious / hijacked
+    /// repo could ship `"path": "../../../Library/LaunchAgents/x.plist"` and
+    /// `appendingPathComponent` would happily escape `destDir`. We require:
+    ///   - non-empty
+    ///   - no leading `/` (no absolute paths)
+    ///   - no `..` segment after splitting on `/`
+    ///   - resolved URL must remain a strict child of `destDir`
+    private static func safeResolved(file path: String, in destDir: URL) -> URL? {
+        guard !path.isEmpty, !path.hasPrefix("/") else { return nil }
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !segments.contains("..") else { return nil }
+        let resolved = destDir.appendingPathComponent(path).standardizedFileURL
+        let base = destDir.standardizedFileURL
+        guard resolved.path.hasPrefix(base.path + "/") else { return nil }
+        return resolved
+    }
+
     private func downloadModel() async throws {
         // 1. Fetch file list from HuggingFace Hub API
         let apiURL = URL(string: "https://huggingface.co/api/models/\(Self.modelRepo)/tree/main")!
@@ -205,20 +222,32 @@ final class ParakeetBackend: ASRService {
                 try await Task.sleep(for: .milliseconds(300))
             }
 
-            let dest = destDir.appendingPathComponent(file.path)
+            // Reject any tree entry that would escape destDir (path traversal).
+            guard let dest = Self.safeResolved(file: file.path, in: destDir) else {
+                log.error("[ParakeetASR] refusing unsafe tree entry path")
+                throw ASRBackendError.unsupported("Parakeet: invalid model file path from registry.")
+            }
             let parent = dest.deletingLastPathComponent()
             try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
 
-            // Skip already downloaded files
+            // Skip already downloaded files only when the size matches exactly.
+            // The previous heuristic (>=95%) accepted partial / tampered blobs.
             if let existingSize = (try? dest.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
-               let expectedSize = file.size, Int64(existingSize) >= expectedSize * 95 / 100 {
+               let expectedSize = file.size, Int64(existingSize) == expectedSize {
                 downloadedBytes += file.size ?? 0
                 updateProgress(downloaded: downloadedBytes, total: totalBytes)
                 log.notice("[ParakeetASR] skip (cached): \(file.path, privacy: .public)")
                 continue
             }
 
-            let fileURL = URL(string: "https://huggingface.co/\(Self.modelRepo)/resolve/main/\(file.path)")!
+            // URL-encode the path segments before embedding them in the resolve URL.
+            let encodedPath = file.path
+                .split(separator: "/", omittingEmptySubsequences: false)
+                .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                .joined(separator: "/")
+            guard let fileURL = URL(string: "https://huggingface.co/\(Self.modelRepo)/resolve/main/\(encodedPath)") else {
+                throw ASRBackendError.unsupported("Parakeet: invalid model file URL.")
+            }
             log.notice("[ParakeetASR] downloading: \(file.path, privacy: .public) (\((file.size ?? 0) / 1_024) KB)")
 
             let fileOffsetBeforeDownload = downloadedBytes
