@@ -17,6 +17,7 @@
 //    CommandInterpreter.swift   — spoken command stub
 //
 
+import CryptoKit
 import Foundation
 @preconcurrency import AVFoundation
 import AppKit
@@ -35,12 +36,27 @@ final class DictationEngine {
     private nonisolated static let modelLogger = Logger(subsystem: "com.zphyr.app", category: "ModelLoad")
     private nonisolated static let pipelineLogger = Logger(subsystem: "com.zphyr.app", category: "DictationPipeline")
     private nonisolated static func debugPreview(_ text: String, limit: Int = 320) -> String {
+        #if DEBUG
         let normalized = text
             .replacingOccurrences(of: "\r", with: "")
             .replacingOccurrences(of: "\n", with: "\\n")
         guard normalized.count > limit else { return normalized }
         let remaining = normalized.count - limit
         return "\(normalized.prefix(limit))…(+\(remaining) chars)"
+        #else
+        // Production: never log dictation content. Length + truncated hash
+        // is enough to correlate the same input across log lines without
+        // exposing what the user said. (Logger sites still wrap this in
+        // privacy: .public; the content itself is now redacted at source.)
+        return "redacted len=\(text.count) hash=\(Self.contentHash(text))"
+        #endif
+    }
+
+    nonisolated static func contentHash(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8))
+            .prefix(4)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     // MARK: - Extracted services (Phase 1 refactor)
@@ -1044,7 +1060,7 @@ final class DictationEngine {
         )
         if result.usedDeterministicFallback, !result.rejectedIntroducedTokens.isEmpty {
             Self.pipelineLogger.warning(
-                "[Dictation] integrity fallback triggered; rejected tokens=\(result.rejectedIntroducedTokens.joined(separator: ","), privacy: .public)"
+                "[Dictation] integrity fallback triggered; rejected tokens=\(result.rejectedIntroducedTokens.joined(separator: ","), privacy: .private(mask: .hash))"
             )
         }
         if result.usedDeterministicFallback, llmReturnedText {
